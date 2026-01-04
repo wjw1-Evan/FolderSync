@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.VersionDiffPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:local="clr-namespace:FolderSync.App.Helpers"
+    xmlns:services="clr-namespace:FolderSync.Sync.Services;assembly=FolderSync.Sync"
+    xmlns:vm="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate VersionComparison}"
+    x:DataType="vm:VersionDiffViewModel">
+
+    <ContentPage.Resources>
+        <local:DiffTypeConverter x:Key="DiffTypeConverter" />
+        <local:DiffColorConverter x:Key="DiffColorConverter" />
+    </ContentPage.Resources>
+
+    <Grid Margin="10">
+        <CollectionView ItemsSource="{Binding DiffLines}">
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="services:DiffLine">
+                    <HorizontalStackLayout Padding="5">
+                        <Label
+                            FontAttributes="Bold"
+                            FontSize="12"
+                            HorizontalOptions="Center"
+                            Text="{Binding Type, Converter={StaticResource DiffTypeConverter}}"
+                            TextColor="{Binding Type, Converter={StaticResource DiffColorConverter}}"
+                            WidthRequest="20" />
+                        <Label
+                            FontFamily="Courier New"
+                            FontSize="12"
+                            Text="{Binding Content}"
+                            TextColor="{Binding Type, Converter={StaticResource DiffColorConverter}}" />
+                    </HorizontalStackLayout>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+</ContentPage>

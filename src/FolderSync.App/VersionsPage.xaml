@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.VersionsPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:vm="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate Versions}"
+    x:DataType="vm:VersionsViewModel">
+
+    <ContentPage.Resources>
+        <helpers:NoteColorConverter x:Key="NoteColorConverter" />
+    </ContentPage.Resources>
+
+    <Grid Margin="10" RowDefinitions="Auto,*">
+        <Label
+            Grid.Row="0"
+            FontAttributes="Bold"
+            FontSize="20"
+            Text="{helpers:Translate FileVersions}" />
+
+        <RefreshView
+            Grid.Row="1"
+            Command="{Binding LoadVersionsCommand}"
+            IsRefreshing="{Binding IsRefreshing}">
+            <CollectionView ItemsSource="{Binding Versions}">
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:FileVersionDisplay">
+                        <Border
+                            Margin="0,5"
+                            Padding="10"
+                            StrokeShape="RoundRectangle 8">
+                            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto">
+                                <Label
+                                    Grid.Row="0"
+                                    Grid.Column="0"
+                                    FontAttributes="Bold"
+                                    Text="{Binding FileName}" />
+
+                                <Label
+                                    Grid.Row="0"
+                                    Grid.Column="1"
+                                    FontSize="12"
+                                    Text="{Binding CreatedAt, StringFormat='{0:yyyy-MM-dd HH:mm}'}"
+                                    TextColor="Gray" />
+
+                                <Label
+                                    Grid.Row="1"
+                                    Grid.Column="0"
+                                    Grid.ColumnSpan="2"
+                                    FontSize="11"
+                                    LineBreakMode="MiddleTruncation"
+                                    Text="{Binding FullPath}"
+                                    TextColor="Gray" />
+
+                                <HorizontalStackLayout
+                                    Grid.Row="2"
+                                    Grid.Column="0"
+                                    Spacing="10"
+                                    VerticalOptions="Center">
+                                    <Label
+                                        FontSize="12"
+                                        Text="{Binding Size, StringFormat='{0:N0} bytes'}"
+                                        TextColor="Gray" />
+                                    <Label
+                                        FontAttributes="Italic"
+                                        FontSize="12"
+                                        Text="{Binding Note, TargetNullValue='No note'}"
+                                        TextColor="{Binding Note, Converter={helpers:NoteColorConverter}}" />
+                                </HorizontalStackLayout>
+
+                                <Button
+                                    Grid.Row="2"
+                                    Grid.Column="1"
+                                    Command="{Binding Source={RelativeSource AncestorType={x:Type vm:VersionsViewModel}}, Path=UpdateNoteCommand}"
+                                    CommandParameter="{Binding .}"
+                                    FontSize="11"
+                                    HeightRequest="30"
+                                    Text="{helpers:Translate EditNote}"
+                                    WidthRequest="80" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+                <CollectionView.EmptyView>
+                    <VerticalStackLayout HorizontalOptions="Center" VerticalOptions="Center">
+                        <Label Text="{helpers:Translate NoVersions}" TextColor="Gray" />
+                    </VerticalStackLayout>
+                </CollectionView.EmptyView>
+            </CollectionView>
+        </RefreshView>
+    </Grid>
+</ContentPage>

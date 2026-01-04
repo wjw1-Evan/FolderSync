@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.SettingsPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:models="clr-namespace:FolderSync.Data.Entities;assembly=FolderSync.Data"
+    xmlns:vm="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate Settings}">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20" Spacing="20">
+            <!--  Header / Device Info  -->
+            <Border
+                Padding="15"
+                BackgroundColor="{AppThemeBinding Light=#F3F4F6,
+                                                  Dark=#1F2937}"
+                StrokeShape="RoundRectangle 10">
+                <VerticalStackLayout Spacing="5">
+                    <Label
+                        FontAttributes="Bold"
+                        FontSize="18"
+                        Text="{helpers:Translate DeviceInformation}" />
+                    <HorizontalStackLayout Spacing="10">
+                        <Label FontAttributes="Bold" Text="Name:" />
+                        <Label Text="{Binding DeviceName}" />
+                    </HorizontalStackLayout>
+                    <HorizontalStackLayout Spacing="10">
+                        <Label FontAttributes="Bold" Text="ID:" />
+                        <Label LineBreakMode="TailTruncation" Text="{Binding DeviceId}" />
+                    </HorizontalStackLayout>
+                    <HorizontalStackLayout Spacing="10" VerticalOptions="Center">
+                        <Label
+                            FontAttributes="Bold"
+                            Text="{helpers:Translate Language}"
+                            VerticalOptions="Center" />
+                        <Picker
+                            ItemsSource="{Binding Languages}"
+                            SelectedItem="{Binding SelectedLanguage}"
+                            WidthRequest="150" />
+                    </HorizontalStackLayout>
+
+                    <HorizontalStackLayout Spacing="10" VerticalOptions="Center">
+                        <Label
+                            FontAttributes="Bold"
+                            Text="{helpers:Translate LaunchOnStartup}"
+                            VerticalOptions="Center" />
+                        <Switch IsToggled="{Binding IsLaunchOnStartupEnabled}" />
+                    </HorizontalStackLayout>
+
+                    <Button
+                        Margin="0,10,0,0"
+                        Command="{Binding ManageAppLockCommand}"
+                        HorizontalOptions="Start"
+                        Text="{helpers:Translate ManageAppLock}" />
+                </VerticalStackLayout>
+            </Border>
+
+            <Label
+                Margin="0,10,0,0"
+                FontAttributes="Bold"
+                FontSize="20"
+                Text="{helpers:Translate SyncConfigurations}" />
+
+            <CollectionView ItemsSource="{Binding SyncConfigs}">
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="models:SyncConfiguration">
+                        <Border
+                            Margin="0,5"
+                            Padding="15"
+                            BackgroundColor="{AppThemeBinding Light=White,
+                                                              Dark=#111827}"
+                            StrokeShape="RoundRectangle 10">
+                            <VerticalStackLayout Spacing="10">
+                                <HorizontalStackLayout Spacing="10">
+                                    <Label
+                                        FontAttributes="Bold"
+                                        Text="Path:"
+                                        VerticalOptions="Center" />
+                                    <Label
+                                        LineBreakMode="MiddleTruncation"
+                                        Text="{Binding LocalPath}"
+                                        VerticalOptions="Center" />
+                                </HorizontalStackLayout>
+
+                                <HorizontalStackLayout Spacing="10">
+                                    <Label Text="Enabled:" VerticalOptions="Center" />
+                                    <Switch IsToggled="{Binding SyncEnabled}" />
+                                </HorizontalStackLayout>
+
+                                <Label FontAttributes="Bold" Text="Filter Rules (JSON):" />
+                                <Editor
+                                    AutoSize="TextChanges"
+                                    BackgroundColor="{AppThemeBinding Light=#F9FAFB,
+                                                                      Dark=#374151}"
+                                    HeightRequest="100"
+                                    Text="{Binding FilterRules}" />
+
+                                <Button
+                                    Command="{Binding Source={RelativeSource AncestorType={x:Type vm:SettingsViewModel}}, Path=SaveConfigCommand}"
+                                    CommandParameter="{Binding .}"
+                                    HorizontalOptions="End"
+                                    Text="{helpers:Translate SaveChanges}" />
+                            </VerticalStackLayout>
+                        </Border>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+                <CollectionView.EmptyView>
+                    <Label
+                        Margin="20"
+                        HorizontalOptions="Center"
+                        Text="No sync folders configured yet." />
+                </CollectionView.EmptyView>
+            </CollectionView>
+
+        </VerticalStackLayout>
+    </ScrollView>
+</ContentPage>

@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.ConflictsPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:models="clr-namespace:FolderSync.Data.Entities;assembly=FolderSync.Data"
+    xmlns:vm="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate FileConflicts}">
+
+    <Grid RowDefinitions="Auto,*">
+        <Label
+            Grid.Row="0"
+            Margin="20,10"
+            FontAttributes="Bold"
+            FontSize="18"
+            Text="{helpers:Translate ConflictsAlert}" />
+
+        <CollectionView
+            Grid.Row="1"
+            Margin="15"
+            ItemsSource="{Binding Conflicts}">
+            <CollectionView.EmptyView>
+                <Label
+                    HorizontalOptions="Center"
+                    Text="{helpers:Translate NoConflicts}"
+                    VerticalOptions="Center" />
+            </CollectionView.EmptyView>
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="models:SyncConflict">
+                    <Border
+                        Margin="0,5"
+                        Padding="15"
+                        BackgroundColor="{AppThemeBinding Light=White,
+                                                          Dark=#1F2937}"
+                        StrokeShape="RoundRectangle 10">
+                        <VerticalStackLayout Spacing="8">
+                            <Label
+                                FontAttributes="Bold"
+                                FontSize="16"
+                                Text="{Binding RelativePath}" />
+
+                            <Grid ColumnDefinitions="*,*">
+                                <VerticalStackLayout Grid.Column="0">
+                                    <Label
+                                        FontSize="10"
+                                        Text="Local Hash (Conflict)"
+                                        TextColor="Gray" />
+                                    <Label
+                                        FontSize="10"
+                                        LineBreakMode="MiddleTruncation"
+                                        Text="{Binding LocalHash}" />
+                                </VerticalStackLayout>
+                                <VerticalStackLayout Grid.Column="1">
+                                    <Label
+                                        FontSize="10"
+                                        Text="Remote Hash (Conflict)"
+                                        TextColor="Gray" />
+                                    <Label
+                                        FontSize="10"
+                                        LineBreakMode="MiddleTruncation"
+                                        Text="{Binding RemoteHash}" />
+                                </VerticalStackLayout>
+                            </Grid>
+
+                            <Label FontSize="12" Text="{Binding ConflictTime, StringFormat='At: {0:g}'}" />
+                            <Label
+                                FontAttributes="Italic"
+                                FontSize="12"
+                                Text="{Binding ResolvedFilePath, StringFormat='Saved as: {0}'}"
+                                TextColor="Orange" />
+
+                            <Button
+                                Command="{Binding Source={RelativeSource AncestorType={x:Type vm:ConflictsViewModel}}, Path=ResolveConflictCommand}"
+                                CommandParameter="{Binding .}"
+                                HeightRequest="40"
+                                HorizontalOptions="End"
+                                Text="{helpers:Translate Dismiss}" />
+                        </VerticalStackLayout>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+</ContentPage>

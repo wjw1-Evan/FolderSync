@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.PeersPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:models="clr-namespace:FolderSync.Data.Entities;assembly=FolderSync.Data"
+    xmlns:vm="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate Devices}"
+    x:DataType="vm:PeersViewModel">
+
+    <ContentPage.Resources>
+        <helpers:OnlineColorConverter x:Key="OnlineColorConverter" />
+        <helpers:OnlineTextConverter x:Key="OnlineTextConverter" />
+        <helpers:TrustTextConverter x:Key="TrustTextConverter" />
+    </ContentPage.Resources>
+
+    <Grid Margin="20" RowDefinitions="Auto,*">
+        <Label
+            Grid.Row="0"
+            FontAttributes="Bold"
+            FontSize="20"
+            Text="{helpers:Translate ManageDevices}" />
+
+        <CollectionView
+            Grid.Row="1"
+            Margin="0,15,0,0"
+            ItemsSource="{Binding Peers}">
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="models:PeerDevice">
+                    <Border
+                        Margin="0,5"
+                        Padding="15"
+                        StrokeShape="RoundRectangle 10">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <VerticalStackLayout Grid.Column="0">
+                                <Label FontAttributes="Bold" Text="{Binding DeviceName}" />
+                                <Label
+                                    FontSize="11"
+                                    Text="{Binding DeviceId}"
+                                    TextColor="Gray" />
+                                <HorizontalStackLayout Spacing="5">
+                                    <BoxView
+                                        CornerRadius="4"
+                                        HeightRequest="8"
+                                        VerticalOptions="Center"
+                                        WidthRequest="8"
+                                        Color="{Binding IsOnline, Converter={StaticResource OnlineColorConverter}}" />
+                                    <Label
+                                        FontSize="11"
+                                        Text="{Binding IsOnline, Converter={StaticResource OnlineTextConverter}}"
+                                        TextColor="Gray" />
+                                </HorizontalStackLayout>
+                            </VerticalStackLayout>
+
+                            <HorizontalStackLayout
+                                Grid.Column="1"
+                                Spacing="10"
+                                VerticalOptions="Center">
+                                <VerticalStackLayout Spacing="2">
+                                    <Label
+                                        FontSize="10"
+                                        HorizontalOptions="Center"
+                                        Text="{helpers:Translate Access}"
+                                        TextColor="Gray" />
+                                    <Picker
+                                        FontSize="10"
+                                        HeightRequest="35"
+                                        ItemsSource="{Binding Source={RelativeSource AncestorType={x:Type vm:PeersViewModel}}, Path=AccessLevels}"
+                                        SelectedItem="{Binding AccessLevel}">
+                                        <Picker.Behaviors>
+                                            <helpers:PickerCommandBehavior Command="{Binding Source={RelativeSource AncestorType={x:Type vm:PeersViewModel}}, Path=UpdateAccessLevelCommand}" CommandParameter="{Binding .}" />
+                                        </Picker.Behaviors>
+                                    </Picker>
+                                </VerticalStackLayout>
+
+                                <Button
+                                    Command="{Binding Source={RelativeSource AncestorType={x:Type vm:PeersViewModel}}, Path=ToggleTrustCommand}"
+                                    CommandParameter="{Binding .}"
+                                    FontSize="10"
+                                    HeightRequest="35"
+                                    Text="{Binding IsTrusted, Converter={StaticResource TrustTextConverter}}"
+                                    WidthRequest="100" />
+                            </HorizontalStackLayout>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+</ContentPage>

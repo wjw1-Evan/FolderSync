@@ -1,0 +1,106 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="FolderSync.App.MainPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:helpers="clr-namespace:FolderSync.App.Helpers"
+    xmlns:viewmodels="clr-namespace:FolderSync.App.ViewModels"
+    Title="{helpers:Translate AppTitle}"
+    x:DataType="viewmodels:MainViewModel">
+
+    <Grid Padding="20" RowDefinitions="Auto, *, Auto">
+        <!--  Header  -->
+        <VerticalStackLayout
+            Grid.Row="0"
+            Margin="0,0,0,20"
+            Spacing="10">
+            <Label
+                FontAttributes="Bold"
+                FontSize="24"
+                Text="{helpers:Translate SyncFolders}" />
+            <Button
+                BackgroundColor="{StaticResource Primary}"
+                Clicked="OnAddFolderClicked"
+                CornerRadius="8"
+                Text="{helpers:Translate AddFolder}"
+                TextColor="White" />
+        </VerticalStackLayout>
+
+        <!--  Content  -->
+        <Grid
+            Grid.Row="1"
+            ColumnDefinitions="*, 300"
+            ColumnSpacing="20">
+            <!--  Folder List  -->
+            <CollectionView Grid.Column="0" ItemsSource="{Binding SyncFolders}">
+                <CollectionView.ItemTemplate>
+                    <DataTemplate>
+                        <Frame
+                            Margin="0,5"
+                            Padding="15"
+                            BorderColor="{StaticResource Primary}"
+                            CornerRadius="10">
+                            <HorizontalStackLayout Spacing="15">
+                                <Image
+                                    HeightRequest="40"
+                                    Source="dotnet_bot.png"
+                                    WidthRequest="40" />
+                                <VerticalStackLayout VerticalOptions="Center">
+                                    <Label FontAttributes="Bold" Text="{Binding LocalPath}" />
+                                    <Label
+                                        FontSize="12"
+                                        IsVisible="{Binding SyncEnabled}"
+                                        Text="{helpers:Translate SyncEnabled}" />
+                                </VerticalStackLayout>
+                            </HorizontalStackLayout>
+                        </Frame>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+            </CollectionView>
+
+            <!--  Peer List  -->
+            <VerticalStackLayout Grid.Column="1" Spacing="10">
+                <Label
+                    FontAttributes="Bold"
+                    FontSize="18"
+                    Text="{helpers:Translate DiscoveredPeers}" />
+                <CollectionView ItemsSource="{Binding DiscoveredPeers}">
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate>
+                            <Frame
+                                Margin="0,2"
+                                Padding="10"
+                                BackgroundColor="#F0F0F0"
+                                CornerRadius="5"
+                                HasShadow="False">
+                                <VerticalStackLayout>
+                                    <Label FontAttributes="Bold" Text="{Binding DeviceName}" />
+                                    <Label
+                                        FontSize="11"
+                                        Text="{Binding IpAddress}"
+                                        TextColor="Gray" />
+                                </VerticalStackLayout>
+                            </Frame>
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+                </CollectionView>
+            </VerticalStackLayout>
+        </Grid>
+
+        <!--  Footer / Status  -->
+        <Border
+            Grid.Row="2"
+            Margin="0,10,0,0"
+            Padding="10"
+            StrokeShape="RoundRectangle 8">
+            <VerticalStackLayout>
+                <Label FontSize="12" Text="{Binding StatusMessage}" />
+                <Label
+                    FontAttributes="Bold"
+                    FontSize="12"
+                    Text="{Binding TransferProgress}" />
+            </VerticalStackLayout>
+        </Border>
+    </Grid>
+
+</ContentPage>

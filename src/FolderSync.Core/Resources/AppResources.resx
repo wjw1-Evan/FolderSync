@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="AppTitle" xml:space="preserve">
+    <value>FolderSync</value>
+  </data>
+  <data name="AddFolder" xml:space="preserve">
+    <value>Add Folder</value>
+  </data>
+  <data name="SyncFolders" xml:space="preserve">
+    <value>Sync Folders</value>
+  </data>
+  <data name="DiscoveredPeers" xml:space="preserve">
+    <value>Discovered Peers</value>
+  </data>
+  <data name="Settings" xml:space="preserve">
+    <value>Settings</value>
+  </data>
+  <data name="History" xml:space="preserve">
+    <value>History</value>
+  </data>
+  <data name="Conflicts" xml:space="preserve">
+    <value>Conflicts</value>
+  </data>
+  <data name="SyncEnabled" xml:space="preserve">
+    <value>Syncing Enabled</value>
+  </data>
+  <data name="DeviceInformation" xml:space="preserve">
+    <value>Device Information</value>
+  </data>
+  <data name="SyncConfigurations" xml:space="preserve">
+    <value>Sync Configurations</value>
+  </data>
+  <data name="SaveChanges" xml:space="preserve">
+    <value>Save Changes</value>
+  </data>
+  <data name="ActivityLog" xml:space="preserve">
+    <value>Activity Log</value>
+  </data>
+  <data name="RecentActivity" xml:space="preserve">
+    <value>Recent Activity</value>
+  </data>
+  <data name="Refresh" xml:space="preserve">
+    <value>Refresh</value>
+  </data>
+  <data name="NoActivity" xml:space="preserve">
+    <value>No activity recorded yet.</value>
+  </data>
+  <data name="FileConflicts" xml:space="preserve">
+    <value>File Conflicts</value>
+  </data>
+  <data name="ConflictsAlert" xml:space="preserve">
+    <value>Conflicts requiring attention</value>
+  </data>
+  <data name="NoConflicts" xml:space="preserve">
+    <value>No pending conflicts found.</value>
+  </data>
+  <data name="Dismiss" xml:space="preserve">
+    <value>Dismiss</value>
+  </data>
+  <data name="Home" xml:space="preserve">
+    <value>Home</value>
+  </data>
+  <data name="VersionComparison" xml:space="preserve">
+    <value>Version Comparison</value>
+  </data>
+  <data name="Devices" xml:space="preserve">
+    <value>Devices</value>
+  </data>
+  <data name="ManageDevices" xml:space="preserve">
+    <value>Manage Devices</value>
+  </data>
+  <data name="Versions" xml:space="preserve">
+    <value>Versions</value>
+  </data>
+  <data name="FileVersions" xml:space="preserve">
+    <value>File Versions</value>
+  </data>
+  <data name="EditNote" xml:space="preserve">
+    <value>Edit Note</value>
+  </data>
+  <data name="NoVersions" xml:space="preserve">
+    <value>No archived versions found.</value>
+  </data>
+  <data name="Access" xml:space="preserve">
+    <value>Access</value>
+  </data>
+  <data name="ManageAppLock" xml:space="preserve">
+    <value>Manage App Lock</value>
+  </data>
+  <data name="Language" xml:space="preserve">
+    <value>Language</value>
+  </data>
+  <data name="LaunchOnStartup" xml:space="preserve">
+    <value>Launch on Startup</value>
+  </data>
+  <data name="ManageDevices" xml:space="preserve">
+    <value>Manage Devices</value>
+  </data>
+</root>

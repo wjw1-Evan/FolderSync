@@ -67,4 +67,18 @@
 	  <ProjectReference Include="..\FolderSync.Sync\FolderSync.Sync.csproj" />
 	</ItemGroup>
 
+	<!-- 为 Roslyn BuildHost 的 runtime JSON 文件显式设置 PublishFolderType，避免 MacCatalyst 打包阶段的警告 -->
+	<Target Name="SetRoslynBuildHostPublishFolderType" BeforeTargets="ComputeBundleLocation">
+	  <ItemGroup>
+	    <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+	                          Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.deps.json'">
+	      <PublishFolderType>None</PublishFolderType>
+	    </ResolvedFileToPublish>
+	    <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+	                          Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.runtimeconfig.json'">
+	      <PublishFolderType>None</PublishFolderType>
+	    </ResolvedFileToPublish>
+	  </ItemGroup>
+	</Target>
+
 </Project>

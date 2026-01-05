@@ -23,7 +23,7 @@ public partial class MainPage : ContentPage
     {
         // For demo purposes, we can use a hardcoded path or ask the user
         // In a real app, use FolderPicker if on supported platform
-        string result = await DisplayActionSheet("Select Type", "Cancel", null, "Pictures", "Documents", "Downloads");
+        var result = await DisplayActionSheetAsync("Select Type", "Cancel", null, "Pictures", "Documents", "Downloads");
         
         if (result != "Cancel")
         {

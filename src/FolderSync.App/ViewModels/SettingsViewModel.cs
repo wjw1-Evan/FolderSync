@@ -176,36 +176,42 @@ public class SettingsViewModel : BaseViewModel
     {
         bool isCurrentlyEnabled = await _authService.IsAuthenticationEnabledAsync();
 
+        var page = Application.Current?.Windows.FirstOrDefault()?.Page;
+        if (page == null) return;
+
         if (isCurrentlyEnabled)
         {
             // Remove Lock Flow
-            string pin = await Application.Current.MainPage.DisplayPromptAsync("Remove App Lock", "Enter current PIN to remove lock:");
+            var pin = await page.DisplayPromptAsync("Remove App Lock", "Enter current PIN to remove lock:");
             if (string.IsNullOrEmpty(pin)) return;
 
             if (await _authService.VerifyPinAsync(pin))
             {
                 await _authService.RemovePinAsync();
                 IsAppLockEnabled = false;
-                await Application.Current.MainPage.DisplayAlert("Success", "App Lock removed.", "OK");
+                await page.DisplayAlertAsync("Success", "App Lock removed.", "OK");
             }
             else
             {
-                await Application.Current.MainPage.DisplayAlert("Error", "Incorrect PIN.", "OK");
+                await page.DisplayAlertAsync("Error", "Incorrect PIN.", "OK");
             }
         }
         else
         {
             // Set Lock Flow
-            string pin = await Application.Current.MainPage.DisplayPromptAsync("Set App Lock", "Enter new PIN (4-6 digits):", maxLength: 6, keyboard: Keyboard.Numeric);
+            var pin = await page.DisplayPromptAsync("Set App Lock", "Enter new PIN (4-6 digits):", maxLength: 6, keyboard: Keyboard.Numeric);
             if (string.IsNullOrEmpty(pin) || pin.Length < 4)
             {
-                if (pin != null) await Application.Current.MainPage.DisplayAlert("Error", "PIN too short.", "OK");
+                if (pin != null)
+                {
+                    await page.DisplayAlertAsync("Error", "PIN too short.", "OK");
+                }
                 return;
             }
 
             await _authService.SetPinAsync(pin);
             IsAppLockEnabled = true;
-            await Application.Current.MainPage.DisplayAlert("Success", "App Lock enabled.", "OK");
+            await page.DisplayAlertAsync("Success", "App Lock enabled.", "OK");
         }
     }
 }

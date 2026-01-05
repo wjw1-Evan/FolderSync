@@ -7,7 +7,8 @@
 
   <ItemGroup>
     <PackageReference Include="NetMQ" Version="4.0.2.2" />
-    <PackageReference Include="Open.NAT" Version="2.1.0" />
+    <!-- Open.NAT 已归档，改用维护中的 Open.Nat.V2（.NET Standard 2.0，兼容 .NET 10） -->
+    <PackageReference Include="Open.Nat.V2" Version="3.1.1" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -83,7 +83,10 @@ public class VersionsViewModel : BaseViewModel
     {
         if (vm == null) return;
 
-        string result = await Application.Current.MainPage.DisplayPromptAsync(
+        var page = Application.Current?.Windows.FirstOrDefault()?.Page;
+        if (page == null) return;
+
+        var result = await page.DisplayPromptAsync(
             "Update Note", 
             $"Enter note for version {vm.VersionNumber}:", 
             initialValue: vm.Note);

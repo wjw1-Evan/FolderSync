@@ -4,6 +4,8 @@
 
 本项目旨在开发一款基于macOS平台的客户端程序，采用Swift language编写，通过P2P（点对点）技术实现多台电脑之间文件夹的自动同步，全程无需依赖中央服务器。程序具备设备自动发现、实时文件监控、基于内容块的增量同步、端到端加密等核心功能，兼顾同步效率、数据安全与用户体验，适用于家庭、小型团队等场景下的多设备文件协同管理。
 
+> 运行提示：局域网自动发现依赖 mDNS，现默认开启。若在特殊网络环境遇到崩溃或不希望广播，可设置环境变量 `FOLDERSYNC_ENABLE_MDNS=0` 禁用；需要发现时，请确保各客户端均开启 mDNS 并连接同一子网。
+
 核心目标：打破服务器依赖，实现设备间直连同步；支持多设备同时在线协作；保证文件同步的实时性、一致性与安全性；提供简洁直观的macOS原生GUI交互。
 
 # 二、核心技术选型
@@ -82,13 +84,13 @@
 ```swift
 class P2PNode {
     private var host: Libp2pHost
-    
+
     func start() async throws {
         let config = Libp2pConfig()
             .with(transport: .tcp, .quic)
             .with(discovery: .mdns, .dht)
             .with(security: .noise)
-        
+
         self.host = try await Libp2p.create(config)
         await host.start()
     }
@@ -157,16 +159,16 @@ class PairingManager {
 // 基于 Noise XX 模式的自动握手 (伪代码)
 func initiateSecureHandshake(remotePeer: PeerID) async throws -> SecureSession {
     let noiseConfig = Noise.Config(
-        pattern: .XX, 
+        pattern: .XX,
         prologue: "FolderSync-v1".data(using: .utf8)!,
         localKey: Keychain.loadPrivateKey()
     )
-    
+
     let handshake = try Noise.Handshake(noiseConfig)
     // 1. 发送第一个握手包 (e)
     // 2. 接收响应并处理 (e, ee, s, es)
     // 3. 发送确认包 (s, se)
-    
+
     let session = try handshake.finalize()
     // 校验 remotePeer.publicKey 是否与握手获取的 s 一致
     guard session.remotePublicKey == remotePeer.publicKey else {
@@ -189,7 +191,7 @@ struct SyncFolder: Identifiable, Codable {
 
 class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
-    
+
     func addFolder(url: URL, syncID: String) {
         // 存储至 SQLite 并启动监听
     }

@@ -9,6 +9,18 @@ public class P2PNode {
 
     public init() {}
 
+    /// Determine whether mDNS is allowed based on the provided environment.
+    /// Default is allowed unless explicitly turned off.
+    static func isMdnsAllowed(env: [String: String]) -> Bool {
+        let mdnsEnv = env["FOLDERSYNC_ENABLE_MDNS"]?.lowercased()
+        switch mdnsEnv {
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return true
+        }
+    }
+
     /// Check whether the given address matches any enumerated network device.
     /// LibP2PMDNS will crash if it cannot resolve the address back to an interface,
     /// so we preflight this before calling into the library.
@@ -29,19 +41,20 @@ public class P2PNode {
 
         // Enable mDNS for automatic local network peer discovery
         let env = ProcessInfo.processInfo.environment
-        let mdnsEnv = env["FOLDERSYNC_ENABLE_MDNS"]?.lowercased()
-        // mDNS is opt-in because the upstream library can crash on some interfaces.
-        let mdnsEnabledByEnv = (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
+        let mdnsAllowed = Self.isMdnsAllowed(env: env)
 
-        if mdnsEnabledByEnv {
-            // Find a valid interface to bind mDNS to
-            let devices = try? NIOCore.System.enumerateDevices()
-            let validInterface = devices?.first(where: { device in
-                guard let address = device.address else { return false }
-                let name = device.name
-                // Check for WiFi/Ethernet and IPv4
-                return (name.starts(with: "en") || name.starts(with: "wl")) && address.protocol == .inet
-            })
+        if mdnsAllowed {
+            // Find a valid interface to bind mDNS to (prefer IPv4, non-loopback)
+            let devices = (try? NIOCore.System.enumerateDevices()) ?? []
+            let validInterface =
+                devices.first(where: { device in
+                    guard let address = device.address else { return false }
+                    return address.protocol == .inet && device.name != "lo0"
+                })
+                ?? devices.first(where: { device in
+                    guard let address = device.address else { return false }
+                    return address.protocol == .inet6 && device.name != "lo0"
+                })
 
             if let device = validInterface, let address = device.address {
                 // LibP2PMDNS crashes if the interface isn't resolvable. Double-check before binding.
@@ -49,17 +62,23 @@ public class P2PNode {
                     print("[P2PNode] Binding mDNS to interface: \(device.name) (\(address))")
                     app.discovery.use(.mdns(interfaceAddress: address))
                 } else {
-                    print("[P2PNode] Warning: Selected interface \(device.name) is not usable for mDNS. Discovery disabled for safety.")
+                    print(
+                        "[P2PNode] Warning: Selected interface \(device.name) is not usable for mDNS. Discovery disabled for safety."
+                    )
                 }
             } else {
-                print("[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled.")
+                print(
+                    "[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled."
+                )
             }
         } else {
-            print("[P2PNode] mDNS discovery is disabled. Set FOLDERSYNC_ENABLE_MDNS=1 to opt-in.")
+            print(
+                "[P2PNode] mDNS discovery is disabled. Set FOLDERSYNC_ENABLE_MDNS=0/false to opt-out."
+            )
         }
 
         // Register for peer discovery events
-        app.discovery.onPeerDiscovered(self) { [weak self] (peerInfo:PeerInfo) in
+        app.discovery.onPeerDiscovered(self) { [weak self] (peerInfo: PeerInfo) in
             print("Found peer: \(peerInfo.peer.b58String)")
             self?.onPeerDiscovered?(peerInfo.peer)
         }
@@ -74,7 +93,7 @@ public class P2PNode {
         }
 
         // Give the node a moment to initialize the server and update listenAddresses
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+        try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s
 
         print("P2P Node initializing with PeerID: \(app.peerID.b58String)")
         print("Ready for connections. Listening on: \(app.listenAddresses)")
@@ -99,5 +118,3 @@ public class P2PNode {
         app?.listenAddresses.map { $0.description } ?? []
     }
 }
-
-

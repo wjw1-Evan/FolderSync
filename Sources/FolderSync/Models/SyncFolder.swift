@@ -23,6 +23,7 @@ public struct SyncFolder: Identifiable, Codable {
     public var lastSyncMessage: String?
     public var lastSyncedAt: Date?
     public var peerCount: Int = 0
+    public var fileCount: Int? = 0
     
     public init(id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay, status: SyncStatus = .synced) {
         self.id = id

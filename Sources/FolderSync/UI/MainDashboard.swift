@@ -75,6 +75,10 @@ struct FolderRow: View {
                 VStack(alignment: .trailing, spacing: 4) {
                     StatusBadge(status: folder.status)
                     
+                    Text("\(folder.fileCount ?? 0) 个文件")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    
                     if folder.peerCount > 0 {
                         Button {
                             showingPeerList = true
@@ -92,11 +96,7 @@ struct FolderRow: View {
                         }
                     }
                     
-                    if let lastSynced = folder.lastSyncedAt {
-                        Text("上次同步: \(lastSynced.formatted(.relative(presentation: .named)))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+
                 }
             }
             

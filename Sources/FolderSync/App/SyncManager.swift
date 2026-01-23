@@ -279,7 +279,14 @@ public class SyncManager: ObservableObject {
         
         Task {
             // 1. Calculate the current state
-            let (mst, _) = await calculateFullState(for: folder.localPath)
+            let (mst, metadata) = await calculateFullState(for: folder.localPath)
+            
+            await MainActor.run {
+                if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
+                    self.folders[index].fileCount = metadata.count
+                }
+            }
+            
             print("Folder \(folder.localPath.lastPathComponent) hash: \(mst.rootHash ?? "empty")")
             
             // 2. Try sync with all peers

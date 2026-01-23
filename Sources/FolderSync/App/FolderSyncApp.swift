@@ -46,9 +46,15 @@ struct FolderSyncApp: App {
 
 class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
+    @Published var peers: [String] = [] // PeerIDs
+    let p2pNode = P2PNode()
     
     init() {
         // Load from storage
         self.folders = (try? StorageManager.shared.getAllFolders()) ?? []
+        
+        Task {
+            try? await p2pNode.start()
+        }
     }
 }

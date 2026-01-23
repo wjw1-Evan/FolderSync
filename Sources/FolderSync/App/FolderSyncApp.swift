@@ -8,6 +8,37 @@ struct FolderSyncApp: App {
     
     @Environment(\.openWindow) private var openWindow
     
+    init() {
+        checkSingleInstance()
+    }
+    
+    private func checkSingleInstance() {
+        let currentApp = NSRunningApplication.current
+        let runningApps = NSWorkspace.shared.runningApplications
+        
+        // Get the name of this executable
+        let executableName = Bundle.main.executableURL?.lastPathComponent ?? "FolderSync"
+        
+        let otherInstances = runningApps.filter { app in
+            // Try to match by bundle identifier first
+            if let bundleID = Bundle.main.bundleIdentifier, 
+               bundleID != "com.apple.dt.Xcode",
+               app.bundleIdentifier == bundleID {
+                return app.processIdentifier != currentApp.processIdentifier
+            }
+            
+            // Fallback to name check (localizedName or executable name)
+            let isSameName = app.localizedName == executableName || app.localizedName == "FolderSync"
+            return isSameName && app.processIdentifier != currentApp.processIdentifier
+        }
+        
+        if let otherInstance = otherInstances.first {
+            print("Detected another instance of FolderSync (PID: \(otherInstance.processIdentifier)).")
+            otherInstance.activate(options: .activateIgnoringOtherApps)
+            exit(0)
+        }
+    }
+    
     var body: some Scene {
         WindowGroup(id: "main") {
             MainDashboard()

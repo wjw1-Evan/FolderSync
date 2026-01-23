@@ -19,7 +19,7 @@ struct FolderSyncApp: App {
             if app != currentApp {
                 // Already running
                 print("App is already running. activating existing instance.")
-                app.activate(options: [.activateIgnoringOtherApps])
+                app.activate()
                 
                 // Terminate current instance
                 // We can't use NSApplication.shared.terminate here as it might not be ready,
@@ -42,7 +42,7 @@ struct FolderSyncApp: App {
             }
             Divider()
             Toggle("开机自动启动", isOn: $launchAtLogin)
-                .onChange(of: launchAtLogin) { newValue in
+                .onChange(of: launchAtLogin) { oldValue, newValue in
                     toggleLaunchAtLogin(newValue)
                 }
             Button("退出") {

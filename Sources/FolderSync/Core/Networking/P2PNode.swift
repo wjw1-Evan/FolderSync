@@ -28,13 +28,16 @@ public class P2PNode {
             // Find a valid interface to bind mDNS to
             let devices = try? NIOCore.System.enumerateDevices()
             let validInterface = devices?.first(where: { device in
-                guard let name = device.name, let address = device.address else { return false }
+                guard let address = device.address else { return false }
+                let name = device.name
                 // Check for WiFi/Ethernet and IPv4
                 return (name.starts(with: "en") || name.starts(with: "wl")) && address.protocol == .inet
             })
 
             if let device = validInterface, let address = device.address {
-                print("[P2PNode] Binding mDNS to interface: \(device.name ?? "unknown") (\(address))")
+                print("[P2PNode] Binding mDNS to interface: \(device.name) (\(address))")
+                // Note: LibP2PMDNS may crash on some configurations, but we can't catch it
+                // as the crash happens in an internal callback
                 app.discovery.use(.mdns(interfaceAddress: address))
             } else {
                 print("[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled.")

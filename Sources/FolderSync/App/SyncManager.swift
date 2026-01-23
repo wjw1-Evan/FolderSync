@@ -3,8 +3,8 @@ import Combine
 import Crypto
 import LibP2P
 import LibP2PCore
-import LibP2PCore
 
+@MainActor
 public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
     @Published var peers: [PeerID] = [] // PeerIDs
@@ -17,15 +17,16 @@ public class SyncManager: ObservableObject {
         // Load from storage
         self.folders = (try? StorageManager.shared.getAllFolders()) ?? []
         
-        Task {
+        Task { @MainActor in
             p2pNode.onPeerDiscovered = { [weak self] peer in
-                DispatchQueue.main.async {
-                    if self?.peers.contains(where: { $0.b58String == peer.b58String }) == false {
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    if !self.peers.contains(where: { $0.b58String == peer.b58String }) {
                         print("SyncManager: New peer discovered - \(peer.b58String)")
-                        self?.peers.append(peer)
+                        self.peers.append(peer)
                         // Trigger sync when peer is found
-                        for folder in self?.folders ?? [] {
-                            self?.syncWithPeer(peer: peer, folder: folder)
+                        for folder in self.folders {
+                            self.syncWithPeer(peer: peer, folder: folder)
                         }
                     }
                 }
@@ -120,21 +121,24 @@ public class SyncManager: ObservableObject {
                 let syncReq = try req.decode(SyncRequest.self)
                 switch syncReq {
                 case .getMST(let syncID):
-                    if let folder = self.folders.first(where: { $0.syncID == syncID }) {
+                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+                    if let folder = folder {
                         let (mst, _) = await self.calculateFullState(for: folder.localPath)
                         return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
                     }
                     return .error("Folder not found")
                     
                 case .getFiles(let syncID):
-                    if let folder = self.folders.first(where: { $0.syncID == syncID }) {
+                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+                    if let folder = folder {
                         let (_, metadata) = await self.calculateFullState(for: folder.localPath)
                         return .files(syncID: syncID, entries: metadata)
                     }
                     return .error("Folder not found")
                     
                 case .getFileData(let syncID, let relativePath):
-                    if let folder = self.folders.first(where: { $0.syncID == syncID }) {
+                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+                    if let folder = folder {
                         let fileURL = folder.localPath.appendingPathComponent(relativePath)
                         let data = try Data(contentsOf: fileURL)
                         return .fileData(syncID: syncID, path: relativePath, data: data)
@@ -162,12 +166,12 @@ public class SyncManager: ObservableObject {
                 let rootRes: SyncResponse = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer)
                 
                 if case .error = rootRes {
-                    await removeFolderPeer(folder.syncID, peerID: peerID)
+                    removeFolderPeer(folder.syncID, peerID: peerID)
                     return
                 }
                 
                 // Peer confirmed to have this folder
-                await addFolderPeer(folder.syncID, peerID: peerID)
+                addFolderPeer(folder.syncID, peerID: peerID)
                 
                 guard case .mstRoot(_, let remoteHash) = rootRes else { return }
                 
@@ -229,7 +233,7 @@ public class SyncManager: ObservableObject {
                     self.updateFolderStatus(folder.id, status: .synced, message: "Sync complete", progress: 1.0)
                 }
             } catch {
-                await removeFolderPeer(folder.syncID, peerID: peerID)
+                removeFolderPeer(folder.syncID, peerID: peerID)
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .error, message: error.localizedDescription)
                 }

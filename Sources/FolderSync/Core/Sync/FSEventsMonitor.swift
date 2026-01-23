@@ -35,7 +35,7 @@ public class FSEventsMonitor {
         )
         
         guard let stream = stream else { return }
-        FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
         FSEventStreamStart(stream)
     }
     

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import LibP2P
 import LibP2PMDNS
+import NIOCore
 
 public class P2PNode {
     public var app: Application?
@@ -24,9 +25,9 @@ public class P2PNode {
         let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
-            if let interface = P2PNode.getFirstActiveIPv4Interface() {
-                print("[P2PNode] Enabling mDNS on interface: \(interface)")
-                app.discovery.use(.mdns)
+            if let addr = P2PNode.getFirstActiveIPv4Address() {
+                print("[P2PNode] Enabling mDNS on address: \(addr)")
+                app.discovery.use(.mdns(interfaceAddress: addr))
             } else {
                 print("[P2PNode] Skipping mDNS: No active IPv4 interface found")
             }
@@ -76,8 +77,8 @@ public class P2PNode {
 
 // MARK: - Network Interface Helpers
 extension P2PNode {
-    /// Returns the name of the first found active IPv4 interface (non-loopback).
-    private static func getFirstActiveIPv4Interface() -> String? {
+    /// Returns the SocketAddress of the first found active IPv4 interface (non-loopback).
+    private static func getFirstActiveIPv4Address() -> SocketAddress? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>? = nil
         guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
         defer { freeifaddrs(ifaddrPtr) }
@@ -85,15 +86,19 @@ extension P2PNode {
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
         while let current = ptr?.pointee {
             defer { ptr = current.ifa_next }
-            guard let ifaNameC = current.ifa_name else { continue }
-            let ifaName = String(cString: ifaNameC)
             
             let flags = Int32(current.ifa_flags)
             // Skip loopback and interfaces that are down
             guard (flags & IFF_LOOPBACK) == 0, (flags & IFF_UP) != 0 else { continue }
             
             if let addr = current.ifa_addr, addr.pointee.sa_family == sa_family_t(AF_INET) {
-                return ifaName
+                // Convert C sockaddr to NIO SocketAddress via IP string
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let size = socklen_t(MemoryLayout<sockaddr_in>.size)
+                if getnameinfo(addr, size, &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ipAddress = String(cString: hostname)
+                    return try? SocketAddress(ipAddress: ipAddress, port: 0)
+                }
             }
         }
         return nil

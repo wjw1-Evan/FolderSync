@@ -44,29 +44,37 @@ public class P2PNode {
         let mdnsAllowed = Self.isMdnsAllowed(env: env)
 
         if mdnsAllowed {
-            // Find a valid interface to bind mDNS to (prefer IPv4, non-loopback)
             let devices = (try? NIOCore.System.enumerateDevices()) ?? []
-            let validInterface =
-                devices.first(where: { device in
-                    guard let address = device.address else { return false }
-                    return address.protocol == .inet && device.name != "lo0"
-                })
-                ?? devices.first(where: { device in
-                    guard let address = device.address else { return false }
-                    return address.protocol == .inet6 && device.name != "lo0"
-                })
+            // Prefer IPv4 non-loopback, then IPv6 non-loopback
+            let candidates: [(NIONetworkDevice, SocketAddress)] = devices.compactMap { device in
+                guard let address = device.address else { return nil }
+                guard device.name != "lo0" else { return nil }
+                return (device, address)
+            }.sorted {
+                (lhs: (NIONetworkDevice, SocketAddress), rhs: (NIONetworkDevice, SocketAddress))
+                    -> Bool in
+                // IPv4 before IPv6
+                if lhs.1.protocol == .inet && rhs.1.protocol == .inet6 { return true }
+                if lhs.1.protocol == .inet6 && rhs.1.protocol == .inet { return false }
+                return lhs.0.name < rhs.0.name
+            }
 
-            if let device = validInterface, let address = device.address {
+            var bound = false
+            for (device, address) in candidates {
                 // LibP2PMDNS crashes if the interface isn't resolvable. Double-check before binding.
                 if hasMatchingInterface(for: address) {
                     print("[P2PNode] Binding mDNS to interface: \(device.name) (\(address))")
                     app.discovery.use(.mdns(interfaceAddress: address))
+                    bound = true
+                    break
                 } else {
                     print(
-                        "[P2PNode] Warning: Selected interface \(device.name) is not usable for mDNS. Discovery disabled for safety."
+                        "[P2PNode] Skipping interface \(device.name) (\(address)) — not resolvable for mDNS"
                     )
                 }
-            } else {
+            }
+
+            if !bound {
                 print(
                     "[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled."
                 )

@@ -14,11 +14,14 @@ public class P2PNode {
         let app = try await Application.make(.development, peerID: .ephemeral(type: .Ed25519))
         self.app = app
 
-        // Enable mDNS for automatic local network peer discovery if available/allowed
+        // Explicitly configure TCP to listen on all interfaces
+        // Using port 0 allows the OS to assign any available port
+        app.listen(.tcp(host: "0.0.0.0", port: 0))
+
+        // Enable mDNS for automatic local network peer discovery
         let env = ProcessInfo.processInfo.environment
         let mdnsEnv = env["FOLDERSYNC_ENABLE_MDNS"]?.lowercased()
-        let mdnsEnabledByEnv =
-            (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
+        let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
             if P2PNode.hasActiveIPv4Interface(named: "en0") {
@@ -26,21 +29,19 @@ public class P2PNode {
             } else {
                 print("[P2PNode] Skipping mDNS: required interface 'en0' not available with IPv4")
             }
-        } else {
-            print("[P2PNode] mDNS disabled via FOLDERSYNC_ENABLE_MDNS=")
         }
 
-        // Register for peer discovery events specifically from discovery services
-        app.discovery.onPeerDiscovered(self) { [weak self] peerInfo in
+        // Register for peer discovery events
+        app.discovery.onPeerDiscovered(self) { [weak self] (peerInfo:PeerInfo) in
             print("Found peer: \(peerInfo.peer.b58String)")
             self?.onPeerDiscovered?(peerInfo.peer)
         }
 
-        // Start the application (boots, configures, and starts servers)
+        // Start the application
         try await app.startup()
-
+        
         print("P2P Node started with PeerID: \(app.peerID.b58String)")
-        print("Listening on: \(app.listenAddresses.map { $0.description })")
+        print("Listening on: \(app.listenAddresses)")
     }
 
     public func announce(service: String) async throws {

@@ -37,11 +37,20 @@ public class P2PNode {
             self?.onPeerDiscovered?(peerInfo.peer)
         }
 
-        // Start the application
-        try await app.startup()
+        // Start the application in a background Task so it doesn't block the caller
+        Task {
+            do {
+                try await app.startup()
+            } catch {
+                print("[P2PNode] Critical failure during startup: \(error)")
+            }
+        }
         
-        print("P2P Node started with PeerID: \(app.peerID.b58String)")
-        print("Listening on: \(app.listenAddresses)")
+        // Give the node a moment to initialize the server and update listenAddresses
+        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+        
+        print("P2P Node initializing with PeerID: \(app.peerID.b58String)")
+        print("Ready for connections. Listening on: \(app.listenAddresses)")
     }
 
     public func announce(service: String) async throws {

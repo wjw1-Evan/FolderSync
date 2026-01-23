@@ -25,12 +25,19 @@ public class P2PNode {
         let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
-            if P2PNode.isLibrarySafeInterfaceAvailable() {
-                print("[P2PNode] Detected safe en0 interface, enabling mDNS")
-                app.discovery.use(.mdns)
+            // Find a valid interface to bind mDNS to
+            let devices = try? NIOCore.System.enumerateDevices()
+            let validInterface = devices?.first(where: { device in
+                guard let name = device.name, let address = device.address else { return false }
+                // Check for WiFi/Ethernet and IPv4
+                return (name.starts(with: "en") || name.starts(with: "wl")) && address.protocol == .inet
+            })
+
+            if let device = validInterface, let address = device.address {
+                print("[P2PNode] Binding mDNS to interface: \(device.name ?? "unknown") (\(address))")
+                app.discovery.use(.mdns(interfaceAddress: address))
             } else {
-                print("[P2PNode] Warning: Current network interface (en1 or incomplete en0) is incompatible with mDNS library. Skipping mDNS to prevent crash.")
-                print("[P2PNode] You can still sync by manually connecting to Peer IDs if implemented.")
+                print("[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled.")
             }
         }
 
@@ -76,18 +83,4 @@ public class P2PNode {
     }
 }
 
-// MARK: - Network Interface Helpers
-extension P2PNode {
-    /// Checks if 'en0' is available and has both IPv4 and IPv6 addresses.
-    /// This is the only configuration where the current LibP2PMDNS library is 
-    /// guaranteed not to crash during its default initialization.
-    private static func isLibrarySafeInterfaceAvailable() -> Bool {
-        let devices = try? NIOCore.System.enumerateDevices()
-        let en0Devices = devices?.filter { $0.name == "en0" } ?? []
-        
-        let hasV4 = en0Devices.contains { $0.address?.protocol == .inet }
-        let hasV6 = en0Devices.contains { $0.address?.protocol == .inet6 }
-        
-        return hasV4 && hasV6
-    }
-}
+

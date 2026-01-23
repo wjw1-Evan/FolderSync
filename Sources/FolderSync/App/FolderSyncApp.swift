@@ -8,6 +8,27 @@ struct FolderSyncApp: App {
     
     @Environment(\.openWindow) private var openWindow
     
+    init() {
+        // Enforce Single Instance
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.FolderSync.App"
+        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        
+        let currentApp = NSRunningApplication.current
+        
+        for app in runningApps {
+            if app != currentApp {
+                // Already running
+                print("App is already running. activating existing instance.")
+                app.activate(options: [.activateIgnoringOtherApps])
+                
+                // Terminate current instance
+                // We can't use NSApplication.shared.terminate here as it might not be ready,
+                // so we use exit(0)
+                exit(0)
+            }
+        }
+    }
+    
     var body: some Scene {
         WindowGroup(id: "main") {
             MainDashboard()

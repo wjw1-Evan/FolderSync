@@ -3,6 +3,7 @@ import Combine
 import Crypto
 import LibP2P
 import LibP2PCore
+import LibP2PCore
 
 public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []

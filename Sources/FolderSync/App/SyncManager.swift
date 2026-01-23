@@ -6,7 +6,7 @@ import LibP2PCore
 
 public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
-    @Published var peers: [String] = [] // PeerIDs
+    @Published var peers: [PeerID] = [] // PeerIDs
     @Published var folderPeers: [String: Set<String>] = [:] // SyncID -> PeerIDs
     let p2pNode = P2PNode()
     
@@ -17,13 +17,14 @@ public class SyncManager: ObservableObject {
         self.folders = (try? StorageManager.shared.getAllFolders()) ?? []
         
         Task {
-            p2pNode.onPeerDiscovered = { [weak self] peerID in
+            p2pNode.onPeerDiscovered = { [weak self] peer in
                 DispatchQueue.main.async {
-                    if self?.peers.contains(peerID) == false {
-                        self?.peers.append(peerID)
+                    if self?.peers.contains(where: { $0.b58String == peer.b58String }) == false {
+                        print("SyncManager: New peer discovered - \(peer.b58String)")
+                        self?.peers.append(peer)
                         // Trigger sync when peer is found
                         for folder in self?.folders ?? [] {
-                            self?.syncWithPeer(peerID: peerID, folder: folder)
+                            self?.syncWithPeer(peer: peer, folder: folder)
                         }
                     }
                 }
@@ -54,7 +55,7 @@ public class SyncManager: ObservableObject {
             
             // Try to sync with existing peers
             for peer in peers {
-                syncWithPeer(peerID: peer, folder: folder)
+                syncWithPeer(peer: peer, folder: folder)
             }
         }
         
@@ -81,7 +82,7 @@ public class SyncManager: ObservableObject {
             // Notify peers
             if let peers = self?.peers {
                 for peer in peers {
-                    self?.syncWithPeer(peerID: peer, folder: folder)
+                    self?.syncWithPeer(peer: peer, folder: folder)
                 }
             }
         }
@@ -145,11 +146,13 @@ public class SyncManager: ObservableObject {
         }
     }
     
-    private func syncWithPeer(peerID: String, folder: SyncFolder) {
-        guard let app = p2pNode.app, let peer = try? PeerID(cid: peerID) else { return }
+    private func syncWithPeer(peer: PeerID, folder: SyncFolder) {
+        guard let app = p2pNode.app else { return }
+        let peerID = peer.b58String
         
         Task {
             do {
+                print("SyncManager: Initiating sync for \(folder.syncID) with peer \(peerID)")
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "Connecting to \(peerID.prefix(8))...")
                 }
@@ -281,12 +284,13 @@ public class SyncManager: ObservableObject {
             
             // 2. Try sync with all peers
             if peers.isEmpty {
+                print("SyncManager: No peers to sync with for folder \(folder.syncID)")
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .synced, message: "No peers found", progress: 0.0)
                 }
             } else {
                 for peer in peers {
-                    syncWithPeer(peerID: peer, folder: folder)
+                    syncWithPeer(peer: peer, folder: folder)
                 }
             }
         }

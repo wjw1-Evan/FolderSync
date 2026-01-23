@@ -6,7 +6,7 @@ public class P2PNode {
     
     public init() {}
     
-    public var onPeerDiscovered: ((String) -> Void)?
+    public var onPeerDiscovered: ((PeerID) -> Void)?
     
     public func start() async throws {
         // Create the LibP2P application with an ephemeral Ed25519 peerID
@@ -18,9 +18,8 @@ public class P2PNode {
         
         // Register for peer discovery events specifically from discovery services
         app.discovery.onPeerDiscovered(self) { [weak self] peerInfo in
-            let peerID = peerInfo.peer.b58String
-            print("Found peer: \(peerID)")
-            self?.onPeerDiscovered?(peerID)
+            print("Found peer: \(peerInfo.peer.b58String)")
+            self?.onPeerDiscovered?(peerInfo.peer)
         }
         
         // Start the application (boots, configures, and starts servers)

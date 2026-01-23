@@ -64,4 +64,17 @@ public class MerkleSearchTree {
     public var rootHash: String? {
         root?.computeHash()
     }
+    
+    public func getAllEntries() -> [String: String] {
+        var entries: [String: String] = [:]
+        func collect(_ node: MSTNode?) {
+            guard let node = node else { return }
+            entries[node.key] = node.value
+            for child in node.children {
+                collect(child)
+            }
+        }
+        collect(root)
+        return entries
+    }
 }

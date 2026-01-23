@@ -40,47 +40,86 @@ struct MainDashboard: View {
 struct FolderRow: View {
     @EnvironmentObject var syncManager: SyncManager
     let folder: SyncFolder
+    @State private var showingPeerList = false
     
     var body: some View {
-        HStack {
-            Image(systemName: "folder.fill")
-                .foregroundStyle(.blue)
-                .font(.title2)
-            
-            VStack(alignment: .leading) {
-                Text(folder.localPath.lastPathComponent)
-                    .font(.headline)
-                HStack(spacing: 4) {
-                    Text("ID: \(folder.syncID)")
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(.horizontal, 4)
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(4)
-                        .help("点击复制同步 ID")
-                        .onTapGesture {
-                            let pasteboard = NSPasteboard.general
-                            pasteboard.clearContents()
-                            pasteboard.setString(folder.syncID, forType: .string)
-                        }
-                        .contextMenu {
-                            Button {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "folder.fill")
+                    .foregroundStyle(.blue)
+                    .font(.title2)
+                
+                VStack(alignment: .leading) {
+                    Text(folder.localPath.lastPathComponent)
+                        .font(.headline)
+                    HStack(spacing: 4) {
+                        Text("ID: \(folder.syncID)")
+                            .font(.system(.caption, design: .monospaced))
+                            .padding(.horizontal, 4)
+                            .background(Color.secondary.opacity(0.1))
+                            .cornerRadius(4)
+                            .onTapGesture {
                                 let pasteboard = NSPasteboard.general
                                 pasteboard.clearContents()
                                 pasteboard.setString(folder.syncID, forType: .string)
-                            } label: {
-                                Label("复制同步 ID", systemImage: "doc.on.doc")
                             }
-                        }
-                    
-                    Text(folder.localPath.path)
-                        .font(.caption)
+                        
+                        Text(folder.localPath.path)
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
                 }
-                .foregroundStyle(.secondary)
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    StatusBadge(status: folder.status)
+                    
+                    if folder.peerCount > 0 {
+                        Button {
+                            showingPeerList = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "laptopcomputer.and.iphone")
+                                Text("\(folder.peerCount) 台设备在线")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showingPeerList) {
+                            PeerListView(syncID: folder.syncID)
+                        }
+                    }
+                    
+                    if let lastSynced = folder.lastSyncedAt {
+                        Text("上次同步: \(lastSynced.formatted(.relative(presentation: .named)))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             
-            Spacer()
-            
-            StatusBadge(status: folder.status)
+            if folder.status == .syncing {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: folder.syncProgress)
+                        .progressViewStyle(.linear)
+                        .tint(.blue)
+                    
+                    if let message = folder.lastSyncMessage {
+                        Text(message)
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                    }
+                }
+                .padding(.leading, 32)
+                .padding(.top, 4)
+            } else if let message = folder.lastSyncMessage, folder.status == .error {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .padding(.leading, 32)
+            }
         }
         .padding(.vertical, 4)
         .contextMenu {
@@ -261,6 +300,58 @@ struct AddFolderView: View {
     private func generateRandomSyncID() -> String {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         return String((0..<8).map { _ in letters.randomElement()! })
+    }
+}
+
+struct PeerListView: View {
+    @EnvironmentObject var syncManager: SyncManager
+    let syncID: String
+    
+    var peers: [String] {
+        Array(syncManager.folderPeers[syncID] ?? [])
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("在线同步设备")
+                .font(.headline)
+                .padding(.bottom, 4)
+            
+            if peers.isEmpty {
+                Text("暂无在线设备")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(peers, id: \.self) { peerID in
+                            HStack {
+                                Image(systemName: "cpu")
+                                    .foregroundStyle(.blue)
+                                VStack(alignment: .leading) {
+                                    Text("Peer ID")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(peerID)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Circle()
+                                    .fill(.green)
+                                    .frame(width: 8, height: 8)
+                            }
+                            .padding(8)
+                            .background(Color.secondary.opacity(0.1))
+                            .cornerRadius(8)
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .frame(width: 300, height: 250)
     }
 }
 

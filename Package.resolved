@@ -28,6 +28,15 @@
       }
     },
     {
+      "identity" : "dns",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Bouke/DNS.git",
+      "state" : {
+        "revision" : "78bbd1589890a90b202d11d5f9e1297050cf0eb2",
+        "version" : "1.2.0"
+      }
+    },
+    {
       "identity" : "routing-kit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vapor/routing-kit.git",
@@ -178,6 +187,15 @@
       "state" : {
         "revision" : "932393e4a552ff063f346da6b88b79d3f97686ef",
         "version" : "0.2.4"
+      }
+    },
+    {
+      "identity" : "swift-libp2p-mdns",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-libp2p/swift-libp2p-mdns.git",
+      "state" : {
+        "revision" : "03acf73e8988742a1f03990a630630940f85fc61",
+        "version" : "0.1.0"
       }
     },
     {

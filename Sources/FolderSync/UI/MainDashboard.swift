@@ -103,8 +103,7 @@ struct FolderRow: View {
             Divider()
             
             Button(role: .destructive) {
-                try? StorageManager.shared.deleteFolder(folder.id)
-                syncManager.folders.removeAll { $0.id == folder.id }
+                syncManager.removeFolder(folder)
             } label: {
                 Label("移除文件夹", systemImage: "trash")
             }
@@ -143,6 +142,8 @@ struct AddFolderView: View {
     @State private var syncID: String = ""
     
     @State private var syncMode: Selection = .create
+    @State private var errorMessage: String?
+    @State private var isChecking = false
     
     enum Selection {
         case create, join
@@ -204,6 +205,12 @@ struct AddFolderView: View {
                 }
             }
             
+            if let error = errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            
             if syncMode == .join {
                 Text("提示：加入现有同步组需要两边填写相同的 ID。")
                     .font(.caption)
@@ -215,14 +222,36 @@ struct AddFolderView: View {
                 Spacer()
                 Button(syncMode == .create ? "创建同步" : "加入同步") {
                     if let path = selectedPath, !syncID.isEmpty {
-                        let newFolder = SyncFolder(syncID: syncID, localPath: path)
-                        try? StorageManager.shared.saveFolder(newFolder)
-                        syncManager.folders.append(newFolder)
-                        dismiss()
+                        if syncMode == .join {
+                            isChecking = true
+                            Task {
+                                let exists = await syncManager.checkIfSyncIDExists(syncID)
+                                await MainActor.run {
+                                    isChecking = false
+                                    if exists {
+                                        let newFolder = SyncFolder(syncID: syncID, localPath: path)
+                                        syncManager.addFolder(newFolder)
+                                        dismiss()
+                                    } else {
+                                        errorMessage = "同步 ID 不存在，请检查输入是否正确。"
+                                    }
+                                }
+                            }
+                        } else {
+                            // Create mode: allow any ID or generated ID
+                            let newFolder = SyncFolder(syncID: syncID, localPath: path)
+                            syncManager.addFolder(newFolder)
+                            dismiss()
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedPath == nil || syncID.isEmpty)
+                .disabled(selectedPath == nil || syncID.isEmpty || isChecking)
+                
+                if isChecking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
             }
         }
         .padding()

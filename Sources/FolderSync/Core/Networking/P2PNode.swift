@@ -24,10 +24,11 @@ public class P2PNode {
         let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
-            if P2PNode.hasActiveIPv4Interface(named: "en0") {
+            if let interface = P2PNode.getFirstActiveIPv4Interface() {
+                print("[P2PNode] Enabling mDNS on interface: \(interface)")
                 app.discovery.use(.mdns)
             } else {
-                print("[P2PNode] Skipping mDNS: required interface 'en0' not available with IPv4")
+                print("[P2PNode] Skipping mDNS: No active IPv4 interface found")
             }
         }
 
@@ -75,10 +76,10 @@ public class P2PNode {
 
 // MARK: - Network Interface Helpers
 extension P2PNode {
-    /// Returns true if the given interface name (e.g., "en0") has a non-loopback IPv4 address.
-    private static func hasActiveIPv4Interface(named name: String) -> Bool {
+    /// Returns the name of the first found active IPv4 interface (non-loopback).
+    private static func getFirstActiveIPv4Interface() -> String? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>? = nil
-        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return false }
+        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
         defer { freeifaddrs(ifaddrPtr) }
 
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
@@ -86,16 +87,15 @@ extension P2PNode {
             defer { ptr = current.ifa_next }
             guard let ifaNameC = current.ifa_name else { continue }
             let ifaName = String(cString: ifaNameC)
-            guard ifaName == name else { continue }
+            
             let flags = Int32(current.ifa_flags)
             // Skip loopback and interfaces that are down
             guard (flags & IFF_LOOPBACK) == 0, (flags & IFF_UP) != 0 else { continue }
+            
             if let addr = current.ifa_addr, addr.pointee.sa_family == sa_family_t(AF_INET) {
-                return true
+                return ifaName
             }
         }
-        return false
+        return nil
     }
-
-    // Intentionally no broader fallback: the upstream mDNS provider currently assumes 'en0'.
 }

@@ -25,11 +25,12 @@ public class P2PNode {
         let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
-            if let addr = P2PNode.getSafeMDNSInterfaceAddress() {
-                print("[P2PNode] Enabling mDNS on address: \(addr)")
-                app.discovery.use(.mdns(interfaceAddress: addr))
+            if P2PNode.isLibrarySafeInterfaceAvailable() {
+                print("[P2PNode] Detected safe en0 interface, enabling mDNS")
+                app.discovery.use(.mdns)
             } else {
-                print("[P2PNode] Skipping mDNS: No interface found with both IPv4 and IPv6 (required by LibP2P)")
+                print("[P2PNode] Warning: Current network interface (en1 or incomplete en0) is incompatible with mDNS library. Skipping mDNS to prevent crash.")
+                print("[P2PNode] You can still sync by manually connecting to Peer IDs if implemented.")
             }
         }
 
@@ -77,50 +78,16 @@ public class P2PNode {
 
 // MARK: - Network Interface Helpers
 extension P2PNode {
-    /// Returns a SocketAddress for an interface that has BOTH IPv4 and IPv6 addresses.
-    /// This is required to satisfy the LibP2PMDNS library's internal force-unwraps.
-    private static func getSafeMDNSInterfaceAddress() -> SocketAddress? {
-        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>? = nil
-        guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
-        defer { freeifaddrs(ifaddrPtr) }
-
-        // First, group interfaces by name and check which ones have what families
-        var interfaceMap: [String: Set<Int32>] = [:]
-        var addressMap: [String: SocketAddress] = [:]
-
-        var ptr: UnsafeMutablePointer<ifaddrs>? = first
-        while let current = ptr?.pointee {
-            defer { ptr = current.ifa_next }
-            guard let nameC = current.ifa_name else { continue }
-            let name = String(cString: nameC)
-            
-            let flags = Int32(current.ifa_flags)
-            guard (flags & IFF_LOOPBACK) == 0, (flags & IFF_UP) != 0 else { continue }
-            
-            if let addr = current.ifa_addr {
-                let family = Int32(addr.pointee.sa_family)
-                interfaceMap[name, default: []].insert(family)
-                
-                if family == AF_INET {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(addr, socklen_t(MemoryLayout<sockaddr_in>.size), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                        let ip = String(cString: hostname)
-                        addressMap[name] = try? SocketAddress(ipAddress: ip, port: 0)
-                    }
-                }
-            }
-        }
-
-        // Return the first interface that has both IPv4 (AF_INET) and IPv6 (AF_INET6)
-        for (name, families) in interfaceMap {
-            if families.contains(AF_INET) && families.contains(AF_INET6) {
-                if let addr = addressMap[name] {
-                    print("[P2PNode] Found suitable interface for mDNS: \(name)")
-                    return addr
-                }
-            }
-        }
+    /// Checks if 'en0' is available and has both IPv4 and IPv6 addresses.
+    /// This is the only configuration where the current LibP2PMDNS library is 
+    /// guaranteed not to crash during its default initialization.
+    private static func isLibrarySafeInterfaceAvailable() -> Bool {
+        let devices = try? NIOCore.System.enumerateDevices()
+        let en0Devices = devices?.filter { $0.name == "en0" } ?? []
         
-        return nil
+        let hasV4 = en0Devices.contains { $0.address?.protocol == .inet }
+        let hasV6 = en0Devices.contains { $0.address?.protocol == .inet6 }
+        
+        return hasV4 && hasV6
     }
 }

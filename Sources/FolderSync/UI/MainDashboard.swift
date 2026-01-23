@@ -3,32 +3,11 @@ import SwiftUI
 struct MainDashboard: View {
     @EnvironmentObject var syncManager: SyncManager
     @State private var showingAddFolder = false
-    @State private var showingAddPeer = false
     
     var body: some View {
         NavigationStack {
             List {
-                Section("本机 ID (PeerID)") {
-                    HStack {
-                        Text(syncManager.p2pNode.peerID ?? "获取中...")
-                            .font(.system(.caption, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        
-                        Spacer()
-                        
-                        Button {
-                            let pasteboard = NSPasteboard.general
-                            pasteboard.clearContents()
-                            pasteboard.setString(syncManager.p2pNode.peerID ?? "", forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .buttonStyle(.plain)
-                        .help("复制本机 ID")
-                    }
-                }
-                
+
                 Section("同步文件夹") {
                     ForEach(syncManager.folders) { folder in
                         FolderRow(folder: folder)
@@ -49,10 +28,10 @@ struct MainDashboard: View {
                         }
                     }
                     
-                    Button {
-                        showingAddPeer = true
-                    } label: {
-                        Label("添加同步对等端...", systemImage: "person.badge.plus")
+                    if syncManager.peers.isEmpty {
+                        Text("尚未发现对等设备")
+                            .foregroundStyle(.secondary)
+                            .italic()
                     }
                 }
             }
@@ -69,9 +48,6 @@ struct MainDashboard: View {
             }
             .sheet(isPresented: $showingAddFolder) {
                 AddFolderView()
-            }
-            .sheet(isPresented: $showingAddPeer) {
-                AddPeerView()
             }
         }
         .frame(minWidth: 500, minHeight: 400)
@@ -197,13 +173,12 @@ struct AddFolderView: View {
             }
             
             VStack(alignment: .leading, spacing: 10) {
-                Text("2. 同步 ID (\(syncMode == .create ? "自动生成" : "手动输入"))")
+                Text("2. 同步 ID")
                     .font(.subheadline).bold()
                 
                 HStack {
-                    TextField(syncMode == .create ? "点击右侧生成 ID" : "粘贴来自对方的同步 ID", text: $syncID)
+                    TextField(syncMode == .create ? "输入自定义 ID 或点击右侧生成" : "输入或粘贴同步 ID", text: $syncID)
                         .textFieldStyle(.roundedBorder)
-                        .disabled(syncMode == .create)
                     
                     if syncMode == .create {
                         Button {
@@ -250,37 +225,3 @@ struct AddFolderView: View {
     }
 }
 
-struct AddPeerView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var syncManager: SyncManager
-    @State private var peerID: String = ""
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("添加同步对等端")
-                .font(.headline)
-            
-            TextField("输入对方的 PeerID", text: $peerID)
-                .textFieldStyle(.roundedBorder)
-            
-            Text("PeerID 是对方设备在『本机 ID』处显示的字符串")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            
-            HStack {
-                Button("取消") { dismiss() }
-                Spacer()
-                Button("添加设备") {
-                    if !peerID.isEmpty {
-                        syncManager.peers.append(peerID)
-                        dismiss()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(peerID.isEmpty)
-            }
-        }
-        .padding()
-        .frame(width: 400)
-    }
-}

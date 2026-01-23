@@ -70,4 +70,8 @@ public class StorageManager {
         }
         return result
     }
+    public func deleteFolder(_ folderID: UUID) throws {
+        let query = folders.filter(f_id == folderID.uuidString)
+        try db.run(query.delete())
+    }
 }

@@ -7,29 +7,12 @@ struct MainDashboard: View {
     var body: some View {
         NavigationStack {
             List {
-
                 Section("同步文件夹") {
                     ForEach(syncManager.folders) { folder in
                         FolderRow(folder: folder)
                     }
                     if syncManager.folders.isEmpty {
                         Text("尚未添加任何文件夹")
-                            .foregroundStyle(.secondary)
-                            .italic()
-                    }
-                }
-                
-                Section("对等设备 (Peers)") {
-                    ForEach(syncManager.peers, id: \.self) { peer in
-                        HStack {
-                            Image(systemName: "desktopcomputer")
-                            Text(peer)
-                                .font(.system(.caption, design: .monospaced))
-                        }
-                    }
-                    
-                    if syncManager.peers.isEmpty {
-                        Text("尚未发现对等设备")
                             .foregroundStyle(.secondary)
                             .italic()
                     }
@@ -55,6 +38,7 @@ struct MainDashboard: View {
 }
 
 struct FolderRow: View {
+    @EnvironmentObject var syncManager: SyncManager
     let folder: SyncFolder
     
     var body: some View {
@@ -99,6 +83,32 @@ struct FolderRow: View {
             StatusBadge(status: folder.status)
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button {
+                NSWorkspace.shared.open(folder.localPath)
+            } label: {
+                Label("在 Finder 中打开", systemImage: "folder")
+            }
+            
+            Divider()
+            
+            Button {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(folder.syncID, forType: .string)
+            } label: {
+                Label("复制同步 ID", systemImage: "doc.on.doc")
+            }
+            
+            Divider()
+            
+            Button(role: .destructive) {
+                try? StorageManager.shared.deleteFolder(folder.id)
+                syncManager.folders.removeAll { $0.id == folder.id }
+            } label: {
+                Label("移除文件夹", systemImage: "trash")
+            }
+        }
     }
 }
 

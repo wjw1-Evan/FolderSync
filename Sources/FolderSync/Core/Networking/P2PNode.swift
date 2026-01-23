@@ -25,11 +25,11 @@ public class P2PNode {
         let mdnsEnabledByEnv = (mdnsEnv == nil) || (mdnsEnv == "1") || (mdnsEnv == "true") || (mdnsEnv == "yes")
 
         if mdnsEnabledByEnv {
-            if let addr = P2PNode.getFirstActiveIPv4Address() {
+            if let addr = P2PNode.getSafeMDNSInterfaceAddress() {
                 print("[P2PNode] Enabling mDNS on address: \(addr)")
                 app.discovery.use(.mdns(interfaceAddress: addr))
             } else {
-                print("[P2PNode] Skipping mDNS: No active IPv4 interface found")
+                print("[P2PNode] Skipping mDNS: No interface found with both IPv4 and IPv6 (required by LibP2P)")
             }
         }
 
@@ -77,30 +77,50 @@ public class P2PNode {
 
 // MARK: - Network Interface Helpers
 extension P2PNode {
-    /// Returns the SocketAddress of the first found active IPv4 interface (non-loopback).
-    private static func getFirstActiveIPv4Address() -> SocketAddress? {
+    /// Returns a SocketAddress for an interface that has BOTH IPv4 and IPv6 addresses.
+    /// This is required to satisfy the LibP2PMDNS library's internal force-unwraps.
+    private static func getSafeMDNSInterfaceAddress() -> SocketAddress? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>? = nil
         guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return nil }
         defer { freeifaddrs(ifaddrPtr) }
 
+        // First, group interfaces by name and check which ones have what families
+        var interfaceMap: [String: Set<Int32>] = [:]
+        var addressMap: [String: SocketAddress] = [:]
+
         var ptr: UnsafeMutablePointer<ifaddrs>? = first
         while let current = ptr?.pointee {
             defer { ptr = current.ifa_next }
+            guard let nameC = current.ifa_name else { continue }
+            let name = String(cString: nameC)
             
             let flags = Int32(current.ifa_flags)
-            // Skip loopback and interfaces that are down
             guard (flags & IFF_LOOPBACK) == 0, (flags & IFF_UP) != 0 else { continue }
             
-            if let addr = current.ifa_addr, addr.pointee.sa_family == sa_family_t(AF_INET) {
-                // Convert C sockaddr to NIO SocketAddress via IP string
-                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                let size = socklen_t(MemoryLayout<sockaddr_in>.size)
-                if getnameinfo(addr, size, &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    let ipAddress = String(cString: hostname)
-                    return try? SocketAddress(ipAddress: ipAddress, port: 0)
+            if let addr = current.ifa_addr {
+                let family = Int32(addr.pointee.sa_family)
+                interfaceMap[name, default: []].insert(family)
+                
+                if family == AF_INET {
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    if getnameinfo(addr, socklen_t(MemoryLayout<sockaddr_in>.size), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        let ip = String(cString: hostname)
+                        addressMap[name] = try? SocketAddress(ipAddress: ip, port: 0)
+                    }
                 }
             }
         }
+
+        // Return the first interface that has both IPv4 (AF_INET) and IPv6 (AF_INET6)
+        for (name, families) in interfaceMap {
+            if families.contains(AF_INET) && families.contains(AF_INET6) {
+                if let addr = addressMap[name] {
+                    print("[P2PNode] Found suitable interface for mDNS: \(name)")
+                    return addr
+                }
+            }
+        }
+        
         return nil
     }
 }

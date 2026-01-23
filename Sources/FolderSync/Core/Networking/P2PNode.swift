@@ -81,7 +81,7 @@ public class P2PNode {
             }
         } else {
             print(
-                "[P2PNode] mDNS discovery is disabled. Set FOLDERSYNC_ENABLE_MDNS=0/false to opt-out."
+                "[P2PNode] mDNS discovery is disabled via FOLDERSYNC_ENABLE_MDNS. Remove it or set to 1/true to enable."
             )
         }
 

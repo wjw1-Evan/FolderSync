@@ -23,11 +23,12 @@ extension SyncResponse: AsyncResponseEncodable {
 }
 
 extension Application {
-    public func requestSync<T: Decodable>(_ message: SyncRequest, to peer: PeerID, timeout: TimeInterval = 30.0, maxRetries: Int = 3, peerAddresses: [Multiaddr]? = nil) async throws -> T {
+    public func requestSync<T: Decodable>(_ message: SyncRequest, to peer: PeerID, timeout: TimeInterval = 30.0, maxRetries: Int = 3, peerAddresses: [Multiaddr]? = nil, onPeerNotFound: (() async -> Void)? = nil) async throws -> T {
         let data = try JSONEncoder().encode(message)
         let timeoutSeconds: TimeInterval = timeout
         
         var lastError: Error?
+        var hasTriggeredReRegistration = false
         
         // 重试机制：首次连接可能需要更多时间
         for attempt in 1...maxRetries {
@@ -46,9 +47,26 @@ extension Application {
             } catch {
                 lastError = error
                 let errorString = String(describing: error)
+                let isPeerNotFound = errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")
                 let isTimeout = errorString.contains("TimedOut") || 
                                errorString.contains("Timeout") ||
                                (error as NSError?)?.code == 2
+                
+                // 处理 peerNotFound：调用回调重新注册 peer
+                if isPeerNotFound && !hasTriggeredReRegistration && attempt < maxRetries {
+                    hasTriggeredReRegistration = true
+                    print("[LibP2P] 🔄 检测到 peerNotFound（尝试 \(attempt)/\(maxRetries)），触发重新注册...")
+                    
+                    // 调用回调重新注册 peer
+                    if let reRegister = onPeerNotFound {
+                        await reRegister()
+                        // 等待一小段时间让 libp2p 处理注册
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                    }
+                    
+                    // 继续重试
+                    continue
+                }
                 
                 if isTimeout && attempt < maxRetries {
                     // 指数退避：等待时间逐渐增加

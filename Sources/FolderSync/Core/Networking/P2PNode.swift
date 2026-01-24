@@ -23,36 +23,47 @@ public class P2PNode {
     }
     
     /// 重新触发对等点注册（用于 peerNotFound 错误后的重试）
+    /// 这个函数会立即注册 peer，不等待，让 libp2p 在下次请求时自动建立连接
     func retryPeerRegistration(peer: PeerID) async {
         let peerIDString = peer.b58String
+        print("[P2PNode] 🔄 [retryPeerRegistration] 开始重试注册: \(peerIDString.prefix(12))...")
+        
         let addresses = await MainActor.run {
             return peerManager.getAddresses(for: peerIDString)
         }
         
+        print("[P2PNode] 📍 [retryPeerRegistration] 获取到的地址数量: \(addresses.count)")
+        if !addresses.isEmpty {
+            for (idx, addr) in addresses.enumerated() {
+                print("[P2PNode]   [\(idx + 1)] \(addr)")
+            }
+        }
+        
         guard !addresses.isEmpty else {
-            print("[P2PNode] ⚠️ 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))...")
+            print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))...")
+            print("[P2PNode] 💡 [retryPeerRegistration] 提示: 对等点可能还未被发现或地址信息丢失")
             return
         }
         
         guard let handler = discoveryHandler else {
-            print("[P2PNode] ⚠️ 重试注册失败: discoveryHandler 未设置: \(peerIDString.prefix(12))...")
+            print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: discoveryHandler 未设置: \(peerIDString.prefix(12))...")
             return
         }
         
+        print("[P2PNode] 🔄 [retryPeerRegistration] 调用 discoveryHandler...")
         let peerInfo = LibP2P.PeerInfo(peer: peer, addresses: addresses)
         handler(peerInfo)
-        print("[P2PNode] 🔄 已重新注册: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
+        print("[P2PNode] ✅ [retryPeerRegistration] 已调用 discoveryHandler: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
         
-        // 等待足够的时间确保 libp2p 内部完成注册
-        // libp2p 需要时间将 peer 添加到 peer store 并建立连接
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 增加到 2 秒
+        // 不等待，让 libp2p 在下次请求时自动建立连接
+        // 这样可以避免不必要的延迟，同时让 requestSync 的重试机制来处理连接建立
         
         // 更新注册状态
         await MainActor.run {
             peerManager.markAsRegistered(peerIDString)
         }
         
-        print("[P2PNode] ✅ 重试注册完成: \(peerIDString.prefix(12))...")
+        print("[P2PNode] ✅ [retryPeerRegistration] 重试注册完成（不等待连接建立）: \(peerIDString.prefix(12))...")
     }
     
     /// 检查对等点是否已成功注册到 peer store
@@ -225,21 +236,22 @@ public class P2PNode {
         handler(libp2pPeerInfo)
         print("[P2PNode] ✅ 已调用 discoveryHandler 注册对等点")
         
-        // 等待足够的时间确保 libp2p 内部完成注册
-        // libp2p 需要时间将 peer 添加到 peer store 并建立连接
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 增加到 2 秒
+        // 不等待，让 libp2p 在首次请求时自动建立连接
+        // 这样可以避免不必要的延迟，同时让 requestSync 的重试机制来处理连接建立
         
         // 标记为已注册
         await MainActor.run {
             peerManager.markAsRegistered(peerID)
         }
         
-        // 通知 SyncManager（延迟通知，确保注册完成）
+        // 立即通知 SyncManager，让它在首次请求时触发连接建立
         await MainActor.run {
             self.onPeerDiscovered?(peerIDObj)
+            // 通知后立即更新设备计数
+            // SyncManager 的 onPeerDiscovered 回调会处理设备计数更新
         }
         
-        print("[P2PNode] ✅ 对等点已注册: \(peerID.prefix(12))... (\(parsedAddresses.count) 个地址)")
+        print("[P2PNode] ✅ 对等点已注册（不等待连接建立）: \(peerID.prefix(12))... (\(parsedAddresses.count) 个地址)")
     }
 
     public var onPeerDiscovered: ((PeerID) -> Void)?

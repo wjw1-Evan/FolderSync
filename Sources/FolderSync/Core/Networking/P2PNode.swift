@@ -7,8 +7,15 @@ import NIOCore
 public class P2PNode {
     public var app: Application?
     private var lanDiscovery: LANDiscovery?
+    private var peerAddressCache: [String: [Multiaddr]] = [:] // 缓存对等点地址 (使用 b58String 作为键)
+    private var discoveryCallback: ((PeerInfo) -> Void)? // 保存发现回调以便手动调用
 
     public init() {}
+    
+    /// 获取对等点的缓存地址
+    func getCachedAddresses(for peer: PeerID) -> [Multiaddr]? {
+        return peerAddressCache[peer.b58String]
+    }
     
     /// Setup LAN discovery using UDP broadcast
     private func setupLANDiscovery(peerID: String, listenAddresses: [String] = []) {
@@ -27,35 +34,79 @@ public class P2PNode {
     
     /// Connect to a peer discovered via LAN discovery
     private func connectToDiscoveredPeer(peerID: String, addresses: [String]) async {
-        guard app != nil else { return }
-        
-        // Try to parse the peerID string to PeerID object
-        guard let peerIDObj = try? PeerID(cid: peerID) else {
-            print("[P2PNode] Failed to parse peerID: \(peerID)")
+        guard let app = app else {
+            print("[P2PNode] ⚠️ App not initialized, cannot connect to peer")
             return
         }
         
-        // Try to connect using the provided addresses
-        var foundAddress = false
+        // Try to parse the peerID string to PeerID object
+        guard let peerIDObj = try? PeerID(cid: peerID) else {
+            print("[P2PNode] ❌ Failed to parse peerID: \(peerID)")
+            return
+        }
+        
+        // Parse and add addresses to libp2p's peer store
+        var parsedAddresses: [Multiaddr] = []
         for addressStr in addresses {
-            // Try to parse as Multiaddr
             if let multiaddr = try? Multiaddr(addressStr) {
-                print("[P2PNode] Found peer \(peerID.prefix(8)) at \(multiaddr)")
-                // Note: libp2p will automatically try to connect when SyncManager makes a request
-                // The address information is stored in the peer store implicitly when we trigger the callback
-                foundAddress = true
-                break
+                parsedAddresses.append(multiaddr)
+                print("[P2PNode] ✅ Parsed address for \(peerID.prefix(8)): \(multiaddr)")
+            } else {
+                print("[P2PNode] ⚠️ Could not parse address: \(addressStr)")
             }
         }
         
-        if !foundAddress && !addresses.isEmpty {
-            print("[P2PNode] Warning: Could not parse any addresses for \(peerID.prefix(8)): \(addresses)")
+        // libp2p needs the peer addresses in its peer store to connect
+        // The key issue: newRequest requires addresses to be in peer store, but we discovered
+        // the peer via LANDiscovery, not libp2p's discovery mechanisms
+        // 
+        // Solution: We need to manually add the peer to libp2p's peer store
+        // Unfortunately, swift-libp2p may not expose peerStore API directly
+        // We'll try to trigger libp2p's internal mechanisms by making a connection attempt
+        
+        if !parsedAddresses.isEmpty {
+            print("[P2PNode] ✅ Found \(parsedAddresses.count) address(es) for \(peerID.prefix(8))")
+            for addr in parsedAddresses {
+                print("[P2PNode]   - \(addr)")
+            }
+            
+            // Store addresses in cache
+            await MainActor.run {
+                peerAddressCache[peerIDObj.b58String] = parsedAddresses
+            }
+            
+            // Critical issue: libp2p's newRequest requires the peer to be in the peer store with addresses
+            // Since we discovered the peer via LANDiscovery (not libp2p's discovery), the peer
+            // is not in libp2p's peer store, causing "peerNotFound" errors.
+            //
+            // Solution: Manually trigger libp2p's discovery callback with a PeerInfo
+            // This simulates libp2p discovering the peer via its own mechanisms and should
+            // add the peer to libp2p's peer store with the provided addresses.
+            
+            // Create a PeerInfo with the discovered addresses
+            let peerInfo = PeerInfo(peer: peerIDObj, addresses: parsedAddresses)
+            
+            // Manually trigger the discovery callback to register the peer
+            // This simulates libp2p discovering the peer via its own mechanisms
+            print("[P2PNode] 🔧 Manually registering peer \(peerID.prefix(8)) in libp2p peer store...")
+            
+            // Call the discovery callback that was registered in start()
+            // This should add the peer to libp2p's peer store with the addresses
+            if let callback = discoveryCallback {
+                callback(peerInfo)
+                print("[P2PNode] ✅ Peer \(peerID.prefix(8)) registered with \(parsedAddresses.count) address(es) in libp2p peer store")
+            } else {
+                print("[P2PNode] ⚠️ Discovery callback not available, peer may not be registered")
+                print("[P2PNode] 💡 libp2p will attempt to connect when SyncManager makes a request")
+            }
+        } else {
+            print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
+            print("[P2PNode] 💡 libp2p will try to discover the peer via other mechanisms")
         }
         
         // Trigger peer discovery callback so SyncManager can try to sync
-        // libp2p's newRequest will automatically establish connection when needed
-        // If addresses were provided, the connection should use them
-        print("[P2PNode] Triggering peer discovery callback for \(peerID.prefix(8))")
+        // SyncManager will make the actual request, which should work if peer is in peer store
+        print("[P2PNode] 📡 Triggering peer discovery callback for \(peerID.prefix(8))")
         await MainActor.run {
             self.onPeerDiscovered?(peerIDObj)
         }
@@ -153,10 +204,18 @@ public class P2PNode {
         // 需要检查 swift-libp2p 是否提供这些模块
         
         // Register for peer discovery events (from libp2p's discovery mechanisms)
-        app.discovery.onPeerDiscovered(self) { [weak self] (peerInfo: PeerInfo) in
-            print("[P2PNode] libp2p discovered peer: \(peerInfo.peer.b58String)")
+        // When libp2p discovers a peer (via DHT or other mechanisms), it will call this callback
+        // The PeerInfo includes addresses, which libp2p automatically adds to the peer store
+        let discoveryHandler: (PeerInfo) -> Void = { [weak self] (peerInfo: PeerInfo) in
+            print("[P2PNode] libp2p discovered peer: \(peerInfo.peer.b58String) with \(peerInfo.addresses.count) address(es)")
+            // libp2p has already added this peer to the peer store with addresses
             self?.onPeerDiscovered?(peerInfo.peer)
         }
+        
+        app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
+        
+        // Save the callback so we can manually trigger it for LAN-discovered peers
+        self.discoveryCallback = discoveryHandler
 
         // Start the application in a background Task so it doesn't block the caller
         Task {

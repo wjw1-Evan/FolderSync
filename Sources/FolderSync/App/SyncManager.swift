@@ -361,19 +361,47 @@ public class SyncManager: ObservableObject {
                 } catch {
                     print("[SyncManager] ❌ 获取远程 MST 根失败: \(error)")
                     print("[SyncManager] 错误详情: \(error.localizedDescription)")
-                    // 如果是超时错误，提供更友好的错误信息
-                    if let nsError = error as NSError?, nsError.code == 2 {
+                    
+                    // 检查是否是 peerNotFound 错误
+                    let errorString = String(describing: error)
+                    if errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore") {
+                        print("[SyncManager] ⚠️ 对等点未在 libp2p peer store 中找到")
+                        print("[SyncManager] 💡 可能的原因:")
+                        print("[SyncManager]   1. 对等点地址未正确注册到 libp2p")
+                        print("[SyncManager]   2. 对等点可能已离线")
+                        print("[SyncManager]   3. 网络发现可能尚未完成")
+                        print("[SyncManager] 💡 建议: 等待几秒后重试，或检查对等点是否在线")
+                        
+                        // 等待一小段时间后重试（给 libp2p 时间发现对等点）
+                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+                        print("[SyncManager] 🔄 重试连接...")
+                        do {
+                            rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
+                        } catch {
+                            // 重试也失败，标记为错误
+                            await MainActor.run {
+                                self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
+                            }
+                            return
+                        }
+                    } else if let nsError = error as NSError?, nsError.code == 2 {
+                        // 超时错误
                         print("[SyncManager] 💡 提示: 对等点可能未响应，请检查:")
                         print("[SyncManager]   1. 网络连接是否正常")
                         print("[SyncManager]   2. 对等点是否在线")
                         print("[SyncManager]   3. 防火墙是否阻止了连接")
                         print("[SyncManager]   4. 两台设备是否在同一网络")
+                        await MainActor.run {
+                            self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
+                        }
+                        return
+                    } else {
+                        // 其他错误
+                        await MainActor.run {
+                            self.updateFolderStatus(folder.id, status: .error, message: "同步失败: \(error.localizedDescription)")
+                        }
+                        return
                     }
-                    // 不立即抛出错误，而是标记为失败并继续
-                    await MainActor.run {
-                        self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
-                    }
-                    return
                 }
                 
                 if case .error = rootRes {

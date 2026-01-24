@@ -23,7 +23,7 @@ extension SyncResponse: AsyncResponseEncodable {
 }
 
 extension Application {
-    public func requestSync<T: Decodable>(_ message: SyncRequest, to peer: PeerID, timeout: TimeInterval = 30.0, maxRetries: Int = 3) async throws -> T {
+    public func requestSync<T: Decodable>(_ message: SyncRequest, to peer: PeerID, timeout: TimeInterval = 30.0, maxRetries: Int = 3, peerAddresses: [Multiaddr]? = nil) async throws -> T {
         let data = try JSONEncoder().encode(message)
         let timeoutSeconds: TimeInterval = timeout
         
@@ -36,6 +36,9 @@ extension Application {
                 let attemptTimeout = timeoutSeconds * Double(attempt)
                 
                 // newRequest returns a future that completes with the response Data
+                // Note: swift-libp2p's newRequest may not support passing addresses directly
+                // If peerAddresses are provided, we need to ensure libp2p knows about them
+                // The addresses should already be in the peer store from connectToDiscoveredPeer
                 let responseData = try await withTimeout(seconds: attemptTimeout) {
                     try await self.newRequest(to: peer, forProtocol: "folder-sync/1.0.0", withRequest: data).get()
                 }

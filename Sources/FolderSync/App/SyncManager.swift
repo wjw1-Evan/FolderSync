@@ -58,12 +58,14 @@ public class SyncManager: ObservableObject {
                         
                         // 当发现新对等点时，延迟同步以确保对等点已正确注册到 libp2p peer store
                         // 这很重要，因为对等点需要时间被添加到 peer store
+                        // 注意：P2PNode.connectToDiscoveredPeer 已经等待了 1.5 秒，这里再等待 1 秒确保完全就绪
                         for folder in self.folders {
                             Task {
                                 // 延迟更长时间，确保对等点已完全注册到 libp2p peer store
+                                // P2PNode 已经等待了 1.5 秒，这里再等待 1 秒，总共约 2.5 秒
                                 // 这样可以避免 peerNotFound 错误
                                 print("[SyncManager] ⏳ 等待对等点注册到 libp2p peer store...")
-                                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒（P2PNode 已等待 1.5 秒）
                                 print("[SyncManager] 🔄 开始同步: folder=\(folder.syncID), peer=\(peerIDString.prefix(12))...")
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }
@@ -119,12 +121,16 @@ public class SyncManager: ObservableObject {
         
         // 启动新的定期检查任务
         peerStatusCheckTask = Task { [weak self] in
+            // 首次等待 30 秒，给设备足够的时间完成连接和注册
+            // 从 60 秒减少到 30 秒，避免设备状态更新过慢
+            try? await Task.sleep(nanoseconds: 30_000_000_000) // 30秒
+            
             while !Task.isCancelled {
-                // 每 30 秒检查一次设备在线状态
-                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30秒
-                
                 guard let self = self else { break }
                 await self.checkAllPeersOnlineStatus()
+                
+                // 之后每 30 秒检查一次设备在线状态
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30秒
             }
         }
     }
@@ -587,9 +593,11 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager]   2. 对等点可能已离线")
                         print("[SyncManager]   3. 网络发现可能尚未完成")
                         print("[SyncManager] 💡 建议: 等待几秒后重试，或检查对等点是否在线")
+                        print("[SyncManager] ⏳ 等待 3 秒后重试连接，给 libp2p 更多时间处理对等点注册...")
                         
-                        // 等待一小段时间后重试（给 libp2p 时间发现对等点）
-                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+                        // 等待更长时间后重试（给 libp2p 时间发现对等点并更新 peer store）
+                        // 从 2 秒增加到 3 秒，确保对等点有足够时间注册
+                        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
                         print("[SyncManager] 🔄 重试连接...")
                         do {
                             rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)

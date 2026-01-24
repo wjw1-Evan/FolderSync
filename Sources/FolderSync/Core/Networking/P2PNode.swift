@@ -150,12 +150,17 @@ public class P2PNode {
             // 注意：这个回调必须在 app.startup() 之后调用才能正确工作
             if let callback = discoveryCallback {
                 print("[P2PNode] ✅ 调用发现回调注册对等点...")
+                // discoveryCallback 内部会调用 onPeerDiscovered，所以 SyncManager 会立即收到通知
+                // 这确保了设备会立即出现在设备列表中
                 callback(peerInfo)
                 print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
+                print("[P2PNode] ✅ SyncManager 应该已收到对等点发现通知（通过 discoveryHandler）")
                 
-                // 等待一小段时间，确保 peer store 已更新
-                // 这给 libp2p 时间处理发现回调
-                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3秒
+                // 等待更长时间，确保 peer store 已更新
+                // libp2p 需要时间处理发现回调并更新内部 peer store
+                // 但通知已经发送，所以 SyncManager 可以立即看到设备
+                print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
+                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
                 print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
             } else {
                 print("[P2PNode] ❌ Discovery callback 不可用！")
@@ -163,17 +168,24 @@ public class P2PNode {
                 print("[P2PNode] 💡 这可能是因为 app.startup() 尚未完成")
                 print("[P2PNode] 💡 或者 discovery callback 尚未注册")
                 print("[P2PNode] 💡 这会导致后续的 peerNotFound 错误")
+                
+                // 即使 discovery callback 不可用，也尝试通知 SyncManager
+                // 这样至少设备会出现在列表中，即使可能无法连接
+                print("[P2PNode] 📡 尝试直接触发 peer discovery callback...")
+                await MainActor.run {
+                    self.onPeerDiscovered?(peerIDObj)
+                }
             }
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
             print("[P2PNode] 💡 libp2p will try to discover the peer via other mechanisms")
-        }
-        
-        // Trigger peer discovery callback so SyncManager can try to sync
-        // SyncManager will make the actual request, which should work if peer is in peer store
-        print("[P2PNode] 📡 Triggering peer discovery callback for \(peerID.prefix(8))")
-        await MainActor.run {
-            self.onPeerDiscovered?(peerIDObj)
+            
+            // 即使没有地址，也通知 SyncManager，这样设备会出现在列表中
+            // 后续如果有地址了，可以再次注册
+            print("[P2PNode] 📡 触发 peer discovery callback（无地址，但通知 SyncManager）...")
+            await MainActor.run {
+                self.onPeerDiscovered?(peerIDObj)
+            }
         }
     }
 

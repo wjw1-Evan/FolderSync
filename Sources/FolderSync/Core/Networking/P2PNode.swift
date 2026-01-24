@@ -178,8 +178,8 @@ public class P2PNode {
                 print("[P2PNode] 💡 或者 discovery callback 尚未注册")
                 print("[P2PNode] 💡 这会导致后续的 peerNotFound 错误")
                 
-                // 修复 Bug 1: 即使 discovery callback 不可用，也应该等待相同的时间
-                // 这样 SyncManager 的等待时间计算才能正确
+                // 修复 Bug 1: 即使 discovery callback 不可用，也应该等待相同的时间（2.5 秒）
+                // 这样可以确保在所有情况下，SyncManager 的等待时间计算都是一致的
                 // 等待 1.5 秒后再通知 SyncManager，确保时序一致
                 print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
                 try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
@@ -190,13 +190,19 @@ public class P2PNode {
                 await MainActor.run {
                     self.onPeerDiscovered?(peerIDObj)
                 }
+                
+                // 修复 Bug 1: 通知后，再等待 1 秒，确保与 discoveryCallback 可用时的总等待时间一致（2.5 秒）
+                // 虽然无法注册到 libp2p peer store，但保持时序一致很重要
+                print("[P2PNode] ⏳ 等待 1 秒以确保时序一致（总等待时间 2.5 秒）...")
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+                print("[P2PNode] ✅ 对等点处理完成（虽然无法注册到 peer store）")
             }
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
             print("[P2PNode] 💡 libp2p will try to discover the peer via other mechanisms")
             
-            // 修复 Bug 1: 即使没有地址，也应该等待相同的时间
-            // 这样 SyncManager 的等待时间计算才能正确
+            // 修复 Bug 1: 即使没有地址，也应该等待相同的时间（2.5 秒）
+            // 这样可以确保在所有情况下，SyncManager 的等待时间计算都是一致的
             // 等待 1.5 秒后再通知 SyncManager，确保时序一致
             print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
             try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
@@ -207,6 +213,12 @@ public class P2PNode {
             await MainActor.run {
                 self.onPeerDiscovered?(peerIDObj)
             }
+            
+            // 修复 Bug 1: 通知后，再等待 1 秒，确保与 discoveryCallback 可用时的总等待时间一致（2.5 秒）
+            // 虽然无法注册到 libp2p peer store，但保持时序一致很重要
+            print("[P2PNode] ⏳ 等待 1 秒以确保时序一致（总等待时间 2.5 秒）...")
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+            print("[P2PNode] ✅ 对等点处理完成（虽然无法注册到 peer store）")
         }
     }
 

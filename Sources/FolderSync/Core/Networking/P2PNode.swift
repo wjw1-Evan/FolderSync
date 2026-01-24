@@ -10,6 +10,7 @@ public class P2PNode {
     private var peerAddressCache: [String: [Multiaddr]] = [:] // 缓存对等点地址 (使用 b58String 作为键)
     private var discoveryCallback: ((PeerInfo) -> Void)? // 保存发现回调以便手动调用
     private var registeringPeers: Set<String> = [] // 正在注册的对等点 PeerID (b58String)，用于去重
+    private var registeredPeers: Set<String> = [] // 已成功注册到 peer store 的对等点 PeerID (b58String)
 
     public init() {}
     
@@ -66,6 +67,36 @@ public class P2PNode {
         if peerID.isEmpty {
             print("[P2PNode] ❌ 错误: PeerID 为空，无法连接")
             return
+        }
+        
+        // 检查是否已经成功注册过此对等点
+        let isAlreadyRegistered = await MainActor.run {
+            return self.registeredPeers.contains(peerID)
+        }
+        
+        // 如果已经注册过，且这次有地址，检查地址是否有更新
+        if isAlreadyRegistered && !addresses.isEmpty {
+            // 解析新地址
+            var newAddresses: [Multiaddr] = []
+            for addressStr in addresses {
+                if let multiaddr = try? Multiaddr(addressStr) {
+                    newAddresses.append(multiaddr)
+                }
+            }
+            
+            // 检查是否有新地址
+            let cachedAddresses = await MainActor.run {
+                return self.peerAddressCache[peerID] ?? []
+            }
+            
+            // 如果地址相同，跳过
+            if Set(newAddresses.map { $0.description }) == Set(cachedAddresses.map { $0.description }) {
+                print("[P2PNode] ⏭️ 对等点 \(peerID.prefix(12))... 已注册且地址未变化，跳过")
+                return
+            }
+            
+            // 地址有更新，继续注册流程
+            print("[P2PNode] 🔄 对等点 \(peerID.prefix(12))... 地址已更新，重新注册")
         }
         
         // 检查是否正在注册此对等点（去重）
@@ -191,6 +222,12 @@ public class P2PNode {
                 print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
                 print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
+                
+                // 标记为已成功注册
+                await MainActor.run {
+                    self.registeredPeers.insert(peerID)
+                }
+                
                 // 总等待时间：1.5 + 1 = 2.5 秒
                 // 通知发生在 T=1.5 秒，SyncManager 在 T=2.5 秒开始同步
                 // 此时 P2PNode 已经等待了 2.5 秒，确保 peer store 已更新
@@ -223,27 +260,14 @@ public class P2PNode {
             }
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
-            print("[P2PNode] 💡 libp2p will try to discover the peer via other mechanisms")
+            print("[P2PNode] 💡 无法注册对等点到 peer store（缺少地址）")
+            print("[P2PNode] 💡 等待后续发现时提供地址后再注册")
             
-            // 修复 Bug 1: 在 no-address 路径中，我们需要在通知前等待 1.5 秒
-            // 这样可以确保与 callback-available 路径的时序一致
-            // callback-available: 等待 1.5 秒 → 通知（T=1.5）→ 等待 1 秒（T=2.5，确保 libp2p 处理）
-            // no-address: 等待 1.5 秒 → 通知（T=1.5）→ 立即返回
-            // SyncManager 在两种情况下都会在 T=1.5 收到通知，然后等待 1 秒，在 T=2.5 开始同步
-            // 在 callback-available 路径中，P2PNode 的 1 秒等待与 SyncManager 的 1 秒等待是并行的
-            // 在 no-address 路径中，由于没有地址，无法注册到 peer store，不需要额外的等待
-            print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
-            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
-            
-            // 即使没有地址，也通知 SyncManager，这样设备会出现在列表中
-            // 后续如果有地址了，可以再次注册
-            print("[P2PNode] 📡 触发 peer discovery callback（无地址，但通知 SyncManager）...")
-            await MainActor.run {
-                self.onPeerDiscovered?(peerIDObj)
-            }
-            print("[P2PNode] ✅ 对等点处理完成（虽然无法注册到 peer store）")
-            // 注意：不等待额外的 1 秒，因为无法注册到 peer store，不需要等待 libp2p 处理
-            // SyncManager 会等待 1 秒，在 T=2.5 开始同步（与 callback-available 路径一致）
+            // 如果没有地址，不应该通知 SyncManager，因为无法注册到 peer store
+            // 这会导致 SyncManager 尝试同步但失败（peerNotFound）
+            // 只有当有地址时，才通知 SyncManager
+            print("[P2PNode] ⏭️ 跳过通知 SyncManager（无地址，无法注册）")
+            print("[P2PNode] 💡 当后续 LAN discovery 提供地址时，会再次尝试注册")
         }
     }
 

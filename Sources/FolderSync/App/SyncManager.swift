@@ -180,7 +180,7 @@ public class SyncManager: ObservableObject {
     
     /// 检查所有对等点的在线状态
     private func checkAllPeersOnlineStatus() async {
-        guard let app = p2pNode.app else {
+        guard p2pNode.app != nil else {
             print("[SyncManager] ⚠️ P2P 节点未初始化，跳过设备状态检查")
             return
         }

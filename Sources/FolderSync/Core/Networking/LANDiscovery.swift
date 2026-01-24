@@ -8,6 +8,7 @@ public class LANDiscovery {
     private var broadcastConnection: NWConnection?
     private var broadcastTimer: Timer?
     private var discoveryRequestConnections: [NWConnection] = [] // 保持发现请求连接的强引用
+    private let connectionsQueue = DispatchQueue(label: "com.foldersync.lanDiscovery.connections", attributes: .concurrent) // 线程安全的连接数组访问
     private var isRunning = false
     private let servicePort: UInt16 = 8765 // Custom port for FolderSync discovery
     private let serviceName = "_foldersync._tcp"
@@ -33,11 +34,29 @@ public class LANDiscovery {
         broadcastTimer = nil
         listener?.cancel()
         broadcastConnection?.cancel()
-        // 取消所有发现请求连接
-        discoveryRequestConnections.forEach { $0.cancel() }
-        discoveryRequestConnections.removeAll()
+        
+        // 线程安全地取消所有发现请求连接
+        connectionsQueue.sync(flags: .barrier) {
+            discoveryRequestConnections.forEach { $0.cancel() }
+            discoveryRequestConnections.removeAll()
+        }
+        
         listener = nil
         broadcastConnection = nil
+    }
+    
+    /// 线程安全地添加连接
+    private func addConnection(_ connection: NWConnection) {
+        connectionsQueue.async(flags: .barrier) { [weak self] in
+            self?.discoveryRequestConnections.append(connection)
+        }
+    }
+    
+    /// 线程安全地移除连接
+    private func removeConnection(_ connection: NWConnection) {
+        connectionsQueue.async(flags: .barrier) { [weak self] in
+            self?.discoveryRequestConnections.removeAll { $0 === connection }
+        }
     }
     
     private func startListener(peerID: String) {
@@ -91,33 +110,60 @@ public class LANDiscovery {
         
         let connection = NWConnection(to: endpoint, using: parameters)
         
-        // 将连接添加到数组中以保持强引用，防止被释放
-        discoveryRequestConnections.append(connection)
+        // 线程安全地添加连接到数组中以保持强引用，防止被释放
+        addConnection(connection)
         
+        // 使用 weak self 避免循环引用
         connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
+            guard let self = self else {
+                // 如果 self 已被释放，取消连接
+                connection.cancel()
+                return
+            }
+            
             switch state {
             case .ready:
+                // 检查连接是否仍然有效（未被取消）
                 connection.send(content: data, completion: .contentProcessed { [weak self] error in
+                    // 无论成功或失败，都要清理连接
+                    connection.cancel()
+                    self?.removeConnection(connection)
+                    
                     if let error = error {
                         print("[LANDiscovery] Discovery request send error: \(error)")
                     } else {
                         print("[LANDiscovery] 📡 已发送发现请求，等待其他设备响应...")
                     }
-                    // 发送完成后，从数组中移除并取消连接
-                    connection.cancel()
-                    self?.discoveryRequestConnections.removeAll { $0 === connection }
                 })
             case .failed(let error):
                 print("[LANDiscovery] Discovery request connection failed: \(error)")
                 connection.cancel()
                 // 连接失败后，从数组中移除
-                self.discoveryRequestConnections.removeAll { $0 === connection }
+                self.removeConnection(connection)
+            case .cancelled:
+                // 连接被取消，从数组中移除
+                self.removeConnection(connection)
             default:
                 break
             }
         }
+        
         connection.start(queue: DispatchQueue.global(qos: .utility))
+        
+        // 设置超时机制：如果连接在10秒内没有完成，自动取消并清理
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10.0) { [weak self] in
+            // 检查连接是否仍在数组中（未完成）
+            var shouldCancel = false
+            self?.connectionsQueue.sync {
+                shouldCancel = self?.discoveryRequestConnections.contains { $0 === connection } ?? false
+            }
+            
+            if shouldCancel {
+                print("[LANDiscovery] ⚠️ Discovery request timeout, cancelling connection")
+                connection.cancel()
+                self?.removeConnection(connection)
+            }
+        }
     }
     
     private func handleIncomingConnection(_ connection: NWConnection, myPeerID: String) {

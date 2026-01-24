@@ -93,10 +93,11 @@ public class SyncManager: ObservableObject {
                     
                     if wasNew {
                         self.updateDeviceCounts()
-                        // 延迟 2.5 秒同步以确保对等点已完全注册到 libp2p peer store
+                        // P2PNode 已经等待了 2 秒，这里再等待 1.5 秒，总共约 3.5 秒
+                        // 确保对等点已完全注册到 libp2p peer store
                         for folder in self.folders {
                             Task {
-                                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                                try? await Task.sleep(nanoseconds: 1_500_000_000)
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }
                         }
@@ -364,7 +365,8 @@ public class SyncManager: ObservableObject {
             // 等待一小段时间确保服务已发布，然后开始同步
             print("[SyncManager] ℹ️ 新文件夹已添加，准备开始同步...")
             
-            // 延迟 2.5 秒后开始同步，确保：
+            // 延迟 3.5 秒后开始同步，确保：
+            // P2PNode 已经等待了 2 秒，这里再等待 1.5 秒，总共约 3.5 秒
             // 1. 服务已发布
             // 2. 如果有现有 peer，可以立即同步
             // 3. 如果没有 peer，会等待 peer 发现后自动同步（通过 onPeerDiscovered 回调）
@@ -412,13 +414,26 @@ public class SyncManager: ObservableObject {
                 
                 guard !Task.isCancelled else { return }
                 
+                // 检查是否有同步正在进行
+                let hasSyncInProgress = await MainActor.run {
+                    guard let self = self else { return false }
+                    let allPeers = self.peerManager.allPeers
+                    for peerInfo in allPeers {
+                        let syncKey = "\(syncID):\(peerInfo.peerIDString)"
+                        if self.syncInProgress.contains(syncKey) {
+                            return true
+                        }
+                    }
+                    return false
+                }
+                
+                if hasSyncInProgress {
+                    print("[SyncManager] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
+                    return
+                }
+                
                 print("[SyncManager] 🔄 防抖延迟结束，开始同步: \(syncID)")
                 self?.triggerSync(for: folder)
-                
-                // 通知所有 peer 进行同步
-                for peerInfo in self?.peerManager.allPeers ?? [] {
-                    self?.syncWithPeer(peer: peerInfo.peerID, folder: folder)
-                }
             }
             
             self?.debounceTasks[syncID] = debounceTask
@@ -627,7 +642,8 @@ public class SyncManager: ObservableObject {
                     }
                     
                     await p2pNode.retryPeerRegistration(peer: peer)
-                    try? await Task.sleep(nanoseconds: 3_000_000_000) // 增加到 3 秒，确保 peer 完全注册
+                    // retryPeerRegistration 已经等待了 2 秒，这里再等待 1 秒，总共约 3 秒
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                     
                     do {
                         rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
@@ -1032,6 +1048,23 @@ public class SyncManager: ObservableObject {
     }
     
     func triggerSync(for folder: SyncFolder) {
+        // 检查是否有同步正在进行，避免重复触发
+        let hasSyncInProgress = {
+            let allPeers = peerManager.allPeers
+            for peerInfo in allPeers {
+                let syncKey = "\(folder.syncID):\(peerInfo.peerIDString)"
+                if syncInProgress.contains(syncKey) {
+                    return true
+                }
+            }
+            return false
+        }()
+        
+        if hasSyncInProgress {
+            print("[SyncManager] ⏭️ 同步已进行中，跳过 triggerSync: \(folder.syncID)")
+            return
+        }
+        
         updateFolderStatus(folder.id, status: .syncing, message: "Scanning local files...")
         
         Task {

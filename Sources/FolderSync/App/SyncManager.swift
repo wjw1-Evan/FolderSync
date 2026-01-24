@@ -58,14 +58,19 @@ public class SyncManager: ObservableObject {
                         
                         // 当发现新对等点时，延迟同步以确保对等点已正确注册到 libp2p peer store
                         // 这很重要，因为对等点需要时间被添加到 peer store
-                        // 注意：P2PNode.connectToDiscoveredPeer 已经等待了 1.5 秒，这里再等待 1 秒确保完全就绪
+                        // 注意：P2PNode.connectToDiscoveredPeer 会：
+                        //   1. 等待 1.5 秒（确保环境就绪）
+                        //   2. 调用 callback 通知 SyncManager（T=1.5）
+                        //   3. 再等待 1 秒（确保 libp2p 处理完成，T=2.5）
+                        // SyncManager 收到通知后等待 1 秒，在 T=2.5 开始同步
+                        // 此时 P2PNode 已经等待了 2.5 秒，确保 peer store 已更新
                         for folder in self.folders {
                             Task {
-                                // 延迟更长时间，确保对等点已完全注册到 libp2p peer store
-                                // P2PNode 已经等待了 1.5 秒，这里再等待 1 秒，总共约 2.5 秒
-                                // 这样可以避免 peerNotFound 错误
+                                // 延迟 1 秒，确保对等点已完全注册到 libp2p peer store
+                                // P2PNode 已经等待了 2.5 秒（1.5 + 1），这里再等待 1 秒
+                                // 通知发生在 T=1.5，同步开始于 T=2.5，此时 peer store 应该已更新
                                 print("[SyncManager] ⏳ 等待对等点注册到 libp2p peer store...")
-                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒（P2PNode 已等待 1.5 秒）
+                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
                                 print("[SyncManager] 🔄 开始同步: folder=\(folder.syncID), peer=\(peerIDString.prefix(12))...")
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }

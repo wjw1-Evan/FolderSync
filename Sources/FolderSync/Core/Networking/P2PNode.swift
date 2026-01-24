@@ -160,7 +160,17 @@ public class P2PNode {
                 callback(peerInfo)
                 print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
                 print("[P2PNode] ✅ SyncManager 应该已收到对等点发现通知（通过 discoveryHandler）")
+                
+                // 修复 Bug 1: 调用 callback 后，还需要等待 libp2p 处理完成
+                // libp2p 需要时间处理 discovery callback 并更新内部 peer store
+                // 虽然通知已经发送，但我们仍需要等待确保 peer store 已更新
+                // 这样 SyncManager 开始同步时，peer store 已经准备好了
+                print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
                 print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
+                // 总等待时间：1.5 + 1 = 2.5 秒
+                // 通知发生在 T=1.5 秒，SyncManager 在 T=2.5 秒开始同步
+                // 此时 P2PNode 已经等待了 2.5 秒，确保 peer store 已更新
             } else {
                 print("[P2PNode] ❌ Discovery callback 不可用！")
                 print("[P2PNode] ⚠️ 严重警告: 对等点无法注册到 libp2p peer store")

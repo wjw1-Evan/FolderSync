@@ -6,15 +6,16 @@ import NIOCore
 public class LANDiscovery {
     private var listener: NWListener?
     private var broadcastConnection: NWConnection?
+    private var broadcastTimer: Timer?
     private var isRunning = false
     private let servicePort: UInt16 = 8765 // Custom port for FolderSync discovery
     private let serviceName = "_foldersync._tcp"
     
-    public var onPeerDiscovered: ((String, String) -> Void)? // (peerID, address)
+    public var onPeerDiscovered: ((String, String, [String]) -> Void)? // (peerID, address, listenAddresses)
     
     public init() {}
     
-    public func start(peerID: String) {
+    public func start(peerID: String, listenAddresses: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
         
@@ -22,11 +23,13 @@ public class LANDiscovery {
         startListener(peerID: peerID)
         
         // Start broadcasting our presence
-        startBroadcasting(peerID: peerID)
+        startBroadcasting(peerID: peerID, listenAddresses: listenAddresses)
     }
     
     public func stop() {
         isRunning = false
+        broadcastTimer?.invalidate()
+        broadcastTimer = nil
         listener?.cancel()
         broadcastConnection?.cancel()
         listener = nil
@@ -91,8 +94,8 @@ public class LANDiscovery {
                     // Ignore our own broadcasts
                     if peerInfo.peerID != myPeerID {
                         let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
-                        print("[LANDiscovery] Discovered peer: \(peerInfo.peerID) at \(address)")
-                        self?.onPeerDiscovered?(peerInfo.peerID, address)
+                        print("[LANDiscovery] Discovered peer: \(peerInfo.peerID) at \(address) with addresses: \(peerInfo.addresses)")
+                        self?.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
                     }
                 }
             }
@@ -103,19 +106,28 @@ public class LANDiscovery {
         }
     }
     
-    private func startBroadcasting(peerID: String) {
+    private var currentListenAddresses: [String] = []
+    
+    private func startBroadcasting(peerID: String, listenAddresses: [String]) {
+        self.currentListenAddresses = listenAddresses
         // Broadcast every 5 seconds
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.sendBroadcast(peerID: peerID)
+            guard let self = self else { return }
+            self.sendBroadcast(peerID: peerID, listenAddresses: self.currentListenAddresses)
         }
         RunLoop.current.add(timer, forMode: .common)
+        self.broadcastTimer = timer
         
         // Send initial broadcast
-        sendBroadcast(peerID: peerID)
+        sendBroadcast(peerID: peerID, listenAddresses: listenAddresses)
     }
     
-    private func sendBroadcast(peerID: String) {
-        let message = createDiscoveryMessage(peerID: peerID)
+    public func updateListenAddresses(_ addresses: [String]) {
+        self.currentListenAddresses = addresses
+    }
+    
+    private func sendBroadcast(peerID: String, listenAddresses: [String]) {
+        let message = createDiscoveryMessage(peerID: peerID, listenAddresses: listenAddresses)
         guard let data = message.data(using: .utf8) else { return }
         
         let parameters = NWParameters.udp
@@ -146,19 +158,21 @@ public class LANDiscovery {
         connection.start(queue: DispatchQueue.global(qos: .utility))
     }
     
-    private func createDiscoveryMessage(peerID: String) -> String {
-        // Simple JSON format: {"peerID": "...", "service": "foldersync"}
-        return "{\"peerID\":\"\(peerID)\",\"service\":\"foldersync\"}"
+    private func createDiscoveryMessage(peerID: String, listenAddresses: [String] = []) -> String {
+        // JSON format: {"peerID": "...", "service": "foldersync", "addresses": [...]}
+        let addressesJson = listenAddresses.map { "\"\($0)\"" }.joined(separator: ",")
+        return "{\"peerID\":\"\(peerID)\",\"service\":\"foldersync\",\"addresses\":[\(addressesJson)]}"
     }
     
-    private func parseDiscoveryMessage(_ message: String) -> (peerID: String, service: String)? {
+    private func parseDiscoveryMessage(_ message: String) -> (peerID: String, service: String, addresses: [String])? {
         guard let data = message.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-              let peerID = json["peerID"],
-              let service = json["service"],
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let peerID = json["peerID"] as? String,
+              let service = json["service"] as? String,
               service == "foldersync" else {
             return nil
         }
-        return (peerID: peerID, service: service)
+        let addresses = (json["addresses"] as? [String]) ?? []
+        return (peerID: peerID, service: service, addresses: addresses)
     }
 }

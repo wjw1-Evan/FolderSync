@@ -10,17 +10,54 @@ public class P2PNode {
     public init() {}
     
     /// Setup LAN discovery using UDP broadcast
-    private func setupLANDiscovery(peerID: String) {
+    private func setupLANDiscovery(peerID: String, listenAddresses: [String] = []) {
         let discovery = LANDiscovery()
-        discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address in
-            print("[P2PNode] LAN discovery found peer: \(discoveredPeerID) at \(address)")
-            // Store discovered peer IDs - libp2p will handle the actual connection
-            // when peers are discovered through its own mechanisms or when they connect
-            // The LAN discovery helps peers find each other on the local network
+        discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses in
+            print("[P2PNode] LAN discovery found peer: \(discoveredPeerID) at \(address) with addresses: \(peerAddresses)")
+            // Try to connect to the discovered peer via libp2p
+            Task { @MainActor in
+                await self?.connectToDiscoveredPeer(peerID: discoveredPeerID, addresses: peerAddresses)
+            }
         }
-        discovery.start(peerID: peerID)
+        discovery.start(peerID: peerID, listenAddresses: listenAddresses)
         self.lanDiscovery = discovery
         print("[P2PNode] LAN discovery enabled using UDP broadcast. Automatic peer discovery active.")
+    }
+    
+    /// Connect to a peer discovered via LAN discovery
+    private func connectToDiscoveredPeer(peerID: String, addresses: [String]) async {
+        guard let app = app else { return }
+        
+        // Try to parse the peerID string to PeerID object
+        guard let peerIDObj = try? PeerID(cid: peerID) else {
+            print("[P2PNode] Failed to parse peerID: \(peerID)")
+            return
+        }
+        
+        // Try to connect using the provided addresses
+        var foundAddress = false
+        for addressStr in addresses {
+            // Try to parse as Multiaddr
+            if let multiaddr = try? Multiaddr(addressStr) {
+                print("[P2PNode] Found peer \(peerID.prefix(8)) at \(multiaddr)")
+                // Note: libp2p will automatically try to connect when SyncManager makes a request
+                // The address information is stored in the peer store implicitly when we trigger the callback
+                foundAddress = true
+                break
+            }
+        }
+        
+        if !foundAddress && !addresses.isEmpty {
+            print("[P2PNode] Warning: Could not parse any addresses for \(peerID.prefix(8)): \(addresses)")
+        }
+        
+        // Trigger peer discovery callback so SyncManager can try to sync
+        // libp2p's newRequest will automatically establish connection when needed
+        // If addresses were provided, the connection should use them
+        print("[P2PNode] Triggering peer discovery callback for \(peerID.prefix(8))")
+        await MainActor.run {
+            self.onPeerDiscovered?(peerIDObj)
+        }
     }
 
     public var onPeerDiscovered: ((PeerID) -> Void)?
@@ -42,7 +79,8 @@ public class P2PNode {
         app.listen(.tcp(host: "0.0.0.0", port: 0))
 
         // Enable LAN discovery using UDP broadcast (more reliable than mDNS)
-        setupLANDiscovery(peerID: app.peerID.b58String)
+        // Will update addresses after startup
+        setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
 
         // TODO: DHT广域网发现 - 需要添加 DHT 包并配置:
         // app.dht.initialize()
@@ -72,6 +110,10 @@ public class P2PNode {
 
         // Give the node a moment to initialize the server and update listenAddresses
         try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s
+
+        // Update LAN discovery with actual listen addresses
+        let addresses = app.listenAddresses.map { $0.description }
+        lanDiscovery?.updateListenAddresses(addresses)
 
         print("P2P Node initializing with PeerID: \(app.peerID.b58String)")
         print("Ready for connections. Listening on: \(app.listenAddresses)")

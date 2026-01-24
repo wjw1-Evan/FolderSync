@@ -162,7 +162,8 @@ public class SyncManager: ObservableObject {
         }
         if p.hasPrefix("*.") {
             let ext = String(p.dropFirst(2))
-            return path.hasSuffix("." + ext) || path == ext
+            // Only match files with the extension, not files with that exact name
+            return path.hasSuffix("." + ext)
         }
         if path == p { return true }
         if path.hasSuffix("/" + p) { return true }

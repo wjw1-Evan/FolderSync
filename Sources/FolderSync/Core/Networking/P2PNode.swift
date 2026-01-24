@@ -178,10 +178,10 @@ public class P2PNode {
         // 这对于新启动的设备特别重要，可以立即被已有设备发现
         if !addresses.isEmpty {
             print("[P2PNode] 📡 监听地址已更新，立即广播以通知其他设备...")
-            // 触发一次额外的广播
+            // 延迟一小段时间确保地址已完全更新，然后发送发现请求
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                // LANDiscovery 会在下次定时器触发时使用新地址广播
-                // 但我们可以立即发送一次发现请求
+                // 发送发现请求，主动寻找已有设备
+                self?.lanDiscovery?.sendDiscoveryRequest()
             }
         }
 

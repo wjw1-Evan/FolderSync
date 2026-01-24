@@ -7,6 +7,7 @@ public class LANDiscovery {
     private var listener: NWListener?
     private var broadcastConnection: NWConnection?
     private var broadcastTimer: Timer?
+    private var discoveryRequestConnections: [NWConnection] = [] // 保持发现请求连接的强引用
     private var isRunning = false
     private let servicePort: UInt16 = 8765 // Custom port for FolderSync discovery
     private let serviceName = "_foldersync._tcp"
@@ -32,6 +33,9 @@ public class LANDiscovery {
         broadcastTimer = nil
         listener?.cancel()
         broadcastConnection?.cancel()
+        // 取消所有发现请求连接
+        discoveryRequestConnections.forEach { $0.cancel() }
+        discoveryRequestConnections.removeAll()
         listener = nil
         broadcastConnection = nil
     }
@@ -74,7 +78,7 @@ public class LANDiscovery {
     }
     
     /// 发送发现请求，让其他设备知道新设备上线并请求它们广播自己的信息
-    private func sendDiscoveryRequest() {
+    func sendDiscoveryRequest() {
         let requestMessage = "{\"type\":\"discovery_request\",\"service\":\"foldersync\"}"
         guard let data = requestMessage.data(using: .utf8) else { return }
         
@@ -86,20 +90,29 @@ public class LANDiscovery {
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
         
         let connection = NWConnection(to: endpoint, using: parameters)
-        connection.stateUpdateHandler = { state in
+        
+        // 将连接添加到数组中以保持强引用，防止被释放
+        discoveryRequestConnections.append(connection)
+        
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
             switch state {
             case .ready:
-                connection.send(content: data, completion: .contentProcessed { error in
+                connection.send(content: data, completion: .contentProcessed { [weak self] error in
                     if let error = error {
                         print("[LANDiscovery] Discovery request send error: \(error)")
                     } else {
                         print("[LANDiscovery] 📡 已发送发现请求，等待其他设备响应...")
                     }
+                    // 发送完成后，从数组中移除并取消连接
                     connection.cancel()
+                    self?.discoveryRequestConnections.removeAll { $0 === connection }
                 })
             case .failed(let error):
                 print("[LANDiscovery] Discovery request connection failed: \(error)")
                 connection.cancel()
+                // 连接失败后，从数组中移除
+                self.discoveryRequestConnections.removeAll { $0 === connection }
             default:
                 break
             }

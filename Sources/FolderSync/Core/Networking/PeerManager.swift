@@ -133,7 +133,10 @@ public class PeerManager: ObservableObject {
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
-            existing.updateAddresses(addresses)
+            // 只有当新地址不为空时才更新地址，避免用空数组覆盖已有地址
+            if !addresses.isEmpty {
+                existing.updateAddresses(addresses)
+            }
             peers[peerIDString] = existing
             return existing
         } else {

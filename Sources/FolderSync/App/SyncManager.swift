@@ -88,7 +88,16 @@ public class SyncManager: ObservableObject {
                     guard !peerIDString.isEmpty else { return }
                     
                     let wasNew = !self.peerManager.hasPeer(peerIDString)
-                    self.peerManager.addOrUpdatePeer(peer, addresses: [])
+                    // 不要覆盖已有的地址
+                    // P2PNode.connectToDiscoveredPeer 已经添加了地址到 PeerManager
+                    // 如果 peer 不存在，则添加（地址会在 connectToDiscoveredPeer 中添加）
+                    // 如果 peer 已存在，则保留其现有地址，只更新在线状态
+                    if wasNew {
+                        // 新 peer，先添加（地址会在 connectToDiscoveredPeer 中添加）
+                        // 这里使用空数组，因为地址会在 connectToDiscoveredPeer 中通过 addOrUpdatePeer 添加
+                        self.peerManager.addOrUpdatePeer(peer, addresses: [])
+                    }
+                    // 更新在线状态（无论新旧 peer 都需要更新）
                     self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
                     
                     if wasNew {

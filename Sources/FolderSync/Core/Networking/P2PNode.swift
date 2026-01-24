@@ -150,24 +150,30 @@ public class P2PNode {
             // 注意：这个回调必须在 app.startup() 之后调用才能正确工作
             if let callback = discoveryCallback {
                 print("[P2PNode] ✅ 调用发现回调注册对等点...")
-                // discoveryCallback 内部会调用 onPeerDiscovered，所以 SyncManager 会立即收到通知
-                // 这确保了设备会立即出现在设备列表中
                 callback(peerInfo)
                 print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
-                print("[P2PNode] ✅ SyncManager 应该已收到对等点发现通知（通过 discoveryHandler）")
                 
                 // 等待更长时间，确保 peer store 已更新
                 // libp2p 需要时间处理发现回调并更新内部 peer store
-                // 但通知已经发送，所以 SyncManager 可以立即看到设备
+                // 注意：discoveryHandler 内部会调用 onPeerDiscovered，通知是立即的
+                // 但我们需要等待确保 peer store 已更新，这样 SyncManager 的同步操作才能成功
                 print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
                 try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
                 print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
+                // 注意：SyncManager 已经通过 discoveryHandler 收到了通知（在 callback 调用时）
+                // SyncManager 会等待 1 秒，总共约 2.5 秒，这应该足够完成注册
             } else {
                 print("[P2PNode] ❌ Discovery callback 不可用！")
                 print("[P2PNode] ⚠️ 严重警告: 对等点无法注册到 libp2p peer store")
                 print("[P2PNode] 💡 这可能是因为 app.startup() 尚未完成")
                 print("[P2PNode] 💡 或者 discovery callback 尚未注册")
                 print("[P2PNode] 💡 这会导致后续的 peerNotFound 错误")
+                
+                // 修复 Bug 1: 即使 discovery callback 不可用，也应该等待相同的时间
+                // 这样 SyncManager 的等待时间计算才能正确
+                // 等待 1.5 秒后再通知 SyncManager，确保时序一致
+                print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
+                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
                 
                 // 即使 discovery callback 不可用，也尝试通知 SyncManager
                 // 这样至少设备会出现在列表中，即使可能无法连接
@@ -179,6 +185,12 @@ public class P2PNode {
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
             print("[P2PNode] 💡 libp2p will try to discover the peer via other mechanisms")
+            
+            // 修复 Bug 1: 即使没有地址，也应该等待相同的时间
+            // 这样 SyncManager 的等待时间计算才能正确
+            // 等待 1.5 秒后再通知 SyncManager，确保时序一致
+            print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
+            try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
             
             // 即使没有地址，也通知 SyncManager，这样设备会出现在列表中
             // 后续如果有地址了，可以再次注册

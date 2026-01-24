@@ -7,11 +7,20 @@ import LibP2PCore
 @MainActor
 public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
-    @Published var peers: [PeerID] = [] // PeerIDs
-    @Published var folderPeers: [String: Set<String>] = [:] // SyncID -> PeerIDs
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
     let p2pNode = P2PNode()
+    
+    // 使用统一的 Peer 管理器
+    public var peerManager: PeerManager {
+        return p2pNode.peerManager
+    }
+    
+    // 使用统一的 SyncID 管理器
+    public let syncIDManager = SyncIDManager()
+    
+    // 兼容性：提供 peers 属性（从 peerManager 获取）
+    @Published var peers: [PeerID] = []
     
     private var monitors: [UUID: FSEventsMonitor] = [:]
     private var uploadSamples: [(Date, Int64)] = []
@@ -20,11 +29,11 @@ public class SyncManager: ObservableObject {
     private var lastKnownLocalPaths: [String: Set<String>] = [:]
     private var deletedPaths: [String: Set<String>] = [:]
     private var syncInProgress: Set<String> = [] // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
-    
-    // 设备在线状态跟踪
-    private var peerOnlineStatus: [String: Bool] = [:] // PeerID (b58String) -> 是否在线
-    private var peerDiscoveryTime: [String: Date] = [:] // PeerID (b58String) -> 发现时间
     private var peerStatusCheckTask: Task<Void, Never>?
+    
+    // 文件监控防抖：syncID -> 防抖任务
+    private var debounceTasks: [String: Task<Void, Never>] = [:]
+    private let debounceDelay: TimeInterval = 2.0 // 2 秒防抖延迟
     
     // 设备统计（用于触发UI更新）
     @Published private(set) var onlineDeviceCountValue: Int = 1 // 包括自身，默认为1
@@ -45,6 +54,8 @@ public class SyncManager: ObservableObject {
                 print("[SyncManager] ℹ️ 当前没有已保存的同步文件夹")
             } else {
                 for folder in loadedFolders {
+                    // 注册 syncID 到管理器
+                    syncIDManager.registerSyncID(folder.syncID, folderID: folder.id)
                     print("[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))")
                 }
             }
@@ -57,57 +68,40 @@ public class SyncManager: ObservableObject {
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()
         
+        // 监听 peerManager 的变化，同步更新 peers 数组（用于兼容性）
+        Task { @MainActor in
+            // 定期同步 peers 数组
+            while !Task.isCancelled {
+                let allPeers = peerManager.allPeers.map { $0.peerID }
+                if self.peers != allPeers {
+                    self.peers = allPeers
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 每秒同步一次
+            }
+        }
+        
         Task { @MainActor in
             p2pNode.onPeerDiscovered = { [weak self] peer in
                 Task { @MainActor in
                     guard let self = self else { return }
                     let peerIDString = peer.b58String
+                    guard !peerIDString.isEmpty else { return }
                     
-                    // 验证 PeerID
-                    print("[SyncManager] 🔍 收到对等点发现通知:")
-                    print("[SyncManager]   - PeerID (完整): \(peerIDString)")
-                    print("[SyncManager]   - PeerID (长度): \(peerIDString.count) 字符")
+                    let wasNew = !self.peerManager.hasPeer(peerIDString)
+                    self.peerManager.addOrUpdatePeer(peer, addresses: [])
+                    self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
                     
-                    if peerIDString.isEmpty {
-                        print("[SyncManager] ❌ 错误: 收到的 PeerID 为空，忽略")
-                        return
-                    }
-                    
-                    if !self.peers.contains(where: { $0.b58String == peerIDString }) {
-                        print("[SyncManager] ✅ 新对等点已添加: \(peerIDString.prefix(12))...")
-                        self.peers.append(peer)
-                        
-                        // 标记为新发现的设备为在线状态，并记录发现时间
-                        self.peerOnlineStatus[peerIDString] = true
-                        self.peerDiscoveryTime[peerIDString] = Date()
-                        self.updateDeviceCounts() // 更新设备统计
-                        
-                        // 当发现新对等点时，延迟同步以确保对等点已正确注册到 libp2p peer store
-                        // 这很重要，因为对等点需要时间被添加到 peer store
-                        // 注意：P2PNode.connectToDiscoveredPeer 会：
-                        //   1. 等待 1.5 秒（确保环境就绪）
-                        //   2. 调用 callback 通知 SyncManager（T=1.5）
-                        //   3. 再等待 1 秒（确保 libp2p 处理完成，T=2.5）
-                        // SyncManager 收到通知后等待 1 秒，在 T=2.5 开始同步
-                        // 此时 P2PNode 已经等待了 2.5 秒，确保 peer store 已更新
+                    if wasNew {
+                        self.updateDeviceCounts()
+                        // 延迟 2.5 秒同步以确保对等点已完全注册到 libp2p peer store
                         for folder in self.folders {
                             Task {
-                                // 延迟 1 秒，确保对等点已完全注册到 libp2p peer store
-                                // P2PNode 已经等待了 2.5 秒（1.5 + 1），这里再等待 1 秒
-                                // 通知发生在 T=1.5，同步开始于 T=2.5，此时 peer store 应该已更新
-                                print("[SyncManager] ⏳ 等待对等点注册到 libp2p peer store...")
-                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-                                print("[SyncManager] 🔄 开始同步: folder=\(folder.syncID), peer=\(peerIDString.prefix(12))...")
+                                try? await Task.sleep(nanoseconds: 2_500_000_000)
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }
                         }
                     } else {
-                        print("[SyncManager] ℹ️ 对等点已存在，跳过: \(peerIDString.prefix(12))...")
-                        // 更新在线状态（设备重新出现），并更新发现时间
-                        let wasOnline = self.peerOnlineStatus[peerIDString] ?? false
-                        self.peerOnlineStatus[peerIDString] = true
-                        self.peerDiscoveryTime[peerIDString] = Date()
-                        // 如果状态从离线变为在线，更新统计
+                        let wasOnline = self.peerManager.isOnline(peerIDString)
                         if !wasOnline {
                             self.updateDeviceCounts()
                         }
@@ -153,220 +147,115 @@ public class SyncManager: ObservableObject {
     
     /// 启动定期检查设备在线状态
     private func startPeerStatusMonitoring() {
-        // 取消之前的任务
         peerStatusCheckTask?.cancel()
-        
-        // 启动新的定期检查任务
         peerStatusCheckTask = Task { [weak self] in
-            // 首次等待 90 秒，给设备足够的时间完成连接和注册
-            // 从 60 秒增加到 90 秒，确保对等点有足够时间注册到 libp2p peer store
-            // 并且有足够时间完成首次同步尝试
-            try? await Task.sleep(nanoseconds: 90_000_000_000) // 90秒
+            // 首次等待 60 秒，给设备足够时间完成连接和注册
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
             
             while !Task.isCancelled {
                 guard let self = self else { break }
                 await self.checkAllPeersOnlineStatus()
-                
-                // 之后每 30 秒检查一次设备在线状态
-                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30秒
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 每 30 秒检查一次
             }
         }
     }
     
-    /// 停止定期检查设备在线状态（清理资源）
     deinit {
         peerStatusCheckTask?.cancel()
     }
     
     /// 检查所有对等点的在线状态
     private func checkAllPeersOnlineStatus() async {
-        guard p2pNode.app != nil else {
-            print("[SyncManager] ⚠️ P2P 节点未初始化，跳过设备状态检查")
-            return
-        }
+        guard p2pNode.app != nil else { return }
         
-        let peersToCheck = await MainActor.run { self.peers }
+        let peersToCheck = peerManager.allPeers
+        guard !peersToCheck.isEmpty else { return }
         
-        if peersToCheck.isEmpty {
-            print("[SyncManager] ℹ️ 没有对等点需要检查")
-            return
-        }
-        
-        print("[SyncManager] 🔍 开始检查 \(peersToCheck.count) 个设备的在线状态...")
-        
-        for peer in peersToCheck {
-            let peerIDString = peer.b58String
-            let isOnline = await checkPeerOnline(peer: peer)
+        for peerInfo in peersToCheck {
+            let peerIDString = peerInfo.peerIDString
+            let isOnline = await checkPeerOnline(peer: peerInfo.peerID)
             
-            await MainActor.run {
-                let wasOnline = peerOnlineStatus[peerIDString] ?? false
-                peerOnlineStatus[peerIDString] = isOnline
-                
-                if isOnline != wasOnline {
-                    // 修复 Bug 1: 正确显示旧状态（wasOnline 为 true 时显示"在线"，false 时显示"离线"）
-                    print("[SyncManager] 📡 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
-                    
-                    // 更新设备统计
-                    self.updateDeviceCounts()
-                    
-                    // 如果设备离线，只更新状态为离线，不从列表中移除
-                    // 这样用户可以继续看到离线设备，并知道它们的状态
-                    if !isOnline {
-                        print("[SyncManager] 📴 设备已标记为离线: \(peerIDString.prefix(12))...")
-                        print("[SyncManager] 💡 设备仍保留在列表中，状态显示为离线")
-                    } else {
-                        print("[SyncManager] ✅ 设备已重新上线: \(peerIDString.prefix(12))...")
-                    }
-                } else {
-                    print("[SyncManager] ✅ 设备状态未变化: \(peerIDString.prefix(12))... \(isOnline ? "在线" : "离线")")
-                }
+            let wasOnline = peerInfo.isOnline
+            peerManager.updateOnlineStatus(peerIDString, isOnline: isOnline)
+            
+            if isOnline != wasOnline {
+                self.updateDeviceCounts()
             }
         }
-        
-        print("[SyncManager] ✅ 设备状态检查完成")
     }
     
     /// 检查单个对等点是否在线
     private func checkPeerOnline(peer: PeerID) async -> Bool {
-        guard let app = p2pNode.app else {
-            return false
-        }
+        guard let app = p2pNode.app else { return false }
         
         let peerIDString = peer.b58String
+        let isRegistered = peerManager.isRegistered(peerIDString)
         
-        // 首先检查对等点是否已注册到 libp2p peer store
-        let isRegistered = p2pNode.isPeerRegistered(peerIDString)
-        
-        // 检查设备是否是新发现的（在最近2分钟内发现的）
-        // 缩短时间窗口，避免长时间将离线设备标记为在线
-        let isRecentlyDiscovered = await MainActor.run {
-            if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
-                let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
-                return timeSinceDiscovery < 120.0 // 2分钟内
+        // 检查是否是新发现的（2分钟内）
+        let isRecentlyDiscovered: Bool = {
+            if let peerInfo = peerManager.getPeer(peerIDString) {
+                return Date().timeIntervalSince(peerInfo.discoveryTime) < 120.0
             }
+            return false
+        }()
+        
+        // 如果未注册且不是新发现的，认为离线
+        if !isRegistered && !isRecentlyDiscovered {
             return false
         }
         
-        // 如果对等点尚未注册到 peer store
-        if !isRegistered {
-            // 如果是新发现的（2分钟内），认为可能正在注册中，保守地认为在线
-            // 但超过2分钟仍未注册，认为离线
-            if isRecentlyDiscovered {
-                print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 尚未注册到 peer store，但设备是新发现的（可能是注册延迟）")
-                print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
-                return true // 保守地认为在线，等待更长时间后再检查
-            } else {
-                // 如果不是新发现的，且未注册，认为离线
-                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（未注册到 peer store，且不是新发现的）")
-                return false
-            }
-        }
-        
-        // 对等点已注册，尝试发送一个轻量级的请求来验证设备是否真的在线
-        // 使用一个不存在的 syncID，如果设备在线会返回 "Folder not found"（这是正常的）
-        // 如果设备离线，会返回连接错误或超时
+        // 尝试发送轻量级请求验证设备是否在线
         do {
-            // 使用一个随机生成的 syncID，确保不存在
-            // 这样可以避免误判（如果恰好有设备使用了 "__ping_check__" 这个 syncID）
             let randomSyncID = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).description
             let _: SyncResponse = try await app.requestSync(
                 .getMST(syncID: randomSyncID),
                 to: peer,
-                timeout: 5.0,  // 5秒超时
-                maxRetries: 1  // 只重试1次
+                timeout: 5.0,
+                maxRetries: 1
             )
-            // 如果成功返回（虽然不应该，因为 syncID 不存在），说明设备在线
-            print("[SyncManager] ✅ 设备 \(peerIDString.prefix(12))... 在线（意外返回了响应）")
             return true
         } catch {
             let errorString = String(describing: error)
             
-            // 如果是 "Folder not found" 错误，说明设备在线（只是没有这个 syncID）
-            if errorString.contains("Folder not found") || 
-               errorString.contains("not found") ||
-               errorString.contains("does not exist") {
-                print("[SyncManager] ✅ 设备 \(peerIDString.prefix(12))... 在线（返回 Folder not found，这是正常的）")
+            // "Folder not found" 说明设备在线
+            if errorString.contains("Folder not found") || errorString.contains("not found") || errorString.contains("does not exist") {
                 return true
             }
             
-            // 如果是 peerNotFound 错误，需要区分情况：
-            // 1. 如果对等点已注册到 peer store，说明地址正确，连接建立可能需要时间，应该给连接建立时间
-            // 2. 如果对等点未注册，且不是新发现的，才认为离线
-            if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) {
-                // 对等点已注册，即使返回 peerNotFound，也认为在线（连接可能还在建立中）
-                // 给连接建立时间窗口：已注册的对等点在5分钟内都认为在线
+            // 处理 peerNotFound 错误
+            if errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore") {
                 if isRegistered {
-                    // 检查是否在连接建立时间窗口内（5分钟）
-                    let isInConnectionWindow = await MainActor.run {
-                        if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
-                            let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
-                            return timeSinceDiscovery < 300.0 // 5分钟内
+                    let isInConnectionWindow: Bool = {
+                        if let peerInfo = peerManager.getPeer(peerIDString) {
+                            return Date().timeIntervalSince(peerInfo.discoveryTime) < 300.0
                         }
                         return false
-                    }
-                    
-                    if isInConnectionWindow {
-                        print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但对等点已注册到 peer store（连接可能还在建立中）")
-                        print("[SyncManager] 💡 认为设备在线，等待连接建立")
-                        return true
-                    } else {
-                        // 超过5分钟仍未建立连接，再次检查对等点是否仍在 peer store 中
-                        // 如果仍在，说明地址正确，可能是网络暂时问题，继续认为在线
-                        let stillRegistered = p2pNode.isPeerRegistered(peerIDString)
-                        if stillRegistered {
-                            print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但对等点仍在 peer store 中（超过5分钟，可能是网络问题）")
-                            print("[SyncManager] 💡 保守地认为设备在线（地址正确，可能是网络暂时问题）")
-                            return true
-                        } else {
-                            // 对等点已从 peer store 中移除，可能真的离线了
-                            print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，且已从 peer store 中移除）")
-                            return false
-                        }
-                    }
-                } else if isRecentlyDiscovered {
-                    // 未注册但新发现，可能是注册延迟
-                    print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
-                    print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
-                    return true
+                    }()
+                    return isInConnectionWindow || peerManager.isRegistered(peerIDString)
                 } else {
-                    // 未注册且不是新发现的，认为离线
-                    print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，未注册且不是新发现的）")
-                    return false
+                    return isRecentlyDiscovered
                 }
             }
             
-            // 如果是连接错误、超时，说明设备离线
-            if errorString.contains("TimedOut") || 
-               errorString.contains("timeout") ||
-               errorString.contains("connection") ||
-               errorString.contains("Connection") ||
+            // 连接相关错误
+            if errorString.contains("TimedOut") || errorString.contains("timeout") ||
+               errorString.contains("connection") || errorString.contains("Connection") ||
                errorString.contains("unreachable") {
-                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（错误: \(errorString)）")
                 return false
             }
             
-            // 其他错误，更谨慎地判断
-            // 如果错误信息中包含明显的连接失败关键词，认为离线
-            // 否则，如果是新发现的设备，保守地认为在线；否则认为离线
+            // 其他连接错误
             let isConnectionError = errorString.lowercased().contains("connect") ||
                                    errorString.lowercased().contains("network") ||
                                    errorString.lowercased().contains("unreachable") ||
                                    errorString.lowercased().contains("refused")
             
             if isConnectionError {
-                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（连接错误: \(errorString)）")
                 return false
             }
             
-            // 未知错误，如果是新发现的设备，保守地认为在线；否则认为离线
-            if isRecentlyDiscovered {
-                print("[SyncManager] ⚠️ 检查设备 \(peerIDString.prefix(12))... 时出现未知错误: \(errorString)")
-                print("[SyncManager] 💡 设备是新发现的，保守地认为设备在线")
-                return true
-            } else {
-                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（未知错误: \(errorString)）")
-                return false
-            }
+            // 未知错误：新发现的保守认为在线
+            return isRecentlyDiscovered
         }
     }
     
@@ -416,6 +305,24 @@ public class SyncManager: ObservableObject {
             }
         }
         
+        // 验证 syncID 格式
+        guard SyncIDManager.isValidSyncID(folder.syncID) else {
+            print("[SyncManager] ❌ syncID 格式无效: \(folder.syncID)")
+            updateFolderStatus(folder.id, status: .error, message: "syncID 格式无效（至少4个字符，只能包含字母和数字）")
+            return
+        }
+        
+        // 注册 syncID
+        if !syncIDManager.registerSyncID(folder.syncID, folderID: folder.id) {
+            print("[SyncManager] ⚠️ syncID 已存在或文件夹已关联其他 syncID: \(folder.syncID)")
+            // 如果 syncID 已存在，检查是否是同一个文件夹
+            if let existingInfo = syncIDManager.getSyncIDInfo(folder.syncID),
+               existingInfo.folderID != folder.id {
+                updateFolderStatus(folder.id, status: .error, message: "syncID 已被其他文件夹使用")
+                return
+            }
+        }
+        
         folders.append(folder)
         do {
             try StorageManager.shared.saveFolder(folder)
@@ -425,6 +332,7 @@ public class SyncManager: ObservableObject {
             print("[SyncManager] 错误详情: \(error.localizedDescription)")
             // 即使保存失败，也从内存中移除，避免不一致
             folders.removeAll { $0.id == folder.id }
+            syncIDManager.unregisterSyncID(folder.syncID)
             updateFolderStatus(folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)")
             return
         }
@@ -453,25 +361,27 @@ public class SyncManager: ObservableObject {
                 }
             }
             
-            // 对于新创建的同步组，不应该立即尝试与所有对等点同步
-            // 因为对等点可能还没有这个 syncID
-            // 只有在以下情况才应该同步：
-            // 1. 加入现有同步组（syncID 已存在于网络上）
-            // 2. 对等点主动发现并请求同步
+            // 等待一小段时间确保服务已发布，然后开始同步
+            print("[SyncManager] ℹ️ 新文件夹已添加，准备开始同步...")
             
-            // 如果是加入现有同步组，等待验证后再同步
-            // 如果是创建新同步组，等待其他对等点发现后再同步
-            print("[SyncManager] ℹ️ 新文件夹已添加，等待对等点发现或主动同步")
+            // 延迟 2.5 秒后开始同步，确保：
+            // 1. 服务已发布
+            // 2. 如果有现有 peer，可以立即同步
+            // 3. 如果没有 peer，会等待 peer 发现后自动同步（通过 onPeerDiscovered 回调）
+            try? await Task.sleep(nanoseconds: 2_500_000_000) // 等待 2.5 秒
+            
+            // 自动开始同步
+            self.triggerSync(for: folder)
         }
-        
-        // 如果是加入现有同步组，触发同步
-        // 如果是创建新同步组，不立即同步，等待其他设备发现
-        // triggerSync(for: folder) // 注释掉，避免创建新同步组时立即同步
     }
     
     func removeFolder(_ folder: SyncFolder) {
         stopMonitoring(folder)
         folders.removeAll { $0.id == folder.id }
+        syncIDManager.unregisterSyncIDByFolderID(folder.id)
+        // 取消防抖任务
+        debounceTasks[folder.syncID]?.cancel()
+        debounceTasks.removeValue(forKey: folder.syncID)
         try? StorageManager.shared.deleteFolder(folder.id)
     }
     
@@ -488,15 +398,30 @@ public class SyncManager: ObservableObject {
         }
         
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path in
-            print("File changed at: \(path)")
-            self?.triggerSync(for: folder)
+            print("[SyncManager] 📝 文件变化: \(path)")
             
-            // Notify peers
-            if let peers = self?.peers {
-                for peer in peers {
-                    self?.syncWithPeer(peer: peer, folder: folder)
+            // 使用防抖机制，避免频繁同步
+            let syncID = folder.syncID
+            
+            // 取消之前的防抖任务
+            self?.debounceTasks[syncID]?.cancel()
+            
+            // 创建新的防抖任务
+            let debounceTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
+                
+                guard !Task.isCancelled else { return }
+                
+                print("[SyncManager] 🔄 防抖延迟结束，开始同步: \(syncID)")
+                self?.triggerSync(for: folder)
+                
+                // 通知所有 peer 进行同步
+                for peerInfo in self?.peerManager.allPeers ?? [] {
+                    self?.syncWithPeer(peer: peerInfo.peerID, folder: folder)
                 }
             }
+            
+            self?.debounceTasks[syncID] = debounceTask
         }
         monitor.start()
         monitors[folder.id] = monitor
@@ -677,96 +602,40 @@ public class SyncManager: ObservableObject {
     private func performSync(peer: PeerID, folder: SyncFolder, peerID: String, app: Application) async {
         let startedAt = Date()
         do {
-            // 验证 PeerID
-            print("[SyncManager] 📡 开始同步:")
-            print("[SyncManager]   - 文件夹 syncID: \(folder.syncID)")
-            print("[SyncManager]   - 对等点 PeerID (完整): \(peerID)")
-            print("[SyncManager]   - 对等点 PeerID (长度): \(peerID.count) 字符")
-            print("[SyncManager]   - 对等点 PeerID (显示): \(peerID.prefix(12))...")
-            
-            if peerID.isEmpty {
-                print("[SyncManager] ❌ 错误: PeerID 为空，无法同步")
+            guard !peerID.isEmpty else {
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .error, message: "PeerID 无效")
                 }
                 return
             }
             
-            // 验证 PeerID 长度（正常的 libp2p PeerID 应该是 50+ 字符）
-            if peerID.count < 40 {
-                print("[SyncManager] ⚠️ 警告: PeerID 长度异常短 (\(peerID.count) 字符)，可能不完整")
-                print("[SyncManager]   期望长度: 50+ 字符")
-                print("[SyncManager]   实际 PeerID: \(peerID)")
-            }
-            
-            // 验证 PeerID 格式（应该以 "12D3KooW" 开头）
-            if !peerID.hasPrefix("12D3KooW") {
-                print("[SyncManager] ⚠️ 警告: PeerID 格式可能不正确")
-                print("[SyncManager]   期望前缀: 12D3KooW...")
-                print("[SyncManager]   实际前缀: \(peerID.prefix(12))...")
-            }
-            
-            // 验证 PeerID 对象
-            print("[SyncManager]   - 使用 PeerID 对象: \(peer.b58String)")
-            if peer.b58String != peerID {
-                print("[SyncManager] ⚠️ 警告: PeerID 字符串与对象不一致!")
-                print("[SyncManager]   字符串: \(peerID)")
-                print("[SyncManager]   对象: \(peer.b58String)")
-            }
-            
             await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .syncing, message: "Connecting to \(peerID.prefix(12))...")
+                self.updateFolderStatus(folder.id, status: .syncing, message: "正在连接到 \(peerID.prefix(12))...", progress: 0.0)
             }
             
-            // 1. Get remote MST root
-            // 使用较长的超时时间，因为首次连接可能需要时间
-            // 增加重试次数，因为首次连接建立可能需要多次尝试
+            // 获取远程 MST 根
             let rootRes: SyncResponse
             do {
-                // 再次验证 peer 对象
-                print("[SyncManager] 🔗 准备连接到对等点:")
-                print("[SyncManager]   - Peer 对象 b58String: \(peer.b58String)")
-                print("[SyncManager]   - Peer 对象长度: \(peer.b58String.count) 字符")
-                
                 rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 3)
             } catch {
-                print("[SyncManager] ❌ 获取远程 MST 根失败: \(error)")
-                print("[SyncManager] 错误详情: \(error.localizedDescription)")
-                
-                // 检查是否是 peerNotFound 错误
                 let errorString = String(describing: error)
+                
+                // 处理 peerNotFound 错误：重新注册并重试
                 if errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore") {
-                    print("[SyncManager] ⚠️ 对等点未在 libp2p peer store 中找到")
-                    print("[SyncManager] 💡 可能的原因:")
-                    print("[SyncManager]   1. 对等点地址未正确注册到 libp2p")
-                    print("[SyncManager]   2. 对等点可能已离线")
-                    print("[SyncManager]   3. 网络发现可能尚未完成")
-                    print("[SyncManager] 💡 建议: 等待几秒后重试，或检查对等点是否在线")
-                    print("[SyncManager] ⏳ 等待 5 秒后重试连接，给 libp2p 更多时间处理对等点注册...")
+                    await MainActor.run {
+                        self.updateFolderStatus(folder.id, status: .syncing, message: "重新注册对等点...", progress: 0.0)
+                    }
                     
-                    // 等待更长时间后重试（给 libp2p 时间发现对等点并更新 peer store）
-                    // 从 3 秒增加到 5 秒，确保对等点有足够时间注册
-                    // 这可能是因为对等点正在被注册，需要更多时间完成
-                    try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-                    print("[SyncManager] 🔄 重试连接...")
+                    await p2pNode.retryPeerRegistration(peer: peer)
+                    try? await Task.sleep(nanoseconds: 3_000_000_000) // 增加到 3 秒，确保 peer 完全注册
+                    
                     do {
                         rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
                     } catch {
-                        let retryErrorString = String(describing: error)
-                        // 如果重试仍然失败，检查是否是 peerNotFound
-                        if retryErrorString.contains("peerNotFound") || retryErrorString.contains("BasicInMemoryPeerStore") {
-                            print("[SyncManager] ⚠️ 重试后仍然无法找到对等点")
-                            print("[SyncManager] 💡 这可能是因为对等点尚未完全注册到 libp2p peer store")
-                            print("[SyncManager] 💡 建议: 等待更长时间或检查对等点是否在线")
-                            // 不标记为错误，因为对等点可能正在注册中
-                            // 等待下一次定期检查或重新发现
-                            return
-                        }
-                        // 其他错误，标记为错误
                         await MainActor.run {
-                            self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
+                            self.updateFolderStatus(folder.id, status: .error, message: "对等点注册失败，等待下次发现", progress: 0.0)
                         }
-                        return
+                        return // 重试失败，等待下次发现
                     }
                 } else if let nsError = error as NSError?, nsError.code == 2 {
                     // 超时错误 - 这是真正的连接问题，应该报告
@@ -809,6 +678,7 @@ public class SyncManager: ObservableObject {
             // Peer confirmed to have this folder
             await MainActor.run {
                 self.addFolderPeer(folder.syncID, peerID: peerID)
+                self.syncIDManager.updateLastSyncedAt(folder.syncID)
             }
             
             guard case .mstRoot(_, let remoteHash) = rootRes else { return }
@@ -829,6 +699,7 @@ public class SyncManager: ObservableObject {
                 lastKnownLocalPaths[folder.syncID] = currentPaths
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .synced, message: "Up to date", progress: 1.0)
+                    self.syncIDManager.updateLastSyncedAt(folder.syncID)
                 }
                 let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
                 let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date())
@@ -837,6 +708,10 @@ public class SyncManager: ObservableObject {
             }
             
             // 2. Roots differ, get remote file list
+            await MainActor.run {
+                self.updateFolderStatus(folder.id, status: .syncing, message: "正在获取远程文件列表...", progress: 0.1)
+            }
+            
             let filesRes: SyncResponse = try await app.requestSync(.getFiles(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
             guard case .files(_, let remoteEntries) = filesRes else { return }
             let myPeerID = p2pNode.peerID ?? ""
@@ -913,11 +788,34 @@ public class SyncManager: ObservableObject {
             
             let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
             if !toDelete.isEmpty {
-                let delRes: SyncResponse = try await app.requestSync(.deleteFiles(syncID: folder.syncID, paths: Array(toDelete)), to: peer, timeout: 90.0, maxRetries: 2)
-                if case .error = delRes { /* log but continue */ }
+                totalOps += toDelete.count
             }
             
-            if totalOps == 0 && toDelete.isEmpty {
+            // 更新总操作数并显示准备信息
+            await MainActor.run {
+                if totalOps > 0 {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "准备同步 \(totalOps) 个操作...", progress: 0.2)
+                }
+            }
+            
+            // 删除文件
+            if !toDelete.isEmpty {
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "正在删除 \(toDelete.count) 个文件...", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                }
+                
+                let delRes: SyncResponse = try await app.requestSync(.deleteFiles(syncID: folder.syncID, paths: Array(toDelete)), to: peer, timeout: 90.0, maxRetries: 2)
+                if case .deleteAck = delRes {
+                    for rel in toDelete {
+                        let fileURL = folder.localPath.appendingPathComponent(rel)
+                        try? FileManager.default.removeItem(at: fileURL)
+                        try? StorageManager.shared.deleteVectorClock(syncID: folder.syncID, path: rel)
+                    }
+                    completedOps += toDelete.count
+                }
+            }
+            
+            if totalOps == 0 {
                 lastKnownLocalPaths[folder.syncID] = currentPaths
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .synced, message: "Up to date", progress: 1.0)
@@ -931,9 +829,9 @@ public class SyncManager: ObservableObject {
             let fileManager = FileManager.default
             
             for (path, remoteMeta) in changedFiles {
-                let fileName = URL(fileURLWithPath: path).lastPathComponent
+                let fileName = (path as NSString).lastPathComponent
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "Downloading \(fileName)", progress: totalOps > 0 ? Double(completedOps) / Double(totalOps) : 1.0)
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "正在下载: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 // 文件下载可能需要更长时间，使用 120 秒超时
                 let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer, timeout: 180.0, maxRetries: 2)
@@ -970,13 +868,17 @@ public class SyncManager: ObservableObject {
                     await MainActor.run { self.addDownloadBytes(Int64(data.count)) }
                 }
                 completedOps += 1
+                
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                }
             }
             
             // 5b. Download conflict files (save to .conflict path, keep local)
             for (path, remoteMeta) in conflictFiles {
-                let fileName = URL(fileURLWithPath: path).lastPathComponent
+                let fileName = (path as NSString).lastPathComponent
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "Conflict: \(fileName)", progress: totalOps > 0 ? Double(completedOps) / Double(totalOps) : 1.0)
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "冲突文件: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 // 文件下载可能需要更长时间，使用 120 秒超时
                 let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer, timeout: 180.0, maxRetries: 2)
@@ -1020,13 +922,17 @@ public class SyncManager: ObservableObject {
                     await MainActor.run { self.addDownloadBytes(Int64(data.count)) }
                 }
                 completedOps += 1
+                
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "冲突处理完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                }
             }
             
             // 6. Upload files to remote
             for (path, localMeta) in filesToUpload {
-                let fileName = URL(fileURLWithPath: path).lastPathComponent
+                let fileName = (path as NSString).lastPathComponent
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "Uploading \(fileName)", progress: totalOps > 0 ? Double(completedOps) / Double(totalOps) : 1.0)
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "正在上传: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 var vc = localMeta.vectorClock ?? VectorClock()
                 vc.increment(for: myPeerID)
@@ -1056,11 +962,15 @@ public class SyncManager: ObservableObject {
                 totalUploadBytes += Int64(data.count)
                 await MainActor.run { self.addUploadBytes(Int64(data.count)) }
                 completedOps += 1
+                
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                }
             }
             
             lastKnownLocalPaths[folder.syncID] = currentPaths
             await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .synced, message: "Sync complete", progress: 1.0)
+                self.updateFolderStatus(folder.id, status: .synced, message: "同步完成", progress: 1.0)
             }
             let totalBytes = totalDownloadBytes + totalUploadBytes
             let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
@@ -1093,28 +1003,20 @@ public class SyncManager: ObservableObject {
     
     @MainActor
     private func addFolderPeer(_ syncID: String, peerID: String) {
-        var currentPeers = folderPeers[syncID] ?? Set()
-        if !currentPeers.contains(peerID) {
-            currentPeers.insert(peerID)
-            folderPeers[syncID] = currentPeers
-            updatePeerCount(for: syncID)
-        }
+        syncIDManager.addPeer(peerID, to: syncID)
+        updatePeerCount(for: syncID)
     }
     
     @MainActor
     private func removeFolderPeer(_ syncID: String, peerID: String) {
-        var currentPeers = folderPeers[syncID] ?? Set()
-        if currentPeers.contains(peerID) {
-            currentPeers.remove(peerID)
-            folderPeers[syncID] = currentPeers
-            updatePeerCount(for: syncID)
-        }
+        syncIDManager.removePeer(peerID, from: syncID)
+        updatePeerCount(for: syncID)
     }
     
     @MainActor
     private func updatePeerCount(for syncID: String) {
         if let index = folders.firstIndex(where: { $0.syncID == syncID }) {
-            folders[index].peerCount = folderPeers[syncID]?.count ?? 0
+            folders[index].peerCount = syncIDManager.getPeerCount(for: syncID)
         }
     }
     
@@ -1146,13 +1048,15 @@ public class SyncManager: ObservableObject {
             print("Folder \(folder.localPath.lastPathComponent) hash: \(mst.rootHash ?? "empty")")
             
             // 2. Try sync with all peers
-            if peers.isEmpty {
-                print("SyncManager: No peers to sync with for folder \(folder.syncID)")
+            let allPeers = peerManager.allPeers.map { $0.peerID }
+            if allPeers.isEmpty {
+                print("[SyncManager] ℹ️ 暂无对等点，等待发现对等点后自动同步...")
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .synced, message: "No peers found", progress: 0.0)
+                    self.updateFolderStatus(folder.id, status: .synced, message: "等待发现对等点...", progress: 0.0)
                 }
             } else {
-                for peer in peers {
+                print("[SyncManager] 🔄 开始与 \(allPeers.count) 个对等点同步...")
+                for peer in allPeers {
                     syncWithPeer(peer: peer, folder: folder)
                 }
             }
@@ -1225,99 +1129,39 @@ public class SyncManager: ObservableObject {
     /// 检查 syncID 是否存在于网络上的其他设备
     /// 通过尝试向已知对等点查询该 syncID 来验证
     func checkIfSyncIDExists(_ syncID: String) async -> Bool {
+        // 验证 syncID 格式
+        guard SyncIDManager.isValidSyncID(syncID) else {
+            return false
+        }
+        
         // 首先检查本地是否已有该 syncID
-        if folders.contains(where: { $0.syncID == syncID }) {
-            print("[SyncManager] ✅ syncID 在本地已存在: \(syncID)")
+        if syncIDManager.hasSyncID(syncID) {
             return true
         }
         
-        // 如果 syncID 太短，认为无效
-        guard syncID.count >= 4 else {
-            print("[SyncManager] ❌ syncID 太短（至少需要 4 个字符）: \(syncID)")
+        // 检查远程设备
+        let allPeers = peerManager.allPeers
+        guard !allPeers.isEmpty, let app = p2pNode.app else {
             return false
         }
         
-        // 如果没有已知的对等点，无法验证
-        // 不等待，直接返回 false（因为无法确认 syncID 是否存在）
-        // 这样可以避免每次添加文件夹时的延迟
-        if peers.isEmpty || p2pNode.app == nil {
-            print("[SyncManager] ⚠️ 暂无已知对等点，无法验证 syncID: \(syncID)")
-            print("[SyncManager] 💡 提示: 请确保:")
-            print("[SyncManager]   1. 两台设备都在同一局域网内")
-            print("[SyncManager]   2. 另一台设备已启动并配置了相同的 syncID")
-            print("[SyncManager]   3. 等待几秒让设备自动发现")
-            // 返回 false，表示无法确认 syncID 是否存在
-            // 但这不影响添加文件夹，系统会自动处理
-            return false
-        }
-        
-        guard let app = p2pNode.app else {
-            print("[SyncManager] ❌ P2P 节点未初始化")
-            return false
-        }
-        
-        print("[SyncManager] 🔍 开始验证 syncID: \(syncID)")
-        print("[SyncManager]   已知对等点数量: \(peers.count)")
-        
-        // 向所有已知对等点查询该 syncID
-        // 如果任何一个对等点有该 syncID，则返回 true
-        var foundOnAnyPeer = false
-        var lastError: Error?
-        
-        for (index, peer) in peers.enumerated() {
-            let peerIDShort = peer.b58String.prefix(12)
-            print("[SyncManager]   检查对等点 [\(index + 1)/\(peers.count)]: \(peerIDShort)...")
-            
+        for peerInfo in allPeers {
             do {
-                // 尝试获取该 syncID 的 MST 根，如果成功则说明对等点有该文件夹
-                // 增加超时时间和重试次数，因为首次连接可能需要时间
-                let response: SyncResponse = try await app.requestSync(
-                    .getMST(syncID: syncID),
-                    to: peer,
-                    timeout: 30.0,  // 增加到 30 秒
-                    maxRetries: 2    // 增加到 2 次重试
-                )
-                
-                // 如果返回的不是错误，说明对等点有该 syncID
+                let response: SyncResponse = try await app.requestSync(.getMST(syncID: syncID), to: peerInfo.peerID, timeout: 30.0, maxRetries: 2)
                 if case .mstRoot = response {
-                    print("[SyncManager] ✅ 在对等点 \(peerIDShort)... 找到 syncID: \(syncID)")
-                    foundOnAnyPeer = true
-                    break // 找到一个就足够了
-                } else {
-                    print("[SyncManager] ⚠️ 对等点 \(peerIDShort)... 返回了意外的响应类型")
+                    return true
                 }
             } catch {
-                // 记录错误，但继续检查下一个对等点
-                lastError = error
-                let errorString = String(describing: error)
-                print("[SyncManager] ⚠️ 对等点 \(peerIDShort)... 查询失败: \(errorString)")
-                
-                // 如果是 "Folder not found"，说明对等点没有该 syncID，继续检查下一个
-                // 如果是连接错误，也继续检查下一个对等点
                 continue
             }
         }
         
-        // 如果所有对等点都没有该 syncID，返回 false
-        if !foundOnAnyPeer {
-            print("[SyncManager] ❌ 未在已知对等点找到 syncID: \(syncID)")
-            if let error = lastError {
-                print("[SyncManager]   最后错误: \(error.localizedDescription)")
-            }
-            print("[SyncManager] 💡 可能的原因:")
-            print("[SyncManager]   1. 对等点还没有配置该 syncID")
-            print("[SyncManager]   2. 网络连接问题")
-            print("[SyncManager]   3. 设备还没有完全发现对方")
-            print("[SyncManager] 💡 建议: 如果确定 syncID 正确，可以尝试直接加入（系统会自动同步）")
-            return false
-        }
-        
-        return true
+        return false
     }
     
     /// 获取总设备数量（包括自身）
     public var totalDeviceCount: Int {
-        peers.count + 1 // 包括自身
+        peerManager.allPeers.count + 1 // 包括自身
     }
     
     /// 在线设备数量（包括自身）
@@ -1332,20 +1176,9 @@ public class SyncManager: ObservableObject {
     
     /// 更新设备统计（内部方法）
     private func updateDeviceCounts() {
-        // 更严格地判断在线状态：只有明确标记为 true 的才认为在线
-        // 如果状态未设置（nil），默认认为离线，避免将未检查的设备误判为在线
-        let onlinePeers = peers.filter { peer in
-            let peerIDString = peer.b58String
-            return peerOnlineStatus[peerIDString] == true // 只有明确为 true 才认为在线
-        }
-        onlineDeviceCountValue = onlinePeers.count + 1 // 包括自身（自身始终在线）
-
-        let offlinePeers = peers.filter { peer in
-            let peerIDString = peer.b58String
-            // 明确为 false 或未设置（nil）的都认为离线
-            return peerOnlineStatus[peerIDString] != true
-        }
-        offlineDeviceCountValue = offlinePeers.count
+        let counts = peerManager.deviceCounts
+        onlineDeviceCountValue = counts.online + 1 // 包括自身
+        offlineDeviceCountValue = counts.offline
     }
     
     /// 获取所有设备列表（包括自身）
@@ -1361,16 +1194,12 @@ public class SyncManager: ObservableObject {
             ))
         }
         
-        // 添加其他设备（使用实际在线状态）
-        for peer in peers {
-            let peerIDString = peer.b58String
-            // 使用与 onlineDeviceCount 和 offlineDeviceCount 相同的逻辑访问 peerOnlineStatus
-            // 只有明确为 true 的才认为在线，未设置或 false 都认为离线
-            let isOnline = peerOnlineStatus[peerIDString] == true
+        // 添加其他设备（使用 peerManager）
+        for peerInfo in peerManager.allPeers {
             devices.append(DeviceInfo(
-                peerID: peerIDString,
+                peerID: peerInfo.peerIDString,
                 isLocal: false,
-                status: isOnline ? "在线" : "离线"
+                status: peerInfo.isOnline ? "在线" : "离线"
             ))
         }
         

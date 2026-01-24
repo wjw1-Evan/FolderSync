@@ -7,30 +7,39 @@ import NIOCore
 public class P2PNode {
     public var app: Application?
     private var lanDiscovery: LANDiscovery?
-    private var peerAddressCache: [String: [Multiaddr]] = [:] // 缓存对等点地址 (使用 b58String 作为键)
-    private var registeringPeers: Set<String> = [] // 正在注册的对等点 PeerID (b58String)，用于去重
-    private var registeredPeers: Set<String> = [] // 已成功注册到 peer store 的对等点 PeerID (b58String)
-    private let registeredPeersQueue = DispatchQueue(label: "com.foldersync.p2pnode.registeredpeers", attributes: .concurrent)
-    private var discoveryHandler: ((PeerInfo) -> Void)? // 保存 discovery handler 以便手动触发
+    private var discoveryHandler: ((LibP2P.PeerInfo) -> Void)? // 保存 discovery handler 以便手动触发
+    @MainActor public let peerManager: PeerManager // 统一的 Peer 管理器
 
-    public init() {}
-    
-    /// 获取对等点的缓存地址
-    func getCachedAddresses(for peer: PeerID) -> [Multiaddr]? {
-        return peerAddressCache[peer.b58String]
+    public init() {
+        // PeerManager 需要在 MainActor 上初始化
+        self.peerManager = MainActor.assumeIsolated { PeerManager() }
     }
     
-    /// 检查对等点是否已成功注册到 peer store
-    func isPeerRegistered(_ peerID: String) -> Bool {
-        return registeredPeersQueue.sync {
-            return registeredPeers.contains(peerID)
+    /// 获取对等点的缓存地址
+    func getCachedAddresses(for peer: PeerID) async -> [Multiaddr]? {
+        return await MainActor.run {
+            return peerManager.getAddresses(for: peer.b58String)
         }
     }
     
-    /// 标记对等点为已注册（线程安全）
-    private func markPeerAsRegistered(_ peerID: String) {
-        registeredPeersQueue.async(flags: .barrier) {
-            self.registeredPeers.insert(peerID)
+    /// 重新触发对等点注册（用于 peerNotFound 错误后的重试）
+    func retryPeerRegistration(peer: PeerID) async {
+        let peerIDString = peer.b58String
+        let addresses = await MainActor.run {
+            return peerManager.getAddresses(for: peerIDString)
+        }
+        
+        guard !addresses.isEmpty else { return }
+        
+        let peerInfo = LibP2P.PeerInfo(peer: peer, addresses: addresses)
+        discoveryHandler?(peerInfo)
+        print("[P2PNode] 🔄 已重新注册: \(peerIDString.prefix(12))...")
+    }
+    
+    /// 检查对等点是否已成功注册到 peer store
+    func isPeerRegistered(_ peerID: String) async -> Bool {
+        return await MainActor.run {
+            return peerManager.isRegistered(peerID)
         }
     }
     
@@ -38,33 +47,13 @@ public class P2PNode {
     private func setupLANDiscovery(peerID: String, listenAddresses: [String] = []) {
         let discovery = LANDiscovery()
         discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses in
-            print("[P2PNode] 🔍 LAN discovery found peer:")
-            print("[P2PNode]   - PeerID (完整): \(discoveredPeerID)")
-            print("[P2PNode]   - PeerID (长度): \(discoveredPeerID.count) 字符")
-            print("[P2PNode]   - 发现地址: \(address)")
-            print("[P2PNode]   - 监听地址数量: \(peerAddresses.count)")
-            for (idx, addr) in peerAddresses.enumerated() {
-                print("[P2PNode]     [\(idx + 1)] \(addr)")
-            }
-            
-            // 验证 PeerID 格式
-            if discoveredPeerID.isEmpty {
-                print("[P2PNode] ❌ 错误: 发现的 PeerID 为空")
-                return
-            }
-            
-            if discoveredPeerID.count < 10 {
-                print("[P2PNode] ⚠️ 警告: 发现的 PeerID 似乎过短: \(discoveredPeerID)")
-            }
-            
-            // Try to connect to the discovered peer via libp2p
+            guard !discoveredPeerID.isEmpty else { return }
             Task { @MainActor in
                 await self?.connectToDiscoveredPeer(peerID: discoveredPeerID, discoveryAddress: address, listenAddresses: peerAddresses)
             }
         }
         discovery.start(peerID: peerID, listenAddresses: listenAddresses)
         self.lanDiscovery = discovery
-        print("[P2PNode] LAN discovery enabled using UDP broadcast. Automatic peer discovery active.")
     }
     
     /// 将监听地址中的 0.0.0.0 替换为发现地址的 IP，生成可连接的 multiaddr。
@@ -92,193 +81,68 @@ public class P2PNode {
     ///   - discoveryAddress: 发现地址，格式为 "IP:port"（如 "192.168.0.164:51262"），用于将 0.0.0.0 替换为可连接 IP
     ///   - listenAddresses: 对等点广播的监听地址（如 /ip4/0.0.0.0/tcp/63355）
     private func connectToDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String]) async {
-        guard app != nil else {
-            print("[P2PNode] ⚠️ App not initialized, cannot connect to peer")
-            return
+        guard app != nil, !peerID.isEmpty else { return }
+        
+        // 去重：检查是否正在注册
+        let shouldSkip = await MainActor.run {
+            return !peerManager.startRegistering(peerID)
         }
         
-        // 验证输入的 PeerID
-        print("[P2PNode] 🔧 尝试连接对等点:")
-        print("[P2PNode]   - 输入 PeerID: \(peerID)")
-        print("[P2PNode]   - PeerID 长度: \(peerID.count) 字符")
+        if shouldSkip { return }
         
-        if peerID.isEmpty {
-            print("[P2PNode] ❌ 错误: PeerID 为空，无法连接")
-            return
-        }
-        
-        // 检查是否已经成功注册过此对等点（线程安全）
-        let isAlreadyRegistered = self.isPeerRegistered(peerID)
-        
-        // 如果已经注册过，且这次有地址，检查地址是否有更新
-        if isAlreadyRegistered && !listenAddresses.isEmpty {
-            // 解析新地址（使用发现 IP 替换 0.0.0.0）
-            var newAddresses: [Multiaddr] = []
-            for addressStr in Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress) {
-                if let multiaddr = try? Multiaddr(addressStr) {
-                    newAddresses.append(multiaddr)
-                }
-            }
-            
-            // 检查是否有新地址
-            let cachedAddresses = await MainActor.run {
-                return self.peerAddressCache[peerID] ?? []
-            }
-            
-            // 如果地址相同，跳过
-            if Set(newAddresses.map { $0.description }) == Set(cachedAddresses.map { $0.description }) {
-                print("[P2PNode] ⏭️ 对等点 \(peerID.prefix(12))... 已注册且地址未变化，跳过")
-                return
-            }
-            
-            // 地址有更新，继续注册流程
-            print("[P2PNode] 🔄 对等点 \(peerID.prefix(12))... 地址已更新，重新注册")
-        }
-        
-        // 检查是否正在注册此对等点（去重）
-        let isRegistering = await MainActor.run {
-            if self.registeringPeers.contains(peerID) {
-                return true
-            }
-            // 标记为正在注册
-            self.registeringPeers.insert(peerID)
-            return false
-        }
-        
-        if isRegistering {
-            print("[P2PNode] ⏭️ 对等点 \(peerID.prefix(12))... 正在注册中，跳过重复注册")
-            return
-        }
-        
-        // 使用 defer 确保在函数返回时移除注册标记
         defer {
             Task { @MainActor in
-                self.registeringPeers.remove(peerID)
+                peerManager.finishRegistering(peerID)
             }
         }
         
-        // Try to parse the peerID string to PeerID object
-        let peerIDObj: PeerID
-        do {
-            peerIDObj = try PeerID(cid: peerID)
-            let parsedPeerIDString = peerIDObj.b58String
-            print("[P2PNode] ✅ PeerID 解析成功:")
-            print("[P2PNode]   - 解析后的 PeerID (完整): \(parsedPeerIDString)")
-            print("[P2PNode]   - 解析后的 PeerID 长度: \(parsedPeerIDString.count) 字符")
-            
-            // 验证 PeerID 长度（正常的 libp2p PeerID 应该是 50+ 字符）
-            if parsedPeerIDString.count < 40 {
-                print("[P2PNode] ⚠️ 警告: PeerID 长度异常短，可能不完整")
-            }
-            
-            // 验证解析后的 PeerID 是否与输入一致
-            if parsedPeerIDString != peerID {
-                print("[P2PNode] ⚠️ 警告: 解析后的 PeerID 与输入不一致!")
-                print("[P2PNode]   输入: \(peerID)")
-                print("[P2PNode]   解析: \(parsedPeerIDString)")
-            }
-        } catch {
-            print("[P2PNode] ❌ Failed to parse peerID: \(peerID)")
-            print("[P2PNode]   错误详情: \(error.localizedDescription)")
-            print("[P2PNode]   PeerID 可能格式不正确或已损坏")
-            print("[P2PNode]   期望格式: base58 编码的 PeerID (通常 50+ 字符)")
+        // 解析 PeerID
+        guard let peerIDObj = try? PeerID(cid: peerID) else {
+            print("[P2PNode] ❌ 无法解析 PeerID: \(peerID.prefix(12))...")
             return
         }
         
-        // 使用发现 IP 替换 0.0.0.0，生成可连接的地址
+        // 生成可连接地址
         let connectableStrs = Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
-        var parsedAddresses: [Multiaddr] = []
-        for addressStr in connectableStrs {
-            if let multiaddr = try? Multiaddr(addressStr) {
-                parsedAddresses.append(multiaddr)
-                print("[P2PNode] ✅ Parsed address for \(peerID.prefix(8)): \(multiaddr)")
-            } else {
-                print("[P2PNode] ⚠️ Could not parse address: \(addressStr)")
-            }
+        let parsedAddresses = connectableStrs.compactMap { try? Multiaddr($0) }
+        
+        guard !parsedAddresses.isEmpty else {
+            print("[P2PNode] ⚠️ 无有效地址: \(peerID.prefix(12))...")
+            return
         }
         
-        // libp2p needs the peer addresses in its peer store to connect
-        // The key issue: newRequest requires addresses to be in peer store, but we discovered
-        // the peer via LANDiscovery, not libp2p's discovery mechanisms
-        // 
-        // Solution: We need to manually add the peer to libp2p's peer store
-        // Unfortunately, swift-libp2p may not expose peerStore API directly
-        // We'll try to trigger libp2p's internal mechanisms by making a connection attempt
-        
-        if !parsedAddresses.isEmpty {
-            print("[P2PNode] ✅ Found \(parsedAddresses.count) address(es) for \(peerID.prefix(8))")
-            for addr in parsedAddresses {
-                print("[P2PNode]   - \(addr)")
-            }
-            
-            // Store addresses in cache（复制以避免闭包捕获 var）
-            let addressesToStore = parsedAddresses
-            await MainActor.run {
-                peerAddressCache[peerIDObj.b58String] = addressesToStore
-            }
-            
-            // 自动注册机制：直接通知 SyncManager，让 libp2p 通过其自身的 discovery 机制自动发现和注册 peer
-            // 注意：LANDiscovery 发现的 peer 不会自动添加到 libp2p 的 peer store
-            // 但我们可以通过以下方式让 libp2p 自动发现：
-            // 1. 使用 discovery.announce 让其他设备发现我们
-            // 2. 配置 DHT 让 libp2p 自动发现 peer
-            // 3. 在 SyncManager 中处理 peerNotFound 错误，通过重试等待 libp2p 自动发现
-            print("[P2PNode] 🔍 发现对等点，等待 libp2p 自动注册:")
-            print("[P2PNode]   - PeerID: \(peerIDObj.b58String)")
-            print("[P2PNode]   - Addresses: \(parsedAddresses.count) 个")
-            for (idx, addr) in parsedAddresses.enumerated() {
-                print("[P2PNode]     [\(idx + 1)] \(addr)")
-            }
-            
-            // 关键问题：LANDiscovery 发现的 peer 不会自动添加到 libp2p 的 peer store
-            // discovery.announce 只是宣布服务，不会将 peer 添加到 peer store
-            // 我们需要手动触发 libp2p 的 discovery handler，让 libp2p 认为它"发现"了这个 peer
-            // 这样 libp2p 会将 peer 添加到 peer store
-            print("[P2PNode] 🔧 手动触发 libp2p discovery 机制以注册对等点到 peer store...")
-            
-            // 创建 PeerInfo 对象，包含 peer 和地址
-            let peerInfo = PeerInfo(peer: peerIDObj, addresses: parsedAddresses)
-            
-            // 等待一小段时间，确保环境就绪
-            print("[P2PNode] ⏳ 等待环境就绪...")
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            
-            // 手动触发 libp2p 的 discovery handler
-            // 这会让 libp2p 认为它"发现"了这个 peer，从而将 peer 添加到 peer store
-            if let handler = discoveryHandler {
-                print("[P2PNode] ✅ 手动触发 discovery handler 以注册对等点到 peer store...")
-                handler(peerInfo)
-                print("[P2PNode] ✅ Discovery handler 已调用，对等点应该已添加到 peer store")
-                
-                // 等待 libp2p 处理 discovery handler 并更新 peer store
-                print("[P2PNode] ⏳ 等待 libp2p 处理 discovery handler 并更新 peer store...")
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-                
-                // 标记为已成功注册
-                self.markPeerAsRegistered(peerID)
-                print("[P2PNode] ✅ 对等点已注册到 peer store")
-            } else {
-                print("[P2PNode] ⚠️ Discovery handler 不可用，无法手动注册对等点")
-                print("[P2PNode] 💡 对等点可能无法添加到 peer store，SyncManager 会处理 peerNotFound 错误")
-            }
-            
-            // 通知 SyncManager 发现的 peer
-            print("[P2PNode] 📡 通知 SyncManager 对等点已发现...")
-            await MainActor.run {
-                self.onPeerDiscovered?(peerIDObj)
-            }
-            print("[P2PNode] ✅ SyncManager 已收到对等点发现通知")
-        } else {
-            print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(listenAddresses)")
-            print("[P2PNode] 💡 无法注册对等点到 peer store（缺少地址）")
-            print("[P2PNode] 💡 等待后续发现时提供地址后再注册")
-            
-            // 如果没有地址，不应该通知 SyncManager，因为无法注册到 peer store
-            // 这会导致 SyncManager 尝试同步但失败（peerNotFound）
-            // 只有当有地址时，才通知 SyncManager
-            print("[P2PNode] ⏭️ 跳过通知 SyncManager（无地址，无法注册）")
-            print("[P2PNode] 💡 当后续 LAN discovery 提供地址时，会再次尝试注册")
+        // 更新或添加 Peer 到管理器
+        let peerInfo = await MainActor.run {
+            return peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
         }
+        
+        // 检查是否需要注册（已注册且地址未变化则跳过）
+        let shouldRegister = await MainActor.run {
+            let existing = peerManager.getPeer(peerID)
+            if let existing = existing, existing.isRegistered {
+                let addressesChanged = Set(parsedAddresses.map { $0.description }) != Set(existing.addresses.map { $0.description })
+                return addressesChanged
+            }
+            return true
+        }
+        
+        guard shouldRegister else { return }
+        
+        // 注册 peer 到 libp2p
+        let libp2pPeerInfo = LibP2P.PeerInfo(peer: peerIDObj, addresses: parsedAddresses)
+        discoveryHandler?(libp2pPeerInfo)
+        
+        // 标记为已注册
+        await MainActor.run {
+            peerManager.markAsRegistered(peerID)
+        }
+        
+        // 通知 SyncManager
+        await MainActor.run {
+            self.onPeerDiscovered?(peerIDObj)
+        }
+        
+        print("[P2PNode] ✅ 对等点已注册: \(peerID.prefix(12))... (\(parsedAddresses.count) 个地址)")
     }
 
     public var onPeerDiscovered: ((PeerID) -> Void)?
@@ -353,104 +217,62 @@ public class P2PNode {
         // Using port 0 allows the OS to assign any available port
         app.listen(.tcp(host: "0.0.0.0", port: 0))
 
-        // Enable LAN discovery using UDP broadcast (more reliable than mDNS)
-        // 这是主要的设备发现机制，完全在局域网内工作，无需任何服务器
-        // Will update addresses after startup
+        // 启用 LAN discovery（UDP 广播）
         setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
-
-        // 注意：DHT 是可选的，主要用于广域网发现
-        // 如果只需要局域网同步，可以注释掉以下 DHT 配置
-        // 当前保留 DHT 以支持未来可能的广域网功能，但局域网同步完全依赖 LANDiscovery
-        // app.discovery.use(.kadDHT)
-        // print("[P2PNode] ✅ Kademlia DHT 已配置为发现服务（可选，用于广域网）")
         
-        // 也可以将 DHT 作为独立的 DHT 使用（用于值存储和检索）
-        // app.dht.use(.kadDHT)
-        
-        // TODO: AutoNAT 和 Circuit Relay - 需要配置:
-        // app.use(.autonat)
-        // app.use(.circuitRelay(...))
-        // 需要检查 swift-libp2p 是否提供这些模块
-        
-        // Register for peer discovery events (from libp2p's discovery mechanisms)
-        // When libp2p discovers a peer (via DHT or other mechanisms), it will call this callback
-        // The PeerInfo includes addresses, which libp2p automatically adds to the peer store
-        let discoveryHandler: (PeerInfo) -> Void = { [weak self] (peerInfo: PeerInfo) in
-            print("[P2PNode] 📡 libp2p 发现对等点:")
-            print("[P2PNode]   - PeerID: \(peerInfo.peer.b58String)")
-            print("[P2PNode]   - Addresses: \(peerInfo.addresses.count) 个")
-            for (idx, addr) in peerInfo.addresses.enumerated() {
-                print("[P2PNode]     [\(idx + 1)] \(addr)")
+        // 注册 libp2p 的 peer 发现回调
+        let discoveryHandler: (LibP2P.PeerInfo) -> Void = { [weak self] (peerInfo: LibP2P.PeerInfo) in
+            Task { @MainActor in
+                self?.peerManager.addOrUpdatePeer(peerInfo.peer, addresses: peerInfo.addresses)
+                self?.peerManager.markAsRegistered(peerInfo.peer.b58String)
             }
-            print("[P2PNode] ✅ libp2p 已将对等点添加到 peer store（包含地址）")
-            // libp2p has already added this peer to the peer store with addresses
-            // 标记为已成功注册（线程安全）
-            self?.markPeerAsRegistered(peerInfo.peer.b58String)
             self?.onPeerDiscovered?(peerInfo.peer)
         }
         
         app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
-        
-        // 保存 discovery handler 以便手动触发（用于 LANDiscovery 发现的 peer）
         self.discoveryHandler = discoveryHandler
-        print("[P2PNode] ✅ 发现回调已注册，libp2p 会自动处理发现的对等点")
 
-        // Start the application and wait for it to complete
-        // 必须等待 startup 完成，否则 discovery callback 可能无法正确工作
+        // 启动应用
         do {
             try await app.startup()
-            print("[P2PNode] ✅ libp2p 应用启动完成，peer store 已就绪")
         } catch {
-            print("[P2PNode] ❌ Critical failure during startup: \(error)")
+            print("[P2PNode] ❌ 启动失败: \(error)")
             throw error
         }
 
-        // Give the node a moment to initialize the server and update listenAddresses
-        try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s
+        // 等待节点初始化完成
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
-        // Update LAN discovery with actual listen addresses
+        // 更新 LAN discovery 的监听地址
         let addresses = app.listenAddresses.map { $0.description }
         lanDiscovery?.updateListenAddresses(addresses)
         
-        // 地址更新后，立即发送一次广播，让其他设备知道我们的地址
-        // 这对于新启动的设备特别重要，可以立即被已有设备发现
+        // 地址更新后立即发送广播
         if !addresses.isEmpty {
-            print("[P2PNode] 📡 监听地址已更新，立即广播以通知其他设备...")
-            // 延迟一小段时间确保地址已完全更新，然后发送发现请求（使用 Task 替代 DispatchQueue 避免 @Sendable 闭包警告）
             Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
+                try? await Task.sleep(nanoseconds: 200_000_000)
                 self?.lanDiscovery?.sendDiscoveryRequest()
             }
         }
 
-        // 详细日志输出
+        // 输出启动状态
         print("\n[P2PNode] ========== P2P 节点启动状态 ==========")
         print("[P2PNode] PeerID: \(app.peerID.b58String)")
         print("[P2PNode] 监听地址数量: \(app.listenAddresses.count)")
         
         if app.listenAddresses.isEmpty {
-            print("[P2PNode] ⚠️ 警告: 未检测到监听地址，libp2p 可能未成功启动")
-            print("[P2PNode] 请检查:")
-            print("[P2PNode]   1. 网络权限是否已授予")
-            print("[P2PNode]   2. 防火墙是否阻止了端口")
-            print("[P2PNode]   3. 是否有其他程序占用了端口")
+            print("[P2PNode] ⚠️ 警告: 未检测到监听地址")
         } else {
-            print("[P2PNode] ✅ 监听地址列表:")
             for (index, addr) in app.listenAddresses.enumerated() {
                 print("[P2PNode]   [\(index + 1)] \(addr)")
             }
-            print("[P2PNode] ✅ Ready for connections. Listening on: \(app.listenAddresses)")
+            print("[P2PNode] ✅ Ready for connections")
         }
         
-        // 检查 LANDiscovery 状态
         if lanDiscovery != nil {
             print("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
-            print("[P2PNode] ✅ 局域网发现已启用，使用 UDP 广播自动发现同一网络内的设备")
-            print("[P2PNode] ℹ️ 所有通信均在客户端之间直接进行，无需任何服务器端")
         } else {
             print("[P2PNode] ❌ LAN Discovery 未启用")
-            print("[P2PNode] ⚠️ 警告: 局域网发现功能未启动，设备将无法自动发现其他设备")
-            print("[P2PNode] 💡 提示: 这可能是初始化失败，请检查日志中的错误信息")
         }
         
         print("[P2PNode] ======================================\n")

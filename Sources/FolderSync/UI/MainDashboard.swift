@@ -385,8 +385,7 @@ struct AddFolderView: View {
     }
     
     private func generateRandomSyncID() -> String {
-        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        return String((0..<8).map { _ in letters.randomElement()! })
+        return SyncIDManager.generateSyncID()
     }
 }
 
@@ -463,7 +462,7 @@ struct PeerListView: View {
     let syncID: String
     
     var peers: [String] {
-        Array(syncManager.folderPeers[syncID] ?? [])
+        Array(syncManager.syncIDManager.getPeers(for: syncID))
     }
     
     var body: some View {

@@ -11,6 +11,7 @@ public class P2PNode {
     private var registeringPeers: Set<String> = [] // 正在注册的对等点 PeerID (b58String)，用于去重
     private var registeredPeers: Set<String> = [] // 已成功注册到 peer store 的对等点 PeerID (b58String)
     private let registeredPeersQueue = DispatchQueue(label: "com.foldersync.p2pnode.registeredpeers", attributes: .concurrent)
+    private var discoveryHandler: ((PeerInfo) -> Void)? // 保存 discovery handler 以便手动触发
 
     public init() {}
     
@@ -204,33 +205,44 @@ public class P2PNode {
                 print("[P2PNode]     [\(idx + 1)] \(addr)")
             }
             
-            // 尝试使用 libp2p 的 discovery.announce 机制来让 libp2p 自动发现和注册 peer
-            // 使用对等点的地址创建一个服务标识符
-            // 这样 libp2p 可能会自动发现并注册这个 peer
-            let serviceName = "folder-sync-\(peerIDObj.b58String.prefix(8))"
-            print("[P2PNode] 📡 尝试通过 discovery.announce 让 libp2p 自动发现对等点...")
-            do {
-                _ = try? await app.discovery.announce(.service(serviceName)).get()
-                print("[P2PNode] ✅ Discovery announce 已发送")
-            } catch {
-                print("[P2PNode] ⚠️ Discovery announce 失败（可能不影响功能）: \(error.localizedDescription)")
+            // 关键问题：LANDiscovery 发现的 peer 不会自动添加到 libp2p 的 peer store
+            // discovery.announce 只是宣布服务，不会将 peer 添加到 peer store
+            // 我们需要手动触发 libp2p 的 discovery handler，让 libp2p 认为它"发现"了这个 peer
+            // 这样 libp2p 会将 peer 添加到 peer store
+            print("[P2PNode] 🔧 手动触发 libp2p discovery 机制以注册对等点到 peer store...")
+            
+            // 创建 PeerInfo 对象，包含 peer 和地址
+            let peerInfo = PeerInfo(peer: peerIDObj, addresses: parsedAddresses)
+            
+            // 等待一小段时间，确保环境就绪
+            print("[P2PNode] ⏳ 等待环境就绪...")
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+            
+            // 手动触发 libp2p 的 discovery handler
+            // 这会让 libp2p 认为它"发现"了这个 peer，从而将 peer 添加到 peer store
+            if let handler = discoveryHandler {
+                print("[P2PNode] ✅ 手动触发 discovery handler 以注册对等点到 peer store...")
+                handler(peerInfo)
+                print("[P2PNode] ✅ Discovery handler 已调用，对等点应该已添加到 peer store")
+                
+                // 等待 libp2p 处理 discovery handler 并更新 peer store
+                print("[P2PNode] ⏳ 等待 libp2p 处理 discovery handler 并更新 peer store...")
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+                
+                // 标记为已成功注册
+                self.markPeerAsRegistered(peerID)
+                print("[P2PNode] ✅ 对等点已注册到 peer store")
+            } else {
+                print("[P2PNode] ⚠️ Discovery handler 不可用，无法手动注册对等点")
+                print("[P2PNode] 💡 对等点可能无法添加到 peer store，SyncManager 会处理 peerNotFound 错误")
             }
             
-            // 等待一小段时间，让 libp2p 有机会自动发现和注册 peer
-            print("[P2PNode] ⏳ 等待 libp2p 自动发现和注册对等点...")
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-            
-            // 直接通知 SyncManager 发现的 peer
-            // SyncManager 会在同步时处理 peerNotFound 错误，通过重试等待 libp2p 自动发现
+            // 通知 SyncManager 发现的 peer
             print("[P2PNode] 📡 通知 SyncManager 对等点已发现...")
             await MainActor.run {
                 self.onPeerDiscovered?(peerIDObj)
             }
             print("[P2PNode] ✅ SyncManager 已收到对等点发现通知")
-            
-            // 注意：我们不会立即标记为"已注册"，因为 libp2p 可能还没有自动发现这个 peer
-            // 实际的注册状态会在 SyncManager 尝试同步时通过 peerNotFound 错误来判断
-            // 如果 libp2p 成功自动发现并注册了 peer，后续的同步请求会成功
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
             print("[P2PNode] 💡 无法注册对等点到 peer store（缺少地址）")
@@ -353,6 +365,9 @@ public class P2PNode {
         }
         
         app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
+        
+        // 保存 discovery handler 以便手动触发（用于 LANDiscovery 发现的 peer）
+        self.discoveryHandler = discoveryHandler
         print("[P2PNode] ✅ 发现回调已注册，libp2p 会自动处理发现的对等点")
 
         // Start the application and wait for it to complete

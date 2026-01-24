@@ -237,18 +237,20 @@ public class SyncManager: ObservableObject {
         // 首先检查对等点是否已注册到 libp2p peer store
         let isRegistered = p2pNode.isPeerRegistered(peerIDString)
         
-        // 检查设备是否是新发现的（在最近5分钟内发现的）
+        // 检查设备是否是新发现的（在最近2分钟内发现的）
+        // 缩短时间窗口，避免长时间将离线设备标记为在线
         let isRecentlyDiscovered = await MainActor.run {
             if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
                 let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
-                return timeSinceDiscovery < 300.0 // 5分钟内
+                return timeSinceDiscovery < 120.0 // 2分钟内
             }
             return false
         }
         
         // 如果对等点尚未注册到 peer store
         if !isRegistered {
-            // 如果是新发现的，认为可能正在注册中，保守地认为在线
+            // 如果是新发现的（2分钟内），认为可能正在注册中，保守地认为在线
+            // 但超过2分钟仍未注册，认为离线
             if isRecentlyDiscovered {
                 print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 尚未注册到 peer store，但设备是新发现的（可能是注册延迟）")
                 print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
@@ -288,17 +290,22 @@ public class SyncManager: ObservableObject {
             }
             
             // 如果是 peerNotFound 错误，说明对等点可能已从 peer store 中移除（设备可能真的离线了）
-            // 但如果是新发现的，可能是注册延迟，再给一次机会
-            if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) && isRecentlyDiscovered {
-                print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
-                print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
-                return true // 保守地认为在线，等待更长时间后再检查
+            // 但如果是新发现的（2分钟内），可能是注册延迟，再给一次机会
+            // 注意：即使设备已注册到 peer store，如果返回 peerNotFound，说明连接失败，应该认为离线
+            if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) {
+                if isRecentlyDiscovered {
+                    print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
+                    print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
+                    return true // 保守地认为在线，等待更长时间后再检查
+                } else {
+                    // 不是新发现的，且返回 peerNotFound，认为离线
+                    print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，且不是新发现的）")
+                    return false
+                }
             }
             
-            // 如果是连接错误、超时或 peerNotFound（且不是新发现的），说明设备离线
-            if errorString.contains("peerNotFound") || 
-               errorString.contains("BasicInMemoryPeerStore") ||
-               errorString.contains("TimedOut") || 
+            // 如果是连接错误、超时，说明设备离线
+            if errorString.contains("TimedOut") || 
                errorString.contains("timeout") ||
                errorString.contains("connection") ||
                errorString.contains("Connection") ||
@@ -307,10 +314,28 @@ public class SyncManager: ObservableObject {
                 return false
             }
             
-            // 其他错误，保守地认为设备可能在线（可能是其他原因导致的错误）
-            print("[SyncManager] ⚠️ 检查设备 \(peerIDString.prefix(12))... 时出现未知错误: \(errorString)")
-            print("[SyncManager] 💡 保守地认为设备在线")
-            return true // 保守地认为在线
+            // 其他错误，更谨慎地判断
+            // 如果错误信息中包含明显的连接失败关键词，认为离线
+            // 否则，如果是新发现的设备，保守地认为在线；否则认为离线
+            let isConnectionError = errorString.lowercased().contains("connect") ||
+                                   errorString.lowercased().contains("network") ||
+                                   errorString.lowercased().contains("unreachable") ||
+                                   errorString.lowercased().contains("refused")
+            
+            if isConnectionError {
+                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（连接错误: \(errorString)）")
+                return false
+            }
+            
+            // 未知错误，如果是新发现的设备，保守地认为在线；否则认为离线
+            if isRecentlyDiscovered {
+                print("[SyncManager] ⚠️ 检查设备 \(peerIDString.prefix(12))... 时出现未知错误: \(errorString)")
+                print("[SyncManager] 💡 设备是新发现的，保守地认为设备在线")
+                return true
+            } else {
+                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（未知错误: \(errorString)）")
+                return false
+            }
         }
     }
     
@@ -1276,15 +1301,18 @@ public class SyncManager: ObservableObject {
     
     /// 更新设备统计（内部方法）
     private func updateDeviceCounts() {
+        // 更严格地判断在线状态：只有明确标记为 true 的才认为在线
+        // 如果状态未设置（nil），默认认为离线，避免将未检查的设备误判为在线
         let onlinePeers = peers.filter { peer in
             let peerIDString = peer.b58String
-            return peerOnlineStatus[peerIDString] ?? true // 默认为在线（新发现的设备）
+            return peerOnlineStatus[peerIDString] == true // 只有明确为 true 才认为在线
         }
         onlineDeviceCountValue = onlinePeers.count + 1 // 包括自身（自身始终在线）
-        
+
         let offlinePeers = peers.filter { peer in
             let peerIDString = peer.b58String
-            return peerOnlineStatus[peerIDString] == false
+            // 明确为 false 或未设置（nil）的都认为离线
+            return peerOnlineStatus[peerIDString] != true
         }
         offlineDeviceCountValue = offlinePeers.count
     }
@@ -1306,7 +1334,8 @@ public class SyncManager: ObservableObject {
         for peer in peers {
             let peerIDString = peer.b58String
             // 使用与 onlineDeviceCount 和 offlineDeviceCount 相同的逻辑访问 peerOnlineStatus
-            let isOnline = peerOnlineStatus[peerIDString] ?? true // 默认为在线（新发现的设备）
+            // 只有明确为 true 的才认为在线，未设置或 false 都认为离线
+            let isOnline = peerOnlineStatus[peerIDString] == true
             devices.append(DeviceInfo(
                 peerID: peerIDString,
                 isLocal: false,

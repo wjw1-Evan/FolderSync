@@ -9,6 +9,7 @@ public class P2PNode {
     private var lanDiscovery: LANDiscovery?
     private var peerAddressCache: [String: [Multiaddr]] = [:] // 缓存对等点地址 (使用 b58String 作为键)
     private var discoveryCallback: ((PeerInfo) -> Void)? // 保存发现回调以便手动调用
+    private var registeringPeers: Set<String> = [] // 正在注册的对等点 PeerID (b58String)，用于去重
 
     public init() {}
     
@@ -65,6 +66,28 @@ public class P2PNode {
         if peerID.isEmpty {
             print("[P2PNode] ❌ 错误: PeerID 为空，无法连接")
             return
+        }
+        
+        // 检查是否正在注册此对等点（去重）
+        let isRegistering = await MainActor.run {
+            if self.registeringPeers.contains(peerID) {
+                return true
+            }
+            // 标记为正在注册
+            self.registeringPeers.insert(peerID)
+            return false
+        }
+        
+        if isRegistering {
+            print("[P2PNode] ⏭️ 对等点 \(peerID.prefix(12))... 正在注册中，跳过重复注册")
+            return
+        }
+        
+        // 使用 defer 确保在函数返回时移除注册标记
+        defer {
+            Task { @MainActor in
+                self.registeringPeers.remove(peerID)
+            }
         }
         
         // Try to parse the peerID string to PeerID object

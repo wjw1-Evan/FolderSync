@@ -173,18 +173,13 @@ public class SyncManager: ObservableObject {
                     // 修复 Bug 1: 正确显示旧状态（wasOnline 为 true 时显示"在线"，false 时显示"离线"）
                     print("[SyncManager] 📡 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
                     
-                    // 如果设备离线，从所有文件夹的对等点列表中移除
+                    // 如果设备离线，只更新状态为离线，不从列表中移除
+                    // 这样用户可以继续看到离线设备，并知道它们的状态
                     if !isOnline {
-                        // 从 peers 列表中移除
-                        self.peers.removeAll(where: { $0.b58String == peerIDString })
-                        
-                        // 修复 Bug 2: 在迭代前将 keys 捕获到数组中，避免在迭代时修改字典
-                        let syncIDs = Array(self.folderPeers.keys)
-                        for syncID in syncIDs {
-                            self.removeFolderPeer(syncID, peerID: peerIDString)
-                        }
-                        
-                        print("[SyncManager] 🗑️ 已移除离线设备: \(peerIDString.prefix(12))...")
+                        print("[SyncManager] 📴 设备已标记为离线: \(peerIDString.prefix(12))...")
+                        print("[SyncManager] 💡 设备仍保留在列表中，状态显示为离线")
+                    } else {
+                        print("[SyncManager] ✅ 设备已重新上线: \(peerIDString.prefix(12))...")
                     }
                 } else {
                     print("[SyncManager] ✅ 设备状态未变化: \(peerIDString.prefix(12))... \(isOnline ? "在线" : "离线")")
@@ -598,16 +593,27 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager]   2. 对等点可能已离线")
                         print("[SyncManager]   3. 网络发现可能尚未完成")
                         print("[SyncManager] 💡 建议: 等待几秒后重试，或检查对等点是否在线")
-                        print("[SyncManager] ⏳ 等待 3 秒后重试连接，给 libp2p 更多时间处理对等点注册...")
+                        print("[SyncManager] ⏳ 等待 5 秒后重试连接，给 libp2p 更多时间处理对等点注册...")
                         
                         // 等待更长时间后重试（给 libp2p 时间发现对等点并更新 peer store）
-                        // 从 2 秒增加到 3 秒，确保对等点有足够时间注册
-                        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+                        // 从 3 秒增加到 5 秒，确保对等点有足够时间注册
+                        // 这可能是因为对等点正在被注册，需要更多时间完成
+                        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
                         print("[SyncManager] 🔄 重试连接...")
                         do {
                             rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
                         } catch {
-                            // 重试也失败，标记为错误
+                            let retryErrorString = String(describing: error)
+                            // 如果重试仍然失败，检查是否是 peerNotFound
+                            if retryErrorString.contains("peerNotFound") || retryErrorString.contains("BasicInMemoryPeerStore") {
+                                print("[SyncManager] ⚠️ 重试后仍然无法找到对等点")
+                                print("[SyncManager] 💡 这可能是因为对等点尚未完全注册到 libp2p peer store")
+                                print("[SyncManager] 💡 建议: 等待更长时间或检查对等点是否在线")
+                                // 不标记为错误，因为对等点可能正在注册中
+                                // 等待下一次定期检查或重新发现
+                                return
+                            }
+                            // 其他错误，标记为错误
                             await MainActor.run {
                                 self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
                             }

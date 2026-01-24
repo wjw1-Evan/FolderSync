@@ -289,17 +289,48 @@ public class SyncManager: ObservableObject {
                 return true
             }
             
-            // 如果是 peerNotFound 错误，说明对等点可能已从 peer store 中移除（设备可能真的离线了）
-            // 但如果是新发现的（2分钟内），可能是注册延迟，再给一次机会
-            // 注意：即使设备已注册到 peer store，如果返回 peerNotFound，说明连接失败，应该认为离线
+            // 如果是 peerNotFound 错误，需要区分情况：
+            // 1. 如果对等点已注册到 peer store，说明地址正确，连接建立可能需要时间，应该给连接建立时间
+            // 2. 如果对等点未注册，且不是新发现的，才认为离线
             if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) {
-                if isRecentlyDiscovered {
+                // 对等点已注册，即使返回 peerNotFound，也认为在线（连接可能还在建立中）
+                // 给连接建立时间窗口：已注册的对等点在5分钟内都认为在线
+                if isRegistered {
+                    // 检查是否在连接建立时间窗口内（5分钟）
+                    let isInConnectionWindow = await MainActor.run {
+                        if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
+                            let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
+                            return timeSinceDiscovery < 300.0 // 5分钟内
+                        }
+                        return false
+                    }
+                    
+                    if isInConnectionWindow {
+                        print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但对等点已注册到 peer store（连接可能还在建立中）")
+                        print("[SyncManager] 💡 认为设备在线，等待连接建立")
+                        return true
+                    } else {
+                        // 超过5分钟仍未建立连接，再次检查对等点是否仍在 peer store 中
+                        // 如果仍在，说明地址正确，可能是网络暂时问题，继续认为在线
+                        let stillRegistered = p2pNode.isPeerRegistered(peerIDString)
+                        if stillRegistered {
+                            print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但对等点仍在 peer store 中（超过5分钟，可能是网络问题）")
+                            print("[SyncManager] 💡 保守地认为设备在线（地址正确，可能是网络暂时问题）")
+                            return true
+                        } else {
+                            // 对等点已从 peer store 中移除，可能真的离线了
+                            print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，且已从 peer store 中移除）")
+                            return false
+                        }
+                    }
+                } else if isRecentlyDiscovered {
+                    // 未注册但新发现，可能是注册延迟
                     print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
                     print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
-                    return true // 保守地认为在线，等待更长时间后再检查
+                    return true
                 } else {
-                    // 不是新发现的，且返回 peerNotFound，认为离线
-                    print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，且不是新发现的）")
+                    // 未注册且不是新发现的，认为离线
+                    print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（peerNotFound，未注册且不是新发现的）")
                     return false
                 }
             }

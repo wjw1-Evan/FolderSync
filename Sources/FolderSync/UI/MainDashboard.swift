@@ -24,10 +24,38 @@ struct MainDashboard: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "laptopcomputer.and.iphone")
-                                Text("\(syncManager.totalDeviceCount) 台设备在线")
+                                if syncManager.offlineDeviceCount > 0 {
+                                    // 如果有离线设备，分别显示在线和离线数量
+                                    HStack(spacing: 3) {
+                                        Circle()
+                                            .fill(.green)
+                                            .frame(width: 6, height: 6)
+                                        Text("\(syncManager.onlineDeviceCount)")
+                                            .foregroundStyle(.green)
+                                        Text("在线")
+                                            .foregroundStyle(.green)
+                                        Text("•")
+                                            .foregroundStyle(.secondary)
+                                        Circle()
+                                            .fill(.red)
+                                            .frame(width: 6, height: 6)
+                                        Text("\(syncManager.offlineDeviceCount)")
+                                            .foregroundStyle(.red)
+                                        Text("离线")
+                                            .foregroundStyle(.red)
+                                    }
+                                } else {
+                                    // 如果所有设备都在线，只显示在线数量
+                                    HStack(spacing: 3) {
+                                        Circle()
+                                            .fill(.green)
+                                            .frame(width: 6, height: 6)
+                                        Text("\(syncManager.onlineDeviceCount) 台设备在线")
+                                            .foregroundStyle(.green)
+                                    }
+                                }
                             }
                             .font(.caption)
-                            .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
                     }

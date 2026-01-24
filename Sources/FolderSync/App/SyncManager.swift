@@ -22,6 +22,7 @@ public class SyncManager: ObservableObject {
     
     // 设备在线状态跟踪
     private var peerOnlineStatus: [String: Bool] = [:] // PeerID (b58String) -> 是否在线
+    private var peerDiscoveryTime: [String: Date] = [:] // PeerID (b58String) -> 发现时间
     private var peerStatusCheckTask: Task<Void, Never>?
     
     public init() {
@@ -31,7 +32,22 @@ public class SyncManager: ObservableObject {
         EnvironmentChecker.printReport(reports)
         
         // Load from storage
-        self.folders = (try? StorageManager.shared.getAllFolders()) ?? []
+        do {
+            let loadedFolders = try StorageManager.shared.getAllFolders()
+            self.folders = loadedFolders
+            print("[SyncManager] ✅ 成功加载 \(loadedFolders.count) 个同步文件夹配置")
+            if loadedFolders.isEmpty {
+                print("[SyncManager] ℹ️ 当前没有已保存的同步文件夹")
+            } else {
+                for folder in loadedFolders {
+                    print("[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))")
+                }
+            }
+        } catch {
+            print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
+            print("[SyncManager] 错误详情: \(error.localizedDescription)")
+            self.folders = []
+        }
         
         Task { @MainActor in
             p2pNode.onPeerDiscovered = { [weak self] peer in
@@ -53,8 +69,9 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager] ✅ 新对等点已添加: \(peerIDString.prefix(12))...")
                         self.peers.append(peer)
                         
-                        // 标记为新发现的设备为在线状态
+                        // 标记为新发现的设备为在线状态，并记录发现时间
                         self.peerOnlineStatus[peerIDString] = true
+                        self.peerDiscoveryTime[peerIDString] = Date()
                         
                         // 当发现新对等点时，延迟同步以确保对等点已正确注册到 libp2p peer store
                         // 这很重要，因为对等点需要时间被添加到 peer store
@@ -77,8 +94,9 @@ public class SyncManager: ObservableObject {
                         }
                     } else {
                         print("[SyncManager] ℹ️ 对等点已存在，跳过: \(peerIDString.prefix(12))...")
-                        // 更新在线状态（设备重新出现）
+                        // 更新在线状态（设备重新出现），并更新发现时间
                         self.peerOnlineStatus[peerIDString] = true
+                        self.peerDiscoveryTime[peerIDString] = Date()
                     }
                 }
             }
@@ -126,9 +144,9 @@ public class SyncManager: ObservableObject {
         
         // 启动新的定期检查任务
         peerStatusCheckTask = Task { [weak self] in
-            // 首次等待 30 秒，给设备足够的时间完成连接和注册
-            // 从 60 秒减少到 30 秒，避免设备状态更新过慢
-            try? await Task.sleep(nanoseconds: 30_000_000_000) // 30秒
+            // 首次等待 60 秒，给设备足够的时间完成连接和注册
+            // 从 30 秒增加到 60 秒，确保对等点有足够时间注册到 libp2p peer store
+            try? await Task.sleep(nanoseconds: 60_000_000_000) // 60秒
             
             while !Task.isCancelled {
                 guard let self = self else { break }
@@ -198,6 +216,15 @@ public class SyncManager: ObservableObject {
         
         let peerIDString = peer.b58String
         
+        // 检查设备是否是新发现的（在最近2分钟内发现的）
+        let isRecentlyDiscovered = await MainActor.run {
+            if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
+                let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
+                return timeSinceDiscovery < 120.0 // 2分钟内
+            }
+            return false
+        }
+        
         // 尝试发送一个轻量级的请求来检查设备是否在线
         // 使用一个不存在的 syncID，如果设备在线会返回 "Folder not found"（这是正常的）
         // 如果设备离线，会返回连接错误或超时
@@ -225,7 +252,15 @@ public class SyncManager: ObservableObject {
                 return true
             }
             
-            // 如果是连接错误、超时或 peerNotFound，说明设备离线
+            // 如果是 peerNotFound 错误，且设备是新发现的，可能是注册延迟导致的
+            // 不应该立即判定为离线，应该等待更长时间
+            if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) && isRecentlyDiscovered {
+                print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
+                print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
+                return true // 保守地认为在线，等待更长时间后再检查
+            }
+            
+            // 如果是连接错误、超时或 peerNotFound（且不是新发现的），说明设备离线
             if errorString.contains("peerNotFound") || 
                errorString.contains("BasicInMemoryPeerStore") ||
                errorString.contains("TimedOut") || 
@@ -293,9 +328,12 @@ public class SyncManager: ObservableObject {
         folders.append(folder)
         do {
             try StorageManager.shared.saveFolder(folder)
+            print("[SyncManager] ✅ 文件夹配置已保存: \(folder.localPath.path) (syncID: \(folder.syncID))")
         } catch {
             print("[SyncManager] ❌ 无法保存文件夹配置: \(error)")
             print("[SyncManager] 错误详情: \(error.localizedDescription)")
+            // 即使保存失败，也从内存中移除，避免不一致
+            folders.removeAll { $0.id == folder.id }
             updateFolderStatus(folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)")
             return
         }
@@ -1170,6 +1208,24 @@ public class SyncManager: ObservableObject {
     /// 获取总设备数量（包括自身）
     public var totalDeviceCount: Int {
         peers.count + 1 // 包括自身
+    }
+    
+    /// 在线设备数量（包括自身）
+    public var onlineDeviceCount: Int {
+        let onlinePeers = peers.filter { peer in
+            let peerIDString = peer.b58String
+            return peerOnlineStatus[peerIDString] ?? true // 默认为在线（新发现的设备）
+        }
+        return onlinePeers.count + 1 // 包括自身（自身始终在线）
+    }
+    
+    /// 离线设备数量
+    public var offlineDeviceCount: Int {
+        let offlinePeers = peers.filter { peer in
+            let peerIDString = peer.b58String
+            return peerOnlineStatus[peerIDString] == false
+        }
+        return offlinePeers.count
     }
     
     /// 获取所有设备列表（包括自身）

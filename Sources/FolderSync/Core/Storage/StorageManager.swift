@@ -69,25 +69,52 @@ public class StorageManager {
                 return cached
             }
             
-            guard fileManager.fileExists(atPath: foldersFile.path),
-                  let data = try? Data(contentsOf: foldersFile),
-                  let folders = try? JSONDecoder().decode([SyncFolder].self, from: data) else {
+            guard fileManager.fileExists(atPath: foldersFile.path) else {
+                print("[StorageManager] ℹ️ 文件夹配置文件不存在: \(foldersFile.path)")
+                print("[StorageManager] ℹ️ 这是首次运行，将创建新的配置文件")
                 let empty: [SyncFolder] = []
                 foldersCache = empty
                 return empty
             }
             
-            foldersCache = folders
-            return folders
+            guard let data = try? Data(contentsOf: foldersFile) else {
+                print("[StorageManager] ❌ 无法读取文件夹配置文件: \(foldersFile.path)")
+                let empty: [SyncFolder] = []
+                foldersCache = empty
+                return empty
+            }
+            
+            do {
+                let folders = try JSONDecoder().decode([SyncFolder].self, from: data)
+                foldersCache = folders
+                print("[StorageManager] ✅ 成功加载 \(folders.count) 个文件夹配置")
+                return folders
+            } catch {
+                print("[StorageManager] ❌ 解析文件夹配置失败: \(error)")
+                print("[StorageManager] 错误详情: \(error.localizedDescription)")
+                // 如果解析失败，返回空数组而不是抛出错误，避免应用启动失败
+                let empty: [SyncFolder] = []
+                foldersCache = empty
+                return empty
+            }
         }
     }
     
     private func saveFolders(_ folders: [SyncFolder]) throws {
-        let data = try JSONEncoder().encode(folders)
-        try data.write(to: foldersFile, options: [.atomic])
-        
-        cacheQueue.sync {
-            foldersCache = folders
+        do {
+            let data = try JSONEncoder().encode(folders)
+            try data.write(to: foldersFile, options: [.atomic])
+            
+            cacheQueue.sync {
+                foldersCache = folders
+            }
+            
+            print("[StorageManager] ✅ 成功保存 \(folders.count) 个文件夹配置到: \(foldersFile.path)")
+        } catch {
+            print("[StorageManager] ❌ 保存文件夹配置失败: \(error)")
+            print("[StorageManager] 错误详情: \(error.localizedDescription)")
+            print("[StorageManager] 文件路径: \(foldersFile.path)")
+            throw error
         }
     }
     

@@ -265,7 +265,6 @@ struct AddFolderView: View {
     @State private var syncID: String = ""
     
     @State private var errorMessage: String?
-    @State private var isChecking = false
     
     var body: some View {
         VStack(spacing: 20) {
@@ -342,30 +341,15 @@ struct AddFolderView: View {
                 Spacer()
                 Button("添加同步") {
                     if let path = selectedPath, !syncID.isEmpty {
-                        // 自动检查 syncID 是否存在，如果存在就加入，不存在就创建
-                        isChecking = true
-                        errorMessage = nil // 清除之前的错误
-                        Task {
-                            // 先检查 syncID 是否存在（可选，用于日志）
-                            let exists = await syncManager.checkIfSyncIDExists(syncID)
-                            await MainActor.run {
-                                isChecking = false
-                                // 无论是否存在，都添加文件夹（系统会自动同步）
-                                // 如果存在，会加入现有同步组；如果不存在，会创建新同步组
-                                let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: .twoWay)
-                                syncManager.addFolder(newFolder)
-                                dismiss()
-                            }
-                        }
+                        // 直接添加文件夹，系统会自动判断是加入现有同步组还是创建新同步组
+                        // 如果网络上已有该 syncID，会自动加入；否则创建新同步组
+                        let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: .twoWay)
+                        syncManager.addFolder(newFolder)
+                        dismiss()
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedPath == nil || syncID.isEmpty || isChecking)
-                
-                if isChecking {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+                .disabled(selectedPath == nil || syncID.isEmpty)
             }
         }
         .padding()

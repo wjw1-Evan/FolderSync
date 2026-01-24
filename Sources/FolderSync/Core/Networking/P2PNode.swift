@@ -26,7 +26,7 @@ public class P2PNode {
     
     /// Connect to a peer discovered via LAN discovery
     private func connectToDiscoveredPeer(peerID: String, addresses: [String]) async {
-        guard let app = app else { return }
+        guard app != nil else { return }
         
         // Try to parse the peerID string to PeerID object
         guard let peerIDObj = try? PeerID(cid: peerID) else {
@@ -65,13 +65,67 @@ public class P2PNode {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
         try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+        
         let password = KeychainManager.loadOrCreatePassword()
         let keyPairFile: KeyPairFile = .persistent(
             type: .Ed25519,
             encryptedWith: .password(password),
             storedAt: .filePath(folderSyncDir)
         )
-        let app = try await Application.make(.development, peerID: keyPairFile)
+        
+        // 尝试创建 Application，如果失败（通常是密钥文件解密失败），删除旧文件并重试
+        var app: Application
+        do {
+            app = try await Application.make(.development, peerID: keyPairFile)
+        } catch {
+            print("[P2PNode] ⚠️ 警告: 无法加载现有密钥对文件: \(error.localizedDescription)")
+            print("[P2PNode] 这通常是因为密钥文件损坏或密码不匹配")
+            print("[P2PNode] 尝试删除旧的密钥文件并重新生成...")
+            
+            // 删除整个目录并重新创建，确保彻底清理所有密钥相关文件
+            let fileManager = FileManager.default
+            do {
+                // 尝试删除整个目录
+                if fileManager.fileExists(atPath: folderSyncDir.path) {
+                    try fileManager.removeItem(at: folderSyncDir)
+                    print("[P2PNode] 已删除旧的 FolderSync 目录")
+                }
+                // 重新创建目录
+                try fileManager.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+                print("[P2PNode] 已重新创建 FolderSync 目录")
+            } catch {
+                print("[P2PNode] ⚠️ 删除目录时出错: \(error.localizedDescription)")
+                // 如果删除目录失败，尝试删除目录内的所有文件
+                if let files = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: nil) {
+                    for file in files {
+                        try? fileManager.removeItem(at: file)
+                        print("[P2PNode] 已删除文件: \(file.lastPathComponent)")
+                    }
+                }
+            }
+            
+            // 重新生成密码（确保使用新密码）
+            let newPassword = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32).description
+            _ = KeychainManager.savePassword(newPassword)
+            print("[P2PNode] 已生成新密码并保存到 Keychain")
+            
+            // 使用新密码创建新的密钥文件
+            let newKeyPairFile: KeyPairFile = .persistent(
+                type: .Ed25519,
+                encryptedWith: .password(newPassword),
+                storedAt: .filePath(folderSyncDir)
+            )
+            
+            // 重试创建 Application
+            do {
+                app = try await Application.make(.development, peerID: newKeyPairFile)
+                print("[P2PNode] ✅ 成功创建新的密钥对文件")
+            } catch {
+                print("[P2PNode] ❌ 错误: 即使删除旧文件后仍无法创建新的密钥对: \(error.localizedDescription)")
+                throw error
+            }
+        }
+        
         self.app = app
 
         // Explicitly configure TCP to listen on all interfaces
@@ -115,8 +169,33 @@ public class P2PNode {
         let addresses = app.listenAddresses.map { $0.description }
         lanDiscovery?.updateListenAddresses(addresses)
 
-        print("P2P Node initializing with PeerID: \(app.peerID.b58String)")
-        print("Ready for connections. Listening on: \(app.listenAddresses)")
+        // 详细日志输出
+        print("\n[P2PNode] ========== P2P 节点启动状态 ==========")
+        print("[P2PNode] PeerID: \(app.peerID.b58String)")
+        print("[P2PNode] 监听地址数量: \(app.listenAddresses.count)")
+        
+        if app.listenAddresses.isEmpty {
+            print("[P2PNode] ⚠️ 警告: 未检测到监听地址，libp2p 可能未成功启动")
+            print("[P2PNode] 请检查:")
+            print("[P2PNode]   1. 网络权限是否已授予")
+            print("[P2PNode]   2. 防火墙是否阻止了端口")
+            print("[P2PNode]   3. 是否有其他程序占用了端口")
+        } else {
+            print("[P2PNode] ✅ 监听地址列表:")
+            for (index, addr) in app.listenAddresses.enumerated() {
+                print("[P2PNode]   [\(index + 1)] \(addr)")
+            }
+            print("[P2PNode] ✅ Ready for connections. Listening on: \(app.listenAddresses)")
+        }
+        
+        // 检查 LANDiscovery 状态
+        if let discovery = lanDiscovery {
+            print("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
+        } else {
+            print("[P2PNode] ❌ LAN Discovery 未启用")
+        }
+        
+        print("[P2PNode] ======================================\n")
     }
 
     public func announce(service: String) async throws {

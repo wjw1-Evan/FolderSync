@@ -21,6 +21,11 @@ public class SyncManager: ObservableObject {
     private var deletedPaths: [String: Set<String>] = [:]
     
     public init() {
+        // 运行环境检测
+        print("\n[EnvironmentCheck] 开始环境检测...")
+        let reports = EnvironmentChecker.runAllChecks()
+        EnvironmentChecker.printReport(reports)
+        
         // Load from storage
         self.folders = (try? StorageManager.shared.getAllFolders()) ?? []
         

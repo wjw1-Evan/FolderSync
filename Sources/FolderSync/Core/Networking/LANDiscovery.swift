@@ -208,9 +208,28 @@ public class LANDiscovery {
                         // Ignore our own broadcasts
                         if peerInfo.peerID != myPeerID {
                             let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
-                            print("[LANDiscovery] ✅ Discovered peer: \(peerInfo.peerID) at \(address) with addresses: \(peerInfo.addresses)")
+                            print("[LANDiscovery] ✅ Discovered peer:")
+                            print("[LANDiscovery]   - PeerID (完整): \(peerInfo.peerID)")
+                            print("[LANDiscovery]   - PeerID (长度): \(peerInfo.peerID.count) 字符")
+                            print("[LANDiscovery]   - 发现地址: \(address)")
+                            print("[LANDiscovery]   - 监听地址数量: \(peerInfo.addresses.count)")
+                            
+                            // 验证 PeerID
+                            if peerInfo.peerID.isEmpty {
+                                print("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空，忽略此对等点")
+                                return
+                            }
+                            
+                            if peerInfo.peerID.count < 10 {
+                                print("[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
+                            }
+                            
                             self?.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+                        } else {
+                            print("[LANDiscovery] ℹ️ 忽略自己的广播消息")
                         }
+                    } else {
+                        print("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
                     }
                 }
             }
@@ -286,14 +305,40 @@ public class LANDiscovery {
     }
     
     private func parseDiscoveryMessage(_ message: String) -> (peerID: String, service: String, addresses: [String])? {
-        guard let data = message.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let peerID = json["peerID"] as? String,
-              let service = json["service"] as? String,
-              service == "foldersync" else {
+        guard let data = message.data(using: .utf8) else {
+            print("[LANDiscovery] ❌ 无法将消息转换为 UTF-8 数据")
             return nil
         }
+        
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("[LANDiscovery] ❌ 无法解析 JSON: \(message.prefix(100))...")
+            return nil
+        }
+        
+        guard let peerID = json["peerID"] as? String else {
+            print("[LANDiscovery] ❌ JSON 中缺少 'peerID' 字段")
+            print("[LANDiscovery]   JSON 键: \(json.keys.joined(separator: ", "))")
+            return nil
+        }
+        
+        guard let service = json["service"] as? String, service == "foldersync" else {
+            print("[LANDiscovery] ⚠️ 服务不匹配或缺失: \(json["service"] ?? "nil")")
+            return nil
+        }
+        
         let addresses = (json["addresses"] as? [String]) ?? []
+        
+        // 验证解析结果
+        if peerID.isEmpty {
+            print("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空")
+            return nil
+        }
+        
+        print("[LANDiscovery] 📋 解析发现消息成功:")
+        print("[LANDiscovery]   - PeerID: \(peerID) (长度: \(peerID.count))")
+        print("[LANDiscovery]   - Service: \(service)")
+        print("[LANDiscovery]   - Addresses: \(addresses.count) 个")
+        
         return (peerID: peerID, service: service, addresses: addresses)
     }
 }

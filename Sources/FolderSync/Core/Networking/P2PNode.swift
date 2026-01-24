@@ -21,7 +21,25 @@ public class P2PNode {
     private func setupLANDiscovery(peerID: String, listenAddresses: [String] = []) {
         let discovery = LANDiscovery()
         discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses in
-            print("[P2PNode] LAN discovery found peer: \(discoveredPeerID) at \(address) with addresses: \(peerAddresses)")
+            print("[P2PNode] 🔍 LAN discovery found peer:")
+            print("[P2PNode]   - PeerID (完整): \(discoveredPeerID)")
+            print("[P2PNode]   - PeerID (长度): \(discoveredPeerID.count) 字符")
+            print("[P2PNode]   - 发现地址: \(address)")
+            print("[P2PNode]   - 监听地址数量: \(peerAddresses.count)")
+            for (idx, addr) in peerAddresses.enumerated() {
+                print("[P2PNode]     [\(idx + 1)] \(addr)")
+            }
+            
+            // 验证 PeerID 格式
+            if discoveredPeerID.isEmpty {
+                print("[P2PNode] ❌ 错误: 发现的 PeerID 为空")
+                return
+            }
+            
+            if discoveredPeerID.count < 10 {
+                print("[P2PNode] ⚠️ 警告: 发现的 PeerID 似乎过短: \(discoveredPeerID)")
+            }
+            
             // Try to connect to the discovered peer via libp2p
             Task { @MainActor in
                 await self?.connectToDiscoveredPeer(peerID: discoveredPeerID, addresses: peerAddresses)
@@ -39,9 +57,41 @@ public class P2PNode {
             return
         }
         
+        // 验证输入的 PeerID
+        print("[P2PNode] 🔧 尝试连接对等点:")
+        print("[P2PNode]   - 输入 PeerID: \(peerID)")
+        print("[P2PNode]   - PeerID 长度: \(peerID.count) 字符")
+        
+        if peerID.isEmpty {
+            print("[P2PNode] ❌ 错误: PeerID 为空，无法连接")
+            return
+        }
+        
         // Try to parse the peerID string to PeerID object
-        guard let peerIDObj = try? PeerID(cid: peerID) else {
+        let peerIDObj: PeerID
+        do {
+            peerIDObj = try PeerID(cid: peerID)
+            let parsedPeerIDString = peerIDObj.b58String
+            print("[P2PNode] ✅ PeerID 解析成功:")
+            print("[P2PNode]   - 解析后的 PeerID (完整): \(parsedPeerIDString)")
+            print("[P2PNode]   - 解析后的 PeerID 长度: \(parsedPeerIDString.count) 字符")
+            
+            // 验证 PeerID 长度（正常的 libp2p PeerID 应该是 50+ 字符）
+            if parsedPeerIDString.count < 40 {
+                print("[P2PNode] ⚠️ 警告: PeerID 长度异常短，可能不完整")
+            }
+            
+            // 验证解析后的 PeerID 是否与输入一致
+            if parsedPeerIDString != peerID {
+                print("[P2PNode] ⚠️ 警告: 解析后的 PeerID 与输入不一致!")
+                print("[P2PNode]   输入: \(peerID)")
+                print("[P2PNode]   解析: \(parsedPeerIDString)")
+            }
+        } catch {
             print("[P2PNode] ❌ Failed to parse peerID: \(peerID)")
+            print("[P2PNode]   错误详情: \(error.localizedDescription)")
+            print("[P2PNode]   PeerID 可能格式不正确或已损坏")
+            print("[P2PNode]   期望格式: base58 编码的 PeerID (通常 50+ 字符)")
             return
         }
         

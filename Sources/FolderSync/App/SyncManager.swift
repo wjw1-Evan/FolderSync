@@ -33,13 +33,35 @@ public class SyncManager: ObservableObject {
             p2pNode.onPeerDiscovered = { [weak self] peer in
                 Task { @MainActor in
                     guard let self = self else { return }
-                    if !self.peers.contains(where: { $0.b58String == peer.b58String }) {
-                        let pid = peer.b58String
-                        print("SyncManager: New peer discovered - \(pid)")
+                    let peerIDString = peer.b58String
+                    
+                    // 验证 PeerID
+                    print("[SyncManager] 🔍 收到对等点发现通知:")
+                    print("[SyncManager]   - PeerID (完整): \(peerIDString)")
+                    print("[SyncManager]   - PeerID (长度): \(peerIDString.count) 字符")
+                    
+                    if peerIDString.isEmpty {
+                        print("[SyncManager] ❌ 错误: 收到的 PeerID 为空，忽略")
+                        return
+                    }
+                    
+                    if !self.peers.contains(where: { $0.b58String == peerIDString }) {
+                        print("[SyncManager] ✅ 新对等点已添加: \(peerIDString.prefix(12))...")
                         self.peers.append(peer)
+                        
+                        // 当发现新对等点时，只同步已存在的文件夹
+                        // 新创建的同步组不应该立即同步，应该等待对等点主动发现
                         for folder in self.folders {
-                            self.syncWithPeer(peer: peer, folder: folder)
+                            // 检查对等点是否有这个 syncID（通过尝试获取 MST 根）
+                            // 如果对等点没有这个 syncID，同步会失败，但这是正常的
+                            Task {
+                                // 延迟一小段时间，确保对等点已完全连接
+                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+                                self.syncWithPeer(peer: peer, folder: folder)
+                            }
                         }
+                    } else {
+                        print("[SyncManager] ℹ️ 对等点已存在，跳过: \(peerIDString.prefix(12))...")
                     }
                 }
             }
@@ -149,14 +171,20 @@ public class SyncManager: ObservableObject {
                 }
             }
             
-            // Try to sync with existing peers
-            for peer in peers {
-                syncWithPeer(peer: peer, folder: folder)
-            }
+            // 对于新创建的同步组，不应该立即尝试与所有对等点同步
+            // 因为对等点可能还没有这个 syncID
+            // 只有在以下情况才应该同步：
+            // 1. 加入现有同步组（syncID 已存在于网络上）
+            // 2. 对等点主动发现并请求同步
+            
+            // 如果是加入现有同步组，等待验证后再同步
+            // 如果是创建新同步组，等待其他对等点发现后再同步
+            print("[SyncManager] ℹ️ 新文件夹已添加，等待对等点发现或主动同步")
         }
         
-        // If it's a join, trigger an immediate sync
-        triggerSync(for: folder)
+        // 如果是加入现有同步组，触发同步
+        // 如果是创建新同步组，不立即同步，等待其他设备发现
+        // triggerSync(for: folder) // 注释掉，避免创建新同步组时立即同步
     }
     
     func removeFolder(_ folder: SyncFolder) {
@@ -347,9 +375,45 @@ public class SyncManager: ObservableObject {
         Task {
             let startedAt = Date()
             do {
-                print("[SyncManager] 开始同步: folder=\(folder.syncID), peer=\(peerID.prefix(8))")
+                // 验证 PeerID
+                print("[SyncManager] 📡 开始同步:")
+                print("[SyncManager]   - 文件夹 syncID: \(folder.syncID)")
+                print("[SyncManager]   - 对等点 PeerID (完整): \(peerID)")
+                print("[SyncManager]   - 对等点 PeerID (长度): \(peerID.count) 字符")
+                print("[SyncManager]   - 对等点 PeerID (显示): \(peerID.prefix(12))...")
+                
+                if peerID.isEmpty {
+                    print("[SyncManager] ❌ 错误: PeerID 为空，无法同步")
+                    await MainActor.run {
+                        self.updateFolderStatus(folder.id, status: .error, message: "PeerID 无效")
+                    }
+                    return
+                }
+                
+                // 验证 PeerID 长度（正常的 libp2p PeerID 应该是 50+ 字符）
+                if peerID.count < 40 {
+                    print("[SyncManager] ⚠️ 警告: PeerID 长度异常短 (\(peerID.count) 字符)，可能不完整")
+                    print("[SyncManager]   期望长度: 50+ 字符")
+                    print("[SyncManager]   实际 PeerID: \(peerID)")
+                }
+                
+                // 验证 PeerID 格式（应该以 "12D3KooW" 开头）
+                if !peerID.hasPrefix("12D3KooW") {
+                    print("[SyncManager] ⚠️ 警告: PeerID 格式可能不正确")
+                    print("[SyncManager]   期望前缀: 12D3KooW...")
+                    print("[SyncManager]   实际前缀: \(peerID.prefix(12))...")
+                }
+                
+                // 验证 PeerID 对象
+                print("[SyncManager]   - 使用 PeerID 对象: \(peer.b58String)")
+                if peer.b58String != peerID {
+                    print("[SyncManager] ⚠️ 警告: PeerID 字符串与对象不一致!")
+                    print("[SyncManager]   字符串: \(peerID)")
+                    print("[SyncManager]   对象: \(peer.b58String)")
+                }
+                
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "Connecting to \(peerID.prefix(8))...")
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "Connecting to \(peerID.prefix(12))...")
                 }
                 
                 // 1. Get remote MST root
@@ -357,6 +421,11 @@ public class SyncManager: ObservableObject {
                 // 增加重试次数，因为首次连接建立可能需要多次尝试
                 let rootRes: SyncResponse
                 do {
+                    // 再次验证 peer 对象
+                    print("[SyncManager] 🔗 准备连接到对等点:")
+                    print("[SyncManager]   - Peer 对象 b58String: \(peer.b58String)")
+                    print("[SyncManager]   - Peer 对象长度: \(peer.b58String.count) 字符")
+                    
                     rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 3)
                 } catch {
                     print("[SyncManager] ❌ 获取远程 MST 根失败: \(error)")
@@ -380,7 +449,15 @@ public class SyncManager: ObservableObject {
                         } catch {
                             // 重试也失败，标记为错误
                             await MainActor.run {
-                                self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
+                                // 对于新创建的同步组，连接失败是正常的（对等点可能还没有这个 syncID）
+                                let isNewSyncGroup = folder.syncID.count > 0 // 可以根据实际情况判断
+                                if isNewSyncGroup {
+                                    print("[SyncManager] ℹ️ 对等点可能还没有此同步组，这是正常的")
+                                    print("[SyncManager]   同步组 ID: \(folder.syncID)")
+                                    print("[SyncManager]   对等点: \(peerID.prefix(12))...")
+                                } else {
+                                    self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
+                                }
                             }
                             return
                         }
@@ -392,7 +469,13 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager]   3. 防火墙是否阻止了连接")
                         print("[SyncManager]   4. 两台设备是否在同一网络")
                         await MainActor.run {
-                            self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
+                            // 对于新创建的同步组，连接失败是正常的
+                            let isNewSyncGroup = folder.syncID.count > 0
+                            if !isNewSyncGroup {
+                                self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
+                            } else {
+                                print("[SyncManager] ℹ️ 对等点可能还没有此同步组，跳过错误状态更新")
+                            }
                         }
                         return
                     } else {

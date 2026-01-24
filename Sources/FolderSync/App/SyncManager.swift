@@ -449,33 +449,20 @@ public class SyncManager: ObservableObject {
                         } catch {
                             // 重试也失败，标记为错误
                             await MainActor.run {
-                                // 对于新创建的同步组，连接失败是正常的（对等点可能还没有这个 syncID）
-                                let isNewSyncGroup = folder.syncID.count > 0 // 可以根据实际情况判断
-                                if isNewSyncGroup {
-                                    print("[SyncManager] ℹ️ 对等点可能还没有此同步组，这是正常的")
-                                    print("[SyncManager]   同步组 ID: \(folder.syncID)")
-                                    print("[SyncManager]   对等点: \(peerID.prefix(12))...")
-                                } else {
-                                    self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
-                                }
+                                self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
                             }
                             return
                         }
                     } else if let nsError = error as NSError?, nsError.code == 2 {
-                        // 超时错误
+                        // 超时错误 - 这是真正的连接问题，应该报告
+                        print("[SyncManager] ⚠️ 连接超时")
                         print("[SyncManager] 💡 提示: 对等点可能未响应，请检查:")
                         print("[SyncManager]   1. 网络连接是否正常")
                         print("[SyncManager]   2. 对等点是否在线")
                         print("[SyncManager]   3. 防火墙是否阻止了连接")
                         print("[SyncManager]   4. 两台设备是否在同一网络")
                         await MainActor.run {
-                            // 对于新创建的同步组，连接失败是正常的
-                            let isNewSyncGroup = folder.syncID.count > 0
-                            if !isNewSyncGroup {
-                                self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(12))...")
-                            } else {
-                                print("[SyncManager] ℹ️ 对等点可能还没有此同步组，跳过错误状态更新")
-                            }
+                            self.updateFolderStatus(folder.id, status: .error, message: "连接超时: \(peerID.prefix(12))...")
                         }
                         return
                     } else {
@@ -487,7 +474,17 @@ public class SyncManager: ObservableObject {
                     }
                 }
                 
-                if case .error = rootRes {
+                if case .error(let errorMsg) = rootRes {
+                    // Remote doesn't have this folder
+                    // 这是正常的 - 对等点可能还没有这个 syncID（新创建的同步组）
+                    // 或者对等点确实没有此同步组
+                    // 这种情况不应该标记为错误，因为不是连接失败，而是对等点没有此同步组
+                    print("[SyncManager] ℹ️ 远程对等点没有此文件夹: \(folder.syncID)")
+                    print("[SyncManager]   错误信息: \(errorMsg)")
+                    print("[SyncManager]   对等点: \(peerID.prefix(12))...")
+                    print("[SyncManager] 💡 提示: 对等点可能还没有此同步组，这是正常的")
+                    print("[SyncManager]   等待其他设备也添加相同的 syncID 后会自动同步")
+                    // 不标记为错误，静默返回（这不是错误，而是对等点没有此同步组）
                     removeFolderPeer(folder.syncID, peerID: peerID)
                     return
                 }

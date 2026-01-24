@@ -2,11 +2,24 @@
 
 # 一、项目概述
 
-本项目旨在开发一款基于macOS平台的客户端程序，采用Swift language编写，通过P2P（点对点）技术实现多台电脑之间文件夹的自动同步，全程无需依赖中央服务器。程序具备设备自动发现、实时文件监控、基于内容块的增量同步、端到端加密等核心功能，兼顾同步效率、数据安全与用户体验，适用于家庭、小型团队等场景下的多设备文件协同管理。
+## 核心功能
+
+**客户端之间文件自动同步**：实现多台 macOS 设备之间的文件夹自动同步，无需中央服务器。当一台设备上的文件发生变化时，其他设备会自动检测并同步更新，确保所有设备上的文件保持一致。
+
+## 项目描述
+
+本项目是一款基于 macOS 平台的客户端程序，采用 Swift 语言编写，通过 P2P（点对点）技术实现多台电脑之间文件夹的自动同步，全程无需依赖中央服务器。程序具备设备自动发现、实时文件监控、基于内容块的增量同步、端到端加密等核心功能，兼顾同步效率、数据安全与用户体验，适用于家庭、小型团队等场景下的多设备文件协同管理。
 
 > 运行提示：局域网自动发现依赖 mDNS，现默认开启。若在特殊网络环境遇到崩溃或不希望广播，可设置环境变量 `FOLDERSYNC_ENABLE_MDNS=0` 禁用；需要发现时，请确保各客户端均开启 mDNS 并连接同一子网。
 
-核心目标：打破服务器依赖，实现设备间直连同步；支持多设备同时在线协作；保证文件同步的实时性、一致性与安全性；提供简洁直观的macOS原生GUI交互。
+核心目标：
+- **自动同步**：客户端之间自动检测文件变化并同步，无需手动操作
+- **无服务器架构**：打破服务器依赖，实现设备间直连同步
+- **多设备协作**：支持多设备同时在线协作
+- **实时性**：通过 FSEvents 实时监控文件变化，快速同步
+- **一致性**：通过 MST 和 Vector Clocks 保证文件同步的一致性
+- **安全性**：端到端加密，确保数据传输安全
+- **用户体验**：提供简洁直观的 macOS 原生 GUI 交互
 
 # 二、核心技术选型
 
@@ -35,11 +48,11 @@
 
 ## 1. 整体架构（分层设计）
 
-采用 **Headless Core + GUI Client** 架构，各层通过 XPC 或 gRPC 通信：
+采用 **单进程应用架构**，各层通过直接调用和 Swift Concurrency 进行通信：
 
 1. **表现层 (SwiftUI Client)**：提供设备管理、同步文件夹配置、状态实时监控、冲突解决等界面。
-2. **业务逻辑层 (Sync Engine)**：负责文件索引管理、因果追踪、冲突策略执行、同步任务调度。
-3. **网络层 (libp2p Wrapper)**：封装底层 P2P 逻辑，包括对等点发现、连接管理、多路复用与安全性保障。
+2. **业务逻辑层 (Sync Engine)**：负责文件索引管理、因果追踪、冲突策略执行、同步任务调度。通过 `@MainActor` 和 `ObservableObject` 与 UI 层进行状态同步。
+3. **网络层 (libp2p Wrapper)**：封装底层 P2P 逻辑，包括对等点发现、连接管理、多路复用与安全性保障。通过异步回调与业务逻辑层通信。
 4. **存储层 (Metadata Storage)**：使用 SQLite (WAL mode) 存储文件索引、块信息、设备状态与同步日志。
 
 ## 2. 核心模块详解
@@ -50,8 +63,9 @@
 - **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。
 
 ### （2）内容定义块管理 (Block Management)
-- **去重存储**：相同内容的数据块在本地 CAS (Content Addressed Storage) 中仅存储一份。
-- **高效传输**：同步时仅传输远程设备缺失的 Data Block ID 所对应的二进制包。
+- **FastCDC 算法**：已实现 FastCDC 算法用于文件内容定义切分，为未来的块级别同步优化做准备。
+- **当前实现**：当前版本采用文件级别的同步，通过文件哈希对比快速识别需要同步的文件。
+- **未来优化**：计划实现块级别的去重存储和增量传输，进一步提升大文件同步效率。
 
 ### （3）差分同步 (MST-based Diff)
 - **增量列表同步**：相比全量发送文件列表，MST 仅在分支哈希不一致时递归向下探测，极大程度节省元数据交换带宽。
@@ -184,16 +198,27 @@ struct SyncFolder: Identifiable, Codable {
     let id: UUID // 本地标识符
     let syncID: String // 全局唯一同步 ID (Link ID)
     var localPath: URL // 本地物理路径
-    var remotePeerIDs: [PeerID] // 参与此文件夹同步的对等端
     var mode: SyncMode // .twoWay, .uploadOnly, .downloadOnly
-    var status: SyncStatus // .synced, .syncing, .error
+    var status: SyncStatus // .synced, .syncing, .error, .paused
+    var syncProgress: Double = 0.0 // 同步进度
+    var lastSyncMessage: String? // 最后同步消息
+    var lastSyncedAt: Date? // 最后同步时间
+    var peerCount: Int = 0 // 参与同步的对等端数量
+    var fileCount: Int? = 0 // 文件数量
 }
 
+@MainActor
 class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
+    @Published var peers: [PeerID] = [] // 已发现的对等端
+    var folderPeers: [String: Set<String>] = [:] // SyncID -> PeerIDs 映射
 
-    func addFolder(url: URL, syncID: String) {
-        // 存储至 SQLite 并启动监听
+    func addFolder(_ folder: SyncFolder) {
+        folders.append(folder)
+        try? StorageManager.shared.saveFolder(folder)
+        startMonitoring(folder)
+        // 启动同步任务
+        triggerSync(for: folder)
     }
 }
 ```

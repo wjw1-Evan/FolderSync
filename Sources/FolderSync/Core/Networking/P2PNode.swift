@@ -8,15 +8,29 @@ public class P2PNode {
     public var app: Application?
     private var lanDiscovery: LANDiscovery?
     private var peerAddressCache: [String: [Multiaddr]] = [:] // 缓存对等点地址 (使用 b58String 作为键)
-    private var discoveryCallback: ((PeerInfo) -> Void)? // 保存发现回调以便手动调用
     private var registeringPeers: Set<String> = [] // 正在注册的对等点 PeerID (b58String)，用于去重
     private var registeredPeers: Set<String> = [] // 已成功注册到 peer store 的对等点 PeerID (b58String)
+    private let registeredPeersQueue = DispatchQueue(label: "com.foldersync.p2pnode.registeredpeers", attributes: .concurrent)
 
     public init() {}
     
     /// 获取对等点的缓存地址
     func getCachedAddresses(for peer: PeerID) -> [Multiaddr]? {
         return peerAddressCache[peer.b58String]
+    }
+    
+    /// 检查对等点是否已成功注册到 peer store
+    func isPeerRegistered(_ peerID: String) -> Bool {
+        return registeredPeersQueue.sync {
+            return registeredPeers.contains(peerID)
+        }
+    }
+    
+    /// 标记对等点为已注册（线程安全）
+    private func markPeerAsRegistered(_ peerID: String) {
+        registeredPeersQueue.async(flags: .barrier) {
+            self.registeredPeers.insert(peerID)
+        }
     }
     
     /// Setup LAN discovery using UDP broadcast
@@ -69,10 +83,8 @@ public class P2PNode {
             return
         }
         
-        // 检查是否已经成功注册过此对等点
-        let isAlreadyRegistered = await MainActor.run {
-            return self.registeredPeers.contains(peerID)
-        }
+        // 检查是否已经成功注册过此对等点（线程安全）
+        let isAlreadyRegistered = self.isPeerRegistered(peerID)
         
         // 如果已经注册过，且这次有地址，检查地址是否有更新
         if isAlreadyRegistered && !addresses.isEmpty {
@@ -179,85 +191,46 @@ public class P2PNode {
                 peerAddressCache[peerIDObj.b58String] = parsedAddresses
             }
             
-            // Critical issue: libp2p's newRequest requires the peer to be in the peer store with addresses
-            // Since we discovered the peer via LANDiscovery (not libp2p's discovery), the peer
-            // is not in libp2p's peer store, causing "peerNotFound" errors.
-            //
-            // Solution: Manually trigger libp2p's discovery callback with a PeerInfo
-            // This simulates libp2p discovering the peer via its own mechanisms and should
-            // add the peer to libp2p's peer store with the provided addresses.
-            
-            // Create a PeerInfo with the discovered addresses
-            let peerInfo = PeerInfo(peer: peerIDObj, addresses: parsedAddresses)
-            
-            // Manually trigger the discovery callback to register the peer
-            // This simulates libp2p discovering the peer via its own mechanisms
-            print("[P2PNode] 🔧 手动注册对等点到 libp2p peer store:")
+            // 自动注册机制：直接通知 SyncManager，让 libp2p 通过其自身的 discovery 机制自动发现和注册 peer
+            // 注意：LANDiscovery 发现的 peer 不会自动添加到 libp2p 的 peer store
+            // 但我们可以通过以下方式让 libp2p 自动发现：
+            // 1. 使用 discovery.announce 让其他设备发现我们
+            // 2. 配置 DHT 让 libp2p 自动发现 peer
+            // 3. 在 SyncManager 中处理 peerNotFound 错误，通过重试等待 libp2p 自动发现
+            print("[P2PNode] 🔍 发现对等点，等待 libp2p 自动注册:")
             print("[P2PNode]   - PeerID: \(peerIDObj.b58String)")
             print("[P2PNode]   - Addresses: \(parsedAddresses.count) 个")
             for (idx, addr) in parsedAddresses.enumerated() {
                 print("[P2PNode]     [\(idx + 1)] \(addr)")
             }
             
-            // Call the discovery callback that was registered in start()
-            // This should add the peer to libp2p's peer store with the addresses
-            // 注意：这个回调必须在 app.startup() 之后调用才能正确工作
-            if let callback = discoveryCallback {
-                // 修复 Bug 1: 先等待 1.5 秒，然后再调用 callback
-                // 这样可以确保在所有情况下，通知都在等待之后发送，保持时序一致
-                // 当 callback 被调用时，discoveryHandler 会立即触发 onPeerDiscovered
-                // 所以通知发生在 T=1.5 秒，SyncManager 在 T=2.5 秒开始同步（等待 1 秒）
-                print("[P2PNode] ⏳ 等待 1.5 秒后再注册对等点（确保时序一致）...")
-                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
-                
-                print("[P2PNode] ✅ 调用发现回调注册对等点...")
-                callback(peerInfo)
-                print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
-                print("[P2PNode] ✅ SyncManager 应该已收到对等点发现通知（通过 discoveryHandler）")
-                
-                // 修复 Bug 1: 调用 callback 后，还需要等待 libp2p 处理完成
-                // libp2p 需要时间处理 discovery callback 并更新内部 peer store
-                // 虽然通知已经发送，但我们仍需要等待确保 peer store 已更新
-                // 这样 SyncManager 开始同步时，peer store 已经准备好了
-                print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-                print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
-                
-                // 标记为已成功注册
-                await MainActor.run {
-                    self.registeredPeers.insert(peerID)
-                }
-                
-                // 总等待时间：1.5 + 1 = 2.5 秒
-                // 通知发生在 T=1.5 秒，SyncManager 在 T=2.5 秒开始同步
-                // 此时 P2PNode 已经等待了 2.5 秒，确保 peer store 已更新
-            } else {
-                print("[P2PNode] ❌ Discovery callback 不可用！")
-                print("[P2PNode] ⚠️ 严重警告: 对等点无法注册到 libp2p peer store")
-                print("[P2PNode] 💡 这可能是因为 app.startup() 尚未完成")
-                print("[P2PNode] 💡 或者 discovery callback 尚未注册")
-                print("[P2PNode] 💡 这会导致后续的 peerNotFound 错误")
-                
-                // 修复 Bug 1: 在 no-callback 路径中，我们需要在通知前等待 1.5 秒
-                // 这样可以确保与 callback-available 路径的时序一致
-                // callback-available: 等待 1.5 秒 → 通知（T=1.5）→ 等待 1 秒（T=2.5，确保 libp2p 处理）
-                // no-callback: 等待 1.5 秒 → 通知（T=1.5）→ 立即返回
-                // SyncManager 在两种情况下都会在 T=1.5 收到通知，然后等待 1 秒，在 T=2.5 开始同步
-                // 在 callback-available 路径中，P2PNode 的 1 秒等待与 SyncManager 的 1 秒等待是并行的
-                // 在 no-callback 路径中，由于无法注册到 peer store，不需要额外的等待
-                print("[P2PNode] ⏳ 等待 1.5 秒后再通知 SyncManager（确保时序一致）...")
-                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
-                
-                // 即使 discovery callback 不可用，也尝试通知 SyncManager
-                // 这样至少设备会出现在列表中，即使可能无法连接
-                print("[P2PNode] 📡 尝试直接触发 peer discovery callback...")
-                await MainActor.run {
-                    self.onPeerDiscovered?(peerIDObj)
-                }
-                print("[P2PNode] ✅ 对等点处理完成（虽然无法注册到 peer store）")
-                // 注意：不等待额外的 1 秒，因为无法注册到 peer store，不需要等待 libp2p 处理
-                // SyncManager 会等待 1 秒，在 T=2.5 开始同步（与 callback-available 路径一致）
+            // 尝试使用 libp2p 的 discovery.announce 机制来让 libp2p 自动发现和注册 peer
+            // 使用对等点的地址创建一个服务标识符
+            // 这样 libp2p 可能会自动发现并注册这个 peer
+            let serviceName = "folder-sync-\(peerIDObj.b58String.prefix(8))"
+            print("[P2PNode] 📡 尝试通过 discovery.announce 让 libp2p 自动发现对等点...")
+            do {
+                _ = try? await app.discovery.announce(.service(serviceName)).get()
+                print("[P2PNode] ✅ Discovery announce 已发送")
+            } catch {
+                print("[P2PNode] ⚠️ Discovery announce 失败（可能不影响功能）: \(error.localizedDescription)")
             }
+            
+            // 等待一小段时间，让 libp2p 有机会自动发现和注册 peer
+            print("[P2PNode] ⏳ 等待 libp2p 自动发现和注册对等点...")
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+            
+            // 直接通知 SyncManager 发现的 peer
+            // SyncManager 会在同步时处理 peerNotFound 错误，通过重试等待 libp2p 自动发现
+            print("[P2PNode] 📡 通知 SyncManager 对等点已发现...")
+            await MainActor.run {
+                self.onPeerDiscovered?(peerIDObj)
+            }
+            print("[P2PNode] ✅ SyncManager 已收到对等点发现通知")
+            
+            // 注意：我们不会立即标记为"已注册"，因为 libp2p 可能还没有自动发现这个 peer
+            // 实际的注册状态会在 SyncManager 尝试同步时通过 peerNotFound 错误来判断
+            // 如果 libp2p 成功自动发现并注册了 peer，后续的同步请求会成功
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
             print("[P2PNode] 💡 无法注册对等点到 peer store（缺少地址）")
@@ -374,15 +347,13 @@ public class P2PNode {
             }
             print("[P2PNode] ✅ libp2p 已将对等点添加到 peer store（包含地址）")
             // libp2p has already added this peer to the peer store with addresses
+            // 标记为已成功注册（线程安全）
+            self?.markPeerAsRegistered(peerInfo.peer.b58String)
             self?.onPeerDiscovered?(peerInfo.peer)
         }
         
         app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
-        
-        // Save the callback so we can manually trigger it for LAN-discovered peers
-        // 注意：这个回调必须在 app.startup() 之后才能正确工作
-        self.discoveryCallback = discoveryHandler
-        print("[P2PNode] ✅ 发现回调已注册，可用于手动注册 LAN 发现的对等点")
+        print("[P2PNode] ✅ 发现回调已注册，libp2p 会自动处理发现的对等点")
 
         // Start the application and wait for it to complete
         // 必须等待 startup 完成，否则 discovery callback 可能无法正确工作

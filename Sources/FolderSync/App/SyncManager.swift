@@ -158,9 +158,10 @@ public class SyncManager: ObservableObject {
         
         // 启动新的定期检查任务
         peerStatusCheckTask = Task { [weak self] in
-            // 首次等待 60 秒，给设备足够的时间完成连接和注册
-            // 从 30 秒增加到 60 秒，确保对等点有足够时间注册到 libp2p peer store
-            try? await Task.sleep(nanoseconds: 60_000_000_000) // 60秒
+            // 首次等待 90 秒，给设备足够的时间完成连接和注册
+            // 从 60 秒增加到 90 秒，确保对等点有足够时间注册到 libp2p peer store
+            // 并且有足够时间完成首次同步尝试
+            try? await Task.sleep(nanoseconds: 90_000_000_000) // 90秒
             
             while !Task.isCancelled {
                 guard let self = self else { break }
@@ -233,16 +234,33 @@ public class SyncManager: ObservableObject {
         
         let peerIDString = peer.b58String
         
-        // 检查设备是否是新发现的（在最近2分钟内发现的）
+        // 首先检查对等点是否已注册到 libp2p peer store
+        let isRegistered = p2pNode.isPeerRegistered(peerIDString)
+        
+        // 检查设备是否是新发现的（在最近5分钟内发现的）
         let isRecentlyDiscovered = await MainActor.run {
             if let discoveryTime = self.peerDiscoveryTime[peerIDString] {
                 let timeSinceDiscovery = Date().timeIntervalSince(discoveryTime)
-                return timeSinceDiscovery < 120.0 // 2分钟内
+                return timeSinceDiscovery < 300.0 // 5分钟内
             }
             return false
         }
         
-        // 尝试发送一个轻量级的请求来检查设备是否在线
+        // 如果对等点尚未注册到 peer store
+        if !isRegistered {
+            // 如果是新发现的，认为可能正在注册中，保守地认为在线
+            if isRecentlyDiscovered {
+                print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 尚未注册到 peer store，但设备是新发现的（可能是注册延迟）")
+                print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")
+                return true // 保守地认为在线，等待更长时间后再检查
+            } else {
+                // 如果不是新发现的，且未注册，认为离线
+                print("[SyncManager] ❌ 设备 \(peerIDString.prefix(12))... 离线（未注册到 peer store，且不是新发现的）")
+                return false
+            }
+        }
+        
+        // 对等点已注册，尝试发送一个轻量级的请求来验证设备是否真的在线
         // 使用一个不存在的 syncID，如果设备在线会返回 "Folder not found"（这是正常的）
         // 如果设备离线，会返回连接错误或超时
         do {
@@ -269,8 +287,8 @@ public class SyncManager: ObservableObject {
                 return true
             }
             
-            // 如果是 peerNotFound 错误，且设备是新发现的，可能是注册延迟导致的
-            // 不应该立即判定为离线，应该等待更长时间
+            // 如果是 peerNotFound 错误，说明对等点可能已从 peer store 中移除（设备可能真的离线了）
+            // 但如果是新发现的，可能是注册延迟，再给一次机会
             if (errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore")) && isRecentlyDiscovered {
                 print("[SyncManager] ⚠️ 设备 \(peerIDString.prefix(12))... 返回 peerNotFound，但设备是新发现的（可能是注册延迟）")
                 print("[SyncManager] 💡 保守地认为设备在线，等待更长时间后再检查")

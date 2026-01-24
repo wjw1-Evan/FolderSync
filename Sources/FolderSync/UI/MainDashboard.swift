@@ -396,11 +396,11 @@ struct AllPeersListView: View {
                             
                             HStack(spacing: 6) {
                                 Circle()
-                                    .fill(.green)
+                                    .fill(device.status == "在线" ? .green : .red)
                                     .frame(width: 6, height: 6)
                                 Text(device.status)
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(device.status == "在线" ? .green : .red)
                                 if !device.isLocal {
                                     Text("•")
                                         .foregroundStyle(.secondary)

@@ -42,7 +42,7 @@
     - **设备身份**：每个设备在首次启动时生成随机 Ed25519 密钥对，PeerID 作为全球唯一标识。
     - **自动认证**：设备通过 libp2p 的 Noise 协议自动进行相互认证，无需手动配对。
     - **Noise 协议**：基于 Noise Protocol Framework 实现端到端加密信道，确保数据传输安全。
-- **加密机制**：采用端到端加密 (E2EE)，使用 Noise 协议加密传输链路，本地元数据加密存储在 macOS Keychain。
+- **加密机制**：采用端到端加密 (E2EE)，使用 Noise 协议加密传输链路，本地元数据存储在 JSON 文件中。
 
 # 三、系统架构设计
 
@@ -53,15 +53,20 @@
 1. **表现层 (SwiftUI Client)**：提供设备管理、同步文件夹配置、状态实时监控、冲突解决等界面。
 2. **业务逻辑层 (Sync Engine)**：负责文件索引管理、因果追踪、冲突策略执行、同步任务调度。通过 `@MainActor` 和 `ObservableObject` 与 UI 层进行状态同步。
 3. **网络层 (libp2p Wrapper)**：封装底层 P2P 逻辑，包括对等点发现、连接管理、多路复用与安全性保障。通过异步回调与业务逻辑层通信。
-4. **存储层 (Metadata Storage)**：使用 SQLite (WAL mode) 存储文件索引、块信息、设备状态与同步日志。
+4. **存储层 (Metadata Storage)**：使用 JSON 文件存储文件夹配置、文件索引、块信息、设备状态与同步日志，避免 SQLite 的 I/O 错误问题。
 
 ## 2. 核心模块详解
 
 ### （1）网络与设备发现 (libp2p)
-- **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备，无需手动配置。设备每 5 秒广播一次自己的 PeerID，并监听其他设备的广播消息。这是主要的设备发现机制，完全在局域网内工作，无需任何服务器。
+- **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备，无需手动配置。设备每 5 秒广播一次自己的 PeerID 和监听地址，并监听其他设备的广播消息。这是主要的设备发现机制，完全在局域网内工作，无需任何服务器。
+- **智能对等点注册**：当通过 LAN Discovery 发现对等点时，系统会自动将对该等点注册到 libp2p 的 peer store 中，确保后续的 P2P 连接能够成功建立。注册过程包括：
+  - 等待 libp2p 应用完全启动（`app.startup()` 完成）
+  - 解析对等点的 PeerID 和监听地址
+  - 手动触发 libp2p 的发现回调，将对等点添加到 peer store
+  - 延迟同步以确保对等点已完全注册
 - **自动连接**：发现设备后自动建立连接并开始同步，无需任何手动配对步骤。所有通信均在客户端之间直接进行（P2P），无需中央服务器。
 - **纯 P2P 架构**：客户端之间通过 libp2p 协议直接通信，所有数据传输都在设备间直连完成，不经过任何中间服务器。
-- **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。
+- **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。密钥对存储在本地文件中，使用密码加密保护。
 - **未来扩展**：可选的广域网发现功能（DHT）已预留接口，但当前版本专注于局域网内的无服务器 P2P 同步。
 
 ### （2）内容定义块管理 (Block Management)
@@ -73,9 +78,9 @@
 - **增量列表同步**：相比全量发送文件列表，MST 仅在分支哈希不一致时递归向下探测，极大程度节省元数据交换带宽。
 
 ### （4）身份验证与安全
-- **自动身份验证**：设备通过 libp2p 的 Noise 协议自动进行身份验证和加密连接。
+- **自动身份验证**：设备通过 libp2p 的 Noise 协议自动进行身份验证和加密连接，无需手动配对。
 - **端到端加密**：所有数据传输使用 Noise 协议加密，确保数据安全。
-- **本地存储安全性**：私钥存储在 macOS Keychain 中，确保硬件级别的安全性。
+- **本地存储安全性**：私钥存储在本地文件中，使用密码加密保护。密码存储在本地文件中，避免每次启动时要求用户输入系统密码。
 
 # 四、GUI 界面设计
 
@@ -103,15 +108,24 @@ class P2PNode {
         
         // 启用 UDP 广播局域网发现
         let discovery = LANDiscovery()
-        discovery.onPeerDiscovered = { peerID, address in
-            // 处理发现的设备
+        discovery.onPeerDiscovered = { peerID, address, peerAddresses in
+            // 处理发现的设备，包括 PeerID 和监听地址
+            await self.connectToDiscoveredPeer(peerID: peerID, addresses: peerAddresses)
         }
-        discovery.start(peerID: app.peerID.b58String)
+        discovery.start(peerID: app.peerID.b58String, listenAddresses: [])
         
         // 注册 libp2p 的发现事件
-        app.discovery.onPeerDiscovered { peerInfo in
-            // 自动连接并同步
+        let discoveryHandler: (PeerInfo) -> Void = { peerInfo in
+            // libp2p 已将对等点添加到 peer store
+            // 触发同步管理器开始同步
         }
+        app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
+        
+        // 保存发现回调，用于手动注册 LAN 发现的对等点
+        self.discoveryCallback = discoveryHandler
+        
+        // 等待应用完全启动
+        try await app.startup()
     }
 }
 ```
@@ -198,13 +212,14 @@ struct SyncFolder: Identifiable, Codable {
     let id: UUID // 本地标识符
     let syncID: String // 全局唯一同步 ID (Link ID)
     var localPath: URL // 本地物理路径
-    var mode: SyncMode // .twoWay, .uploadOnly, .downloadOnly
+    var mode: SyncMode // .twoWay (当前仅支持双向同步)
     var status: SyncStatus // .synced, .syncing, .error, .paused
     var syncProgress: Double = 0.0 // 同步进度
     var lastSyncMessage: String? // 最后同步消息
     var lastSyncedAt: Date? // 最后同步时间
     var peerCount: Int = 0 // 参与同步的对等端数量
-    var fileCount: Int? = 0 // 文件数量
+    var fileCount: Int = 0 // 文件数量
+    var folderCount: Int = 0 // 文件夹数量
 }
 
 @MainActor
@@ -217,33 +232,41 @@ class SyncManager: ObservableObject {
         folders.append(folder)
         try? StorageManager.shared.saveFolder(folder)
         startMonitoring(folder)
-        // 启动同步任务
-        triggerSync(for: folder)
+        
+        // 立即统计文件数量和文件夹数量
+        refreshFileCount(for: folder)
+        
+        // 启动同步任务（延迟执行，等待对等点注册）
+        // 系统会自动判断是创建新同步组还是加入现有同步组
     }
 }
 ```
 
 # 六、风险与应对
 
-- **性能开销**：大量小文件的 MST 构建可能导致 CPU/IO 压力。*应对：引入异步索引更新机制，分批次写入 SQLite。*
+- **性能开销**：大量小文件的 MST 构建可能导致 CPU/IO 压力。*应对：引入异步索引更新机制，使用 JSON 文件存储，避免 SQLite 的 I/O 瓶颈。*
 - **网路波动**：广域网高丢包率。*应对：启用 libp2p 的 QUIC 传输，利用其多路复用和拥塞控制。*
 - **沙盒权限**：macOS App Sandbox。*应对：使用 Security-Scoped Bookmarks 保持文件夹访问权限。*
+- **对等点注册时序**：LAN 发现的对等点可能无法立即注册到 libp2p peer store。*应对：实现智能注册机制，确保 `app.startup()` 完成后再注册，并延迟同步以确保对等点已完全注册。*
 
 # 七、当前实现状态
 
 ## 已实现功能
 - ✅ 局域网自动发现（UDP 广播）
-- ✅ 自动设备连接和同步
-- ✅ 双向文件同步
+- ✅ 智能对等点注册机制（确保 LAN 发现的对等点正确注册到 libp2p peer store）
+- ✅ 自动设备连接和同步（无需手动配对）
+- ✅ 双向文件同步（当前仅支持双向同步）
 - ✅ Vector Clock 冲突检测
 - ✅ 冲突文件多版本保留
 - ✅ 文件删除同步
 - ✅ 实时文件监控（FSEvents）
 - ✅ MST 状态对比
-- ✅ 同步模式配置（双向/仅上传/仅下载）
-- ✅ 排除规则配置
+- ✅ 排除规则配置（`.gitignore` 风格）
 - ✅ 同步历史记录
 - ✅ 冲突解决界面
+- ✅ 文件/文件夹数量自动统计
+- ✅ JSON 文件存储（替代 SQLite，避免 I/O 错误）
+- ✅ 文件式密钥存储（避免每次启动输入系统密码）
 
 ## 开发中功能
 - 🚧 AutoNAT 和 Circuit Relay
@@ -251,4 +274,18 @@ class SyncManager: ObservableObject {
 
 # 八、总结
 
-本方案通过引入 **libp2p** 和 **CDC 同步模型**，实现了更稳健、更高效的无服务器文件夹同步。使用 UDP 广播实现局域网自动发现，设备无需手动配置即可自动连接和同步。MST 保证了在海量文件下的快速同步一致性，而 Vector Clocks 确保了在多设备并发环境下的一致性逻辑。
+本方案通过引入 **libp2p** 和 **CDC 同步模型**，实现了更稳健、更高效的无服务器文件夹同步。使用 UDP 广播实现局域网自动发现，设备无需手动配置即可自动连接和同步。实现了智能对等点注册机制，确保通过 LAN Discovery 发现的对等点能够正确注册到 libp2p 的 peer store，解决了 `peerNotFound` 错误问题。MST 保证了在海量文件下的快速同步一致性，而 Vector Clocks 确保了在多设备并发环境下的一致性逻辑。
+
+## 关键技术改进
+
+1. **智能对等点注册**：确保 LAN Discovery 发现的对等点能够正确注册到 libp2p peer store，通过等待 `app.startup()` 完成、手动触发发现回调、延迟同步等机制，解决了对等点无法连接的问题。
+
+2. **存储优化**：从 SQLite 迁移到 JSON 文件存储，避免了 SQLite 的 I/O 错误问题，提高了存储的可靠性。
+
+3. **用户体验优化**：
+   - 移除手动配对流程，实现完全自动的设备发现和连接
+   - 简化同步模式，当前仅支持双向同步
+   - 自动统计文件/文件夹数量
+   - 文件式密钥存储，避免每次启动输入系统密码
+
+4. **同步机制优化**：延迟同步确保对等点已完全注册到 libp2p peer store，减少连接失败的情况。

@@ -485,12 +485,16 @@ public class SyncManager: ObservableObject {
                     print("[SyncManager] 💡 提示: 对等点可能还没有此同步组，这是正常的")
                     print("[SyncManager]   等待其他设备也添加相同的 syncID 后会自动同步")
                     // 不标记为错误，静默返回（这不是错误，而是对等点没有此同步组）
-                    removeFolderPeer(folder.syncID, peerID: peerID)
+                    await MainActor.run {
+                        self.removeFolderPeer(folder.syncID, peerID: peerID)
+                    }
                     return
                 }
                 
                 // Peer confirmed to have this folder
-                addFolderPeer(folder.syncID, peerID: peerID)
+                await MainActor.run {
+                    self.addFolderPeer(folder.syncID, peerID: peerID)
+                }
                 
                 guard case .mstRoot(_, let remoteHash) = rootRes else { return }
                 
@@ -758,8 +762,8 @@ public class SyncManager: ObservableObject {
                     }
                 }
                 
-                removeFolderPeer(folder.syncID, peerID: peerID)
                 await MainActor.run {
+                    self.removeFolderPeer(folder.syncID, peerID: peerID)
                     let errorMessage = error.localizedDescription.isEmpty ? "同步失败: \(error)" : error.localizedDescription
                     self.updateFolderStatus(folder.id, status: .error, message: errorMessage)
                 }

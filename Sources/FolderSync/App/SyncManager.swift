@@ -796,15 +796,54 @@ public class SyncManager: ObservableObject {
         return (mst, metadata, folderCount)
     }
     
+    /// 检查 syncID 是否存在于网络上的其他设备
+    /// 通过尝试向已知对等点查询该 syncID 来验证
     func checkIfSyncIDExists(_ syncID: String) async -> Bool {
-        // In a real P2P app, we would query the DHT for this syncID
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        
+        // 首先检查本地是否已有该 syncID
         if folders.contains(where: { $0.syncID == syncID }) {
             return true
         }
         
-        return syncID.count >= 4
+        // 如果 syncID 太短，认为无效
+        guard syncID.count >= 4 else {
+            return false
+        }
+        
+        // 如果没有已知的对等点，无法验证，但允许用户尝试加入
+        // 因为对等点可能稍后才被发现
+        guard !peers.isEmpty, let app = p2pNode.app else {
+            print("[SyncManager] ℹ️ 暂无已知对等点，允许尝试加入 syncID: \(syncID)")
+            return true // 允许尝试，如果不存在会在同步时发现
+        }
+        
+        // 向所有已知对等点查询该 syncID
+        // 如果任何一个对等点有该 syncID，则返回 true
+        for peer in peers {
+            do {
+                // 尝试获取该 syncID 的 MST 根，如果成功则说明对等点有该文件夹
+                let response: SyncResponse = try await app.requestSync(
+                    .getMST(syncID: syncID),
+                    to: peer,
+                    timeout: 10.0,
+                    maxRetries: 1
+                )
+                
+                // 如果返回的不是错误，说明对等点有该 syncID
+                if case .mstRoot = response {
+                    print("[SyncManager] ✅ 在对等点 \(peer.b58String.prefix(8)) 找到 syncID: \(syncID)")
+                    return true
+                }
+            } catch {
+                // 如果返回错误（如 "Folder not found"），说明该对等点没有该 syncID
+                // 继续检查下一个对等点
+                continue
+            }
+        }
+        
+        // 所有对等点都没有该 syncID，但允许用户尝试加入
+        // 因为可能对等点稍后才添加该文件夹，或者对等点暂时不可用
+        print("[SyncManager] ℹ️ 未在已知对等点找到 syncID: \(syncID)，但允许尝试加入")
+        return true
     }
     
     /// 获取总设备数量（包括自身）

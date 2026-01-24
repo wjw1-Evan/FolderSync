@@ -363,9 +363,14 @@ struct AddFolderView: View {
             }
             
             if syncMode == .join {
-                Text("提示：加入现有同步组需要两边填写相同的 ID。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("提示：加入现有同步组需要两边填写相同的 ID。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("系统会自动检查网络上是否有该 ID 的同步组。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             
             HStack {

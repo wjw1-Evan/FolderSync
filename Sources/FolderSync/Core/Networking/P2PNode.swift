@@ -134,13 +134,15 @@ public class P2PNode {
         app.listen(.tcp(host: "0.0.0.0", port: 0))
 
         // Enable LAN discovery using UDP broadcast (more reliable than mDNS)
+        // 这是主要的设备发现机制，完全在局域网内工作，无需任何服务器
         // Will update addresses after startup
         setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
 
-        // 配置 Kademlia DHT 用于广域网发现
-        // 使用 DHT 作为发现服务，支持广域网设备发现
-        app.discovery.use(.kadDHT)
-        print("[P2PNode] ✅ Kademlia DHT 已配置为发现服务")
+        // 注意：DHT 是可选的，主要用于广域网发现
+        // 如果只需要局域网同步，可以注释掉以下 DHT 配置
+        // 当前保留 DHT 以支持未来可能的广域网功能，但局域网同步完全依赖 LANDiscovery
+        // app.discovery.use(.kadDHT)
+        // print("[P2PNode] ✅ Kademlia DHT 已配置为发现服务（可选，用于广域网）")
         
         // 也可以将 DHT 作为独立的 DHT 使用（用于值存储和检索）
         // app.dht.use(.kadDHT)
@@ -198,9 +200,9 @@ public class P2PNode {
             print("[P2PNode] ❌ LAN Discovery 未启用")
         }
         
-        // 检查 DHT 状态
-        // 注意：DHT 需要一些时间才能连接到引导节点并建立路由表
-        print("[P2PNode] ℹ️ DHT 正在初始化，可能需要一些时间连接到网络...")
+        // 局域网发现是主要机制，完全无需服务器
+        print("[P2PNode] ✅ 局域网发现已启用，使用 UDP 广播自动发现同一网络内的设备")
+        print("[P2PNode] ℹ️ 所有通信均在客户端之间直接进行，无需任何服务器端")
         
         print("[P2PNode] ======================================\n")
     }

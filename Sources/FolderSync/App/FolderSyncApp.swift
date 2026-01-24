@@ -34,11 +34,33 @@ struct FolderSyncApp: App {
             MainDashboard()
                 .environmentObject(syncManager)
         }
+        .defaultSize(width: 800, height: 600)
+        .windowStyle(.automatic)
+        .commands {
+            // 移除默认的"新建窗口"菜单项，防止用户通过菜单创建多个窗口
+            CommandGroup(replacing: .newItem) {}
+        }
         
         MenuBarExtra("FolderSync", systemImage: "arrow.triangle.2.circlepath") {
             Button("显示主界面") {
-                openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                // 检查是否已经有主窗口打开
+                // 查找所有可见的窗口，优先检查标识符，其次检查标题
+                let existingWindow = NSApplication.shared.windows.first { window in
+                    window.isVisible && (
+                        window.identifier?.rawValue == "main" ||
+                        window.title == "FolderSync 仪表盘"
+                    )
+                }
+                
+                if let window = existingWindow {
+                    // 如果窗口已存在，激活它并带到前台
+                    window.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    // 如果窗口不存在，打开新窗口
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             Divider()
             Toggle("开机自动启动", isOn: $launchAtLogin)

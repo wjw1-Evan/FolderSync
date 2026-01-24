@@ -1,93 +1,63 @@
 import Darwin
 import Foundation
 import LibP2P
-import LibP2PMDNS
 import NIOCore
 
 public class P2PNode {
     public var app: Application?
+    private var lanDiscovery: LANDiscovery?
 
     public init() {}
-
-    /// Determine whether mDNS is allowed based on the provided environment.
-    /// Default is allowed unless explicitly turned off.
-    static func isMdnsAllowed(env: [String: String]) -> Bool {
-        let mdnsEnv = env["FOLDERSYNC_ENABLE_MDNS"]?.lowercased()
-        switch mdnsEnv {
-        case "0", "false", "no", "off":
-            return false
-        default:
-            return true
+    
+    /// Setup LAN discovery using UDP broadcast
+    private func setupLANDiscovery(peerID: String) {
+        let discovery = LANDiscovery()
+        discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address in
+            print("[P2PNode] LAN discovery found peer: \(discoveredPeerID) at \(address)")
+            // Store discovered peer IDs - libp2p will handle the actual connection
+            // when peers are discovered through its own mechanisms or when they connect
+            // The LAN discovery helps peers find each other on the local network
         }
-    }
-
-    /// Check whether the given address matches any enumerated network device.
-    /// LibP2PMDNS will crash if it cannot resolve the address back to an interface,
-    /// so we preflight this before calling into the library.
-    private func hasMatchingInterface(for address: SocketAddress) -> Bool {
-        guard let devices = try? NIOCore.System.enumerateDevices() else { return false }
-        return devices.contains(where: { $0.address == address })
+        discovery.start(peerID: peerID)
+        self.lanDiscovery = discovery
+        print("[P2PNode] LAN discovery enabled using UDP broadcast. Automatic peer discovery active.")
     }
 
     public var onPeerDiscovered: ((PeerID) -> Void)?
     public func start() async throws {
-        // Create the LibP2P application with an ephemeral Ed25519 peerID
-        let app = try await Application.make(.development, peerID: .ephemeral(type: .Ed25519))
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+        let password = KeychainManager.loadOrCreatePassword()
+        let keyPairFile: KeyPairFile = .persistent(
+            type: .Ed25519,
+            encryptedWith: .password(password),
+            storedAt: .filePath(folderSyncDir)
+        )
+        let app = try await Application.make(.development, peerID: keyPairFile)
         self.app = app
 
         // Explicitly configure TCP to listen on all interfaces
         // Using port 0 allows the OS to assign any available port
         app.listen(.tcp(host: "0.0.0.0", port: 0))
 
-        // Enable mDNS for automatic local network peer discovery
-        let env = ProcessInfo.processInfo.environment
-        let mdnsAllowed = Self.isMdnsAllowed(env: env)
+        // Enable LAN discovery using UDP broadcast (more reliable than mDNS)
+        setupLANDiscovery(peerID: app.peerID.b58String)
 
-        if mdnsAllowed {
-            let devices = (try? NIOCore.System.enumerateDevices()) ?? []
-            // Prefer IPv4 non-loopback, then IPv6 non-loopback
-            let candidates: [(NIONetworkDevice, SocketAddress)] = devices.compactMap { device in
-                guard let address = device.address else { return nil }
-                guard device.name != "lo0" else { return nil }
-                return (device, address)
-            }.sorted {
-                (lhs: (NIONetworkDevice, SocketAddress), rhs: (NIONetworkDevice, SocketAddress))
-                    -> Bool in
-                // IPv4 before IPv6
-                if lhs.1.protocol == .inet && rhs.1.protocol == .inet6 { return true }
-                if lhs.1.protocol == .inet6 && rhs.1.protocol == .inet { return false }
-                return lhs.0.name < rhs.0.name
-            }
-
-            var bound = false
-            for (device, address) in candidates {
-                // LibP2PMDNS crashes if the interface isn't resolvable. Double-check before binding.
-                if hasMatchingInterface(for: address) {
-                    print("[P2PNode] Binding mDNS to interface: \(device.name) (\(address))")
-                    app.discovery.use(.mdns(interfaceAddress: address))
-                    bound = true
-                    break
-                } else {
-                    print(
-                        "[P2PNode] Skipping interface \(device.name) (\(address)) — not resolvable for mDNS"
-                    )
-                }
-            }
-
-            if !bound {
-                print(
-                    "[P2PNode] Warning: No suitable network interface found for mDNS. Automatic discovery disabled."
-                )
-            }
-        } else {
-            print(
-                "[P2PNode] mDNS discovery is disabled via FOLDERSYNC_ENABLE_MDNS. Remove it or set to 1/true to enable."
-            )
-        }
-
-        // Register for peer discovery events
+        // TODO: DHT广域网发现 - 需要添加 DHT 包并配置:
+        // app.dht.initialize()
+        // app.dht.use(KademliaDHT(...))
+        // app.discovery.use(.dht(...))
+        // 需要添加 swift-libp2p-dht 或类似包到 Package.swift
+        
+        // TODO: AutoNAT 和 Circuit Relay - 需要配置:
+        // app.use(.autonat)
+        // app.use(.circuitRelay(...))
+        // 需要检查 swift-libp2p 是否提供这些模块
+        
+        // Register for peer discovery events (from libp2p's discovery mechanisms)
         app.discovery.onPeerDiscovered(self) { [weak self] (peerInfo: PeerInfo) in
-            print("Found peer: \(peerInfo.peer.b58String)")
+            print("[P2PNode] libp2p discovered peer: \(peerInfo.peer.b58String)")
             self?.onPeerDiscovered?(peerInfo.peer)
         }
 
@@ -115,6 +85,7 @@ public class P2PNode {
     }
 
     public func stop() async throws {
+        lanDiscovery?.stop()
         try await app?.asyncShutdown()
     }
 

@@ -3,10 +3,27 @@ import SwiftUI
 struct MainDashboard: View {
     @EnvironmentObject var syncManager: SyncManager
     @State private var showingAddFolder = false
+    @State private var showingConflictCenter = false
+    @State private var showingSyncHistory = false
     
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    HStack(spacing: 16) {
+                        Label("↑ \(byteRate(syncManager.uploadSpeedBytesPerSec))/s", systemImage: "arrow.up.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Label("↓ \(byteRate(syncManager.downloadSpeedBytesPerSec))/s", systemImage: "arrow.down.circle")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(syncManager.peers.count) 台设备在线")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } header: { Text("状态") }
                 Section("同步文件夹") {
                     ForEach(syncManager.folders) { folder in
                         FolderRow(folder: folder)
@@ -20,6 +37,15 @@ struct MainDashboard: View {
             }
             .listStyle(.inset)
             .navigationTitle("FolderSync 仪表盘")
+            .onAppear {
+                // 设置窗口标识符，方便检查窗口是否已存在
+                DispatchQueue.main.async {
+                    if let window = NSApplication.shared.windows.first(where: { $0.isKeyWindow || $0.isMainWindow }) {
+                        window.identifier = NSUserInterfaceItemIdentifier("main")
+                        window.title = "FolderSync 仪表盘"
+                    }
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -28,12 +54,40 @@ struct MainDashboard: View {
                         Label("添加文件夹", systemImage: "plus")
                     }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingConflictCenter = true
+                    } label: {
+                        Label("冲突中心", systemImage: "exclamationmark.triangle")
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingSyncHistory = true
+                    } label: {
+                        Label("同步历史", systemImage: "clock.arrow.circlepath")
+                    }
+                }
             }
             .sheet(isPresented: $showingAddFolder) {
                 AddFolderView()
             }
+            .sheet(isPresented: $showingConflictCenter) {
+                ConflictCenter()
+                    .environmentObject(syncManager)
+            }
+            .sheet(isPresented: $showingSyncHistory) {
+                SyncHistoryView()
+                    .environmentObject(syncManager)
+            }
         }
         .frame(minWidth: 500, minHeight: 400)
+    }
+    
+    private func byteRate(_ bytesPerSec: Double) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytesPerSec))
     }
 }
 
@@ -41,6 +95,8 @@ struct FolderRow: View {
     @EnvironmentObject var syncManager: SyncManager
     let folder: SyncFolder
     @State private var showingPeerList = false
+    @State private var showingExcludeRules = false
+    @State private var showingSyncModeEditor = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -75,9 +131,15 @@ struct FolderRow: View {
                 VStack(alignment: .trailing, spacing: 4) {
                     StatusBadge(status: folder.status)
                     
-                    Text("\(folder.fileCount ?? 0) 个文件")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text("\(folder.fileCount ?? 0) 个文件")
+                        if let folderCount = folder.folderCount, folderCount > 0 {
+                            Text("•")
+                            Text("\(folderCount) 个文件夹")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                     
                     if folder.peerCount > 0 {
                         Button {
@@ -139,6 +201,18 @@ struct FolderRow: View {
                 Label("复制同步 ID", systemImage: "doc.on.doc")
             }
             
+            Button {
+                showingExcludeRules = true
+            } label: {
+                Label("排除规则", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            
+            Button {
+                showingSyncModeEditor = true
+            } label: {
+                Label("同步模式", systemImage: "arrow.triangle.2.circlepath")
+            }
+            
             Divider()
             
             Button(role: .destructive) {
@@ -146,6 +220,14 @@ struct FolderRow: View {
             } label: {
                 Label("移除文件夹", systemImage: "trash")
             }
+        }
+        .sheet(isPresented: $showingExcludeRules) {
+            ExcludeRulesView(folder: folder)
+                .environmentObject(syncManager)
+        }
+        .sheet(isPresented: $showingSyncModeEditor) {
+            SyncModeEditorView(folder: folder)
+                .environmentObject(syncManager)
         }
     }
 }
@@ -181,6 +263,7 @@ struct AddFolderView: View {
     @State private var syncID: String = ""
     
     @State private var syncMode: Selection = .create
+    @State private var folderSyncMode: SyncMode = .twoWay
     @State private var errorMessage: String?
     @State private var isChecking = false
     
@@ -244,6 +327,22 @@ struct AddFolderView: View {
                 }
             }
             
+            VStack(alignment: .leading, spacing: 10) {
+                Text("3. 同步模式")
+                    .font(.subheadline).bold()
+                
+                Picker("同步模式", selection: $folderSyncMode) {
+                    Text("双向同步").tag(SyncMode.twoWay)
+                    Text("仅上传").tag(SyncMode.uploadOnly)
+                    Text("仅下载").tag(SyncMode.downloadOnly)
+                }
+                .pickerStyle(.segmented)
+                
+                Text(folderSyncModeDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
@@ -268,7 +367,7 @@ struct AddFolderView: View {
                                 await MainActor.run {
                                     isChecking = false
                                     if exists {
-                                        let newFolder = SyncFolder(syncID: syncID, localPath: path)
+                                        let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: folderSyncMode)
                                         syncManager.addFolder(newFolder)
                                         dismiss()
                                     } else {
@@ -278,7 +377,7 @@ struct AddFolderView: View {
                             }
                         } else {
                             // Create mode: allow any ID or generated ID
-                            let newFolder = SyncFolder(syncID: syncID, localPath: path)
+                            let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: folderSyncMode)
                             syncManager.addFolder(newFolder)
                             dismiss()
                         }
@@ -300,6 +399,82 @@ struct AddFolderView: View {
     private func generateRandomSyncID() -> String {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         return String((0..<8).map { _ in letters.randomElement()! })
+    }
+    
+    private var folderSyncModeDescription: String {
+        switch folderSyncMode {
+        case .twoWay:
+            return "本地和远程的更改都会同步"
+        case .uploadOnly:
+            return "只将本地更改上传到远程，不下载远程更改"
+        case .downloadOnly:
+            return "只下载远程更改，不上传本地更改"
+        }
+    }
+}
+
+struct SyncModeEditorView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var syncManager: SyncManager
+    let folder: SyncFolder
+    @State private var selectedMode: SyncMode
+    
+    init(folder: SyncFolder) {
+        self.folder = folder
+        _selectedMode = State(initialValue: folder.mode)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("编辑同步模式")
+                .font(.headline)
+            
+            Text("文件夹: \(folder.localPath.lastPathComponent)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            
+            VStack(alignment: .leading, spacing: 10) {
+                Text("同步模式")
+                    .font(.subheadline).bold()
+                
+                Picker("同步模式", selection: $selectedMode) {
+                    Text("双向同步").tag(SyncMode.twoWay)
+                    Text("仅上传").tag(SyncMode.uploadOnly)
+                    Text("仅下载").tag(SyncMode.downloadOnly)
+                }
+                .pickerStyle(.segmented)
+                
+                Text(modeDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            HStack {
+                Button("取消") { dismiss() }
+                Spacer()
+                Button("保存") {
+                    var updatedFolder = folder
+                    updatedFolder.mode = selectedMode
+                    syncManager.updateFolder(updatedFolder)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedMode == folder.mode)
+            }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+    
+    private var modeDescription: String {
+        switch selectedMode {
+        case .twoWay:
+            return "本地和远程的更改都会同步"
+        case .uploadOnly:
+            return "只将本地更改上传到远程，不下载远程更改"
+        case .downloadOnly:
+            return "只下载远程更改，不上传本地更改"
+        }
     }
 }
 
@@ -326,16 +501,23 @@ struct PeerListView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(peers, id: \.self) { peerID in
                             HStack {
-                                Image(systemName: "cpu")
+                                Image(systemName: "laptopcomputer")
                                     .foregroundStyle(.blue)
-                                VStack(alignment: .leading) {
-                                    Text("Peer ID")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text(peerID)
                                         .font(.system(.caption, design: .monospaced))
                                         .lineLimit(1)
                                         .truncationMode(.middle)
+                                    HStack(spacing: 6) {
+                                        Label("直连", systemImage: "network")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Text("•")
+                                            .foregroundStyle(.secondary)
+                                        Text("在线")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
                                 }
                                 Spacer()
                                 Circle()
@@ -351,7 +533,7 @@ struct PeerListView: View {
             }
         }
         .padding()
-        .frame(width: 300, height: 250)
+        .frame(width: 320, height: 260)
     }
 }
 

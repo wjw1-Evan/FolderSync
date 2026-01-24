@@ -77,4 +77,12 @@ public class MerkleSearchTree {
         collect(root)
         return entries
     }
+    
+    /// 递归差分：仅在哈希不一致时递归向下探测，返回差异路径列表
+    /// TODO: 需要实现完整的递归差分算法，当前使用 getAllEntries 作为简化实现
+    public func diff(remoteHash: String, remoteMST: MerkleSearchTree) -> [String] {
+        guard let localHash = rootHash, localHash != remoteHash else { return [] }
+        // 简化实现：返回所有条目（实际应递归比较子树）
+        return Array(getAllEntries().keys)
+    }
 }

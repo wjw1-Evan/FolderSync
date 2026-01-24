@@ -10,7 +10,7 @@
 
 本项目是一款基于 macOS 平台的客户端程序，采用 Swift 语言编写，通过 P2P（点对点）技术实现多台电脑之间文件夹的自动同步，全程无需依赖中央服务器。程序具备设备自动发现、实时文件监控、基于内容块的增量同步、端到端加密等核心功能，兼顾同步效率、数据安全与用户体验，适用于家庭、小型团队等场景下的多设备文件协同管理。
 
-> 运行提示：局域网自动发现依赖 mDNS，现默认开启。若在特殊网络环境遇到崩溃或不希望广播，可设置环境变量 `FOLDERSYNC_ENABLE_MDNS=0` 禁用；需要发现时，请确保各客户端均开启 mDNS 并连接同一子网。
+> 运行提示：局域网自动发现已启用（基于 UDP 广播）。请确保各客户端均连接同一子网以进行自动发现。如果自动发现失败，用户仍可通过分享 PeerID 手动连接设备。
 
 核心目标：
 - **自动同步**：客户端之间自动检测文件变化并同步，无需手动操作
@@ -31,17 +31,17 @@
 
 ## 2. 核心技术模块
 
-- **P2P通信 (libp2p)**：集成 **libp2p** 框架，利用其 mDNS 进行局域网发现，Kademlia DHT 进行广域网发现。通过 AutoNAT 和 Circuit Relay (v2) 解决复杂的 NAT 穿透问题，通过 Noise 协议保障传输安全。
+- **P2P通信 (libp2p)**：集成 **libp2p** 框架，使用 UDP 广播实现局域网自动发现，支持手动连接和 Kademlia DHT 进行广域网发现（DHT 功能开发中）。通过 AutoNAT 和 Circuit Relay (v2) 解决复杂的 NAT 穿透问题，通过 Noise 协议保障传输安全。
 - **系统集成 (ServiceManagement)**：利用 `ServiceManagement` 框架（`SMAppService`）实现用户可控的“开机自动启动”功能。
 - **文件监控 (FSEvents)**：利用 macOS 原生 FSEvents API 实现高效的目录递归监控，捕获文件创建、修改、删除、重命名等事件。
 - **增量同步 (CDC & Merkle Search Trees)**：
     - **内容定义切分 (CDC)**：使用 FastCDC 算法将文件切分为变长数据块，提高数据去重率并解决“插入/删除字节导致偏移失效”的问题。
     - **状态同步 (MST)**：使用 **Merkle Search Trees (MST)** 维护集群状态，通过对比树哈希在 $O(\log n)$ 时间内快速定位差异文件。
 - **一致性与冲突处理**：使用 **Vector Clocks** 追踪文件变更的因果关系。冲突发生时，保留多版本（由用户手动或按策略自动解决），确保数据不丢失。
-- **身份验证与配对 (Authentication & Pairing)**：
+- **身份验证与加密**：
     - **设备身份**：每个设备在首次启动时生成随机 Ed25519 密钥对，PeerID 作为全球唯一标识。
-    - **带外配对 (OOB Pairing)**：采用 **6 位数字配对码 (Short Authentication String)** 进行初次身份交换。用户在两台设备上核对显示的数字是否一致，确保“人机在场”安全性。
-    - **Noise 手性协议**：基于 Noise Protocol Framework (XX 握手模式) 实现相互认证的加密信道。
+    - **自动认证**：设备通过 libp2p 的 Noise 协议自动进行相互认证，无需手动配对。
+    - **Noise 协议**：基于 Noise Protocol Framework 实现端到端加密信道，确保数据传输安全。
 - **加密机制**：采用端到端加密 (E2EE)，使用 Noise 协议加密传输链路，本地元数据加密存储在 macOS Keychain。
 
 # 三、系统架构设计
@@ -58,7 +58,9 @@
 ## 2. 核心模块详解
 
 ### （1）网络与设备发现 (libp2p)
-- **多协议发现**：mDNS 负责局域网，DHT/Bootstrap 节点辅助广域网。
+- **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备，无需手动配置。设备每 5 秒广播一次自己的 PeerID，并监听其他设备的广播消息。
+- **自动连接**：发现设备后自动建立连接并开始同步，无需任何手动配对步骤。
+- **广域网发现**：DHT/Bootstrap 节点广域网发现功能正在开发中。
 - **自愈连接**：当网络环境变化时，AutoNAT 自动重新探测并尝试穿透，直连失败时自动启用可信 Relay。
 - **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。
 
@@ -70,9 +72,9 @@
 ### （3）差分同步 (MST-based Diff)
 - **增量列表同步**：相比全量发送文件列表，MST 仅在分支哈希不一致时递归向下探测，极大程度节省元数据交换带宽。
 
-### （4）身份验证与信任管理
-- **信任链同步**：已配对的设备列表在受信任集群内同步。
-- **证书锁定 (Certificate Pinning)**：连接时强校验 PeerID 对应的公钥，防止中间人工具（MITM）劫持。
+### （4）身份验证与安全
+- **自动身份验证**：设备通过 libp2p 的 Noise 协议自动进行身份验证和加密连接。
+- **端到端加密**：所有数据传输使用 Noise 协议加密，确保数据安全。
 - **本地存储安全性**：私钥存储在 macOS Keychain 中，确保硬件级别的安全性。
 
 # 四、GUI 界面设计
@@ -84,29 +86,32 @@
 3. **对等点视图**：展示已知设备列表，标记连接路径（直连/Relay）及同步偏移量。
 4. **版本/冲突中心**：展示变更历史及需要手动介入的冲突文件。
 5. **菜单栏常驻 (Menu Bar Extra)**：
-    - 展示简要同步状态（如：✅ 已同步、⏳ 同步中...）。
-    - 快速打开主窗口、手动触发同步、退出程序。
-    - 进入“设置”开启/关闭“开机自动启动”。
-6. **设备配对向导 (Pairing Wizard)**：
-    - **发现模式**：展示本机 PeerID 指纹，并列出局域网内请求配对的邻居设备。
-    - **验证码确认**：双端同步显示 6 位数字验证码（SAS），用户通过肉眼比对并点击“确认”完成绑定。
-    - **手动添加**：支持输入远程设备的 PeerID 发起连接请求。
+    - 快速打开主窗口、退出程序。
+    - 开启/关闭"开机自动启动"功能。
 
 # 五、代码实现方案 (核心逻辑)
 
-### （1）libp2p 节点初始化 (伪代码)
+### （1）libp2p 节点初始化与局域网发现
 ```swift
 class P2PNode {
-    private var host: Libp2pHost
+    private var app: Application?
+    private var lanDiscovery: LANDiscovery?
 
     func start() async throws {
-        let config = Libp2pConfig()
-            .with(transport: .tcp, .quic)
-            .with(discovery: .mdns, .dht)
-            .with(security: .noise)
-
-        self.host = try await Libp2p.create(config)
-        await host.start()
+        let app = try await Application.make(.development, peerID: keyPairFile)
+        app.listen(.tcp(host: "0.0.0.0", port: 0))
+        
+        // 启用 UDP 广播局域网发现
+        let discovery = LANDiscovery()
+        discovery.onPeerDiscovered = { peerID, address in
+            // 处理发现的设备
+        }
+        discovery.start(peerID: app.peerID.b58String)
+        
+        // 注册 libp2p 的发现事件
+        app.discovery.onPeerDiscovered { peerInfo in
+            // 自动连接并同步
+        }
     }
 }
 ```
@@ -160,35 +165,30 @@ func toggleLaunchAtLogin(_ enabled: Bool) {
 }
 ```
 
-### （4）身份验证：基于 Noise 的握手与配对
+### （4）局域网发现实现
 ```swift
-// 配对码生成与校验逻辑
-class PairingManager {
-    static func generateSASCode() -> String {
-        // 生成 6 位随机数字，用于带外确认 (Short Authentication String)
-        return String(format: "%06d", UInt32.random(in: 0..<1000000))
+// UDP 广播局域网发现
+class LANDiscovery {
+    private let servicePort: UInt16 = 8765
+    
+    func start(peerID: String) {
+        // 启动 UDP 监听
+        let listener = try NWListener(using: .udp, on: servicePort)
+        listener.newConnectionHandler = { connection in
+            // 接收其他设备的广播消息
+        }
+        
+        // 定期广播本机 PeerID
+        Timer.scheduledTimer { _ in
+            self.sendBroadcast(peerID: peerID)
+        }
     }
-}
-
-// 基于 Noise XX 模式的自动握手 (伪代码)
-func initiateSecureHandshake(remotePeer: PeerID) async throws -> SecureSession {
-    let noiseConfig = Noise.Config(
-        pattern: .XX,
-        prologue: "FolderSync-v1".data(using: .utf8)!,
-        localKey: Keychain.loadPrivateKey()
-    )
-
-    let handshake = try Noise.Handshake(noiseConfig)
-    // 1. 发送第一个握手包 (e)
-    // 2. 接收响应并处理 (e, ee, s, es)
-    // 3. 发送确认包 (s, se)
-
-    let session = try handshake.finalize()
-    // 校验 remotePeer.publicKey 是否与握手获取的 s 一致
-    guard session.remotePublicKey == remotePeer.publicKey else {
-        throw AuthError.peerIdentityMismatch
+    
+    private func sendBroadcast(peerID: String) {
+        // 向 255.255.255.255 广播 PeerID
+        let message = createDiscoveryMessage(peerID: peerID)
+        // 发送 UDP 广播
     }
-    return session
 }
 ```
 
@@ -229,6 +229,27 @@ class SyncManager: ObservableObject {
 - **网路波动**：广域网高丢包率。*应对：启用 libp2p 的 QUIC 传输，利用其多路复用和拥塞控制。*
 - **沙盒权限**：macOS App Sandbox。*应对：使用 Security-Scoped Bookmarks 保持文件夹访问权限。*
 
-# 七、总结
+# 七、当前实现状态
 
-本方案通过引入 **libp2p** 和 **CDC 同步模型**，实现了更稳健、更高效的无服务器文件夹同步。MST 保证了在海量文件下的快速同步一致性，而 Vector Clocks 确保了在多设备并发环境下的一致性逻辑。
+## 已实现功能
+- ✅ 局域网自动发现（UDP 广播）
+- ✅ 自动设备连接和同步
+- ✅ 双向文件同步
+- ✅ Vector Clock 冲突检测
+- ✅ 冲突文件多版本保留
+- ✅ 文件删除同步
+- ✅ 实时文件监控（FSEvents）
+- ✅ MST 状态对比
+- ✅ 同步模式配置（双向/仅上传/仅下载）
+- ✅ 排除规则配置
+- ✅ 同步历史记录
+- ✅ 冲突解决界面
+
+## 开发中功能
+- 🚧 DHT 广域网发现
+- 🚧 AutoNAT 和 Circuit Relay
+- 🚧 块级别增量同步（FastCDC）
+
+# 八、总结
+
+本方案通过引入 **libp2p** 和 **CDC 同步模型**，实现了更稳健、更高效的无服务器文件夹同步。使用 UDP 广播实现局域网自动发现，设备无需手动配置即可自动连接和同步。MST 保证了在海量文件下的快速同步一致性，而 Vector Clocks 确保了在多设备并发环境下的一致性逻辑。

@@ -24,12 +24,15 @@ public struct SyncFolder: Identifiable, Codable {
     public var lastSyncedAt: Date?
     public var peerCount: Int = 0
     public var fileCount: Int? = 0
+    public var folderCount: Int? = 0
+    public var excludePatterns: [String]
     
-    public init(id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay, status: SyncStatus = .synced) {
+    public init(id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay, status: SyncStatus = .synced, excludePatterns: [String] = []) {
         self.id = id
         self.syncID = syncID
         self.localPath = localPath
         self.mode = mode
         self.status = status
+        self.excludePatterns = excludePatterns
     }
 }

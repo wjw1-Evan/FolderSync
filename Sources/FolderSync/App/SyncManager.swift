@@ -159,15 +159,17 @@ public class SyncManager: ObservableObject {
                 peerOnlineStatus[peerIDString] = isOnline
                 
                 if isOnline != wasOnline {
-                    print("[SyncManager] 📡 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "离线" : "在线") -> \(isOnline ? "在线" : "离线")")
+                    // 修复 Bug 1: 正确显示旧状态（wasOnline 为 true 时显示"在线"，false 时显示"离线"）
+                    print("[SyncManager] 📡 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
                     
                     // 如果设备离线，从所有文件夹的对等点列表中移除
                     if !isOnline {
                         // 从 peers 列表中移除
                         self.peers.removeAll(where: { $0.b58String == peerIDString })
                         
-                        // 从所有文件夹的对等点列表中移除
-                        for syncID in self.folderPeers.keys {
+                        // 修复 Bug 2: 在迭代前将 keys 捕获到数组中，避免在迭代时修改字典
+                        let syncIDs = Array(self.folderPeers.keys)
+                        for syncID in syncIDs {
                             self.removeFolderPeer(syncID, peerID: peerIDString)
                         }
                         

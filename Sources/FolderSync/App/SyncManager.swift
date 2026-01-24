@@ -91,12 +91,42 @@ public class SyncManager: ObservableObject {
     }
     
     func addFolder(_ folder: SyncFolder) {
+        // 验证文件夹权限
+        let fileManager = FileManager.default
+        let folderPath = folder.localPath
+        
+        // 检查文件夹是否存在
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: folderPath.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            print("[SyncManager] ❌ 文件夹不存在或不是目录: \(folderPath.path)")
+            updateFolderStatus(folder.id, status: .error, message: "文件夹不存在或不是目录")
+            return
+        }
+        
+        // 检查读取权限
+        guard fileManager.isReadableFile(atPath: folderPath.path) else {
+            print("[SyncManager] ❌ 没有读取权限: \(folderPath.path)")
+            updateFolderStatus(folder.id, status: .error, message: "没有读取权限，请检查文件夹权限设置")
+            return
+        }
+        
+        // 检查写入权限（双向同步和上传模式需要）
+        if folder.mode == .twoWay || folder.mode == .uploadOnly {
+            guard fileManager.isWritableFile(atPath: folderPath.path) else {
+                print("[SyncManager] ❌ 没有写入权限: \(folderPath.path)")
+                updateFolderStatus(folder.id, status: .error, message: "没有写入权限，请检查文件夹权限设置")
+                return
+            }
+        }
+        
         folders.append(folder)
         do {
             try StorageManager.shared.saveFolder(folder)
         } catch {
             print("[SyncManager] ❌ 无法保存文件夹配置: \(error)")
             print("[SyncManager] 错误详情: \(error.localizedDescription)")
+            updateFolderStatus(folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)")
+            return
         }
         startMonitoring(folder)
         
@@ -250,8 +280,31 @@ public class SyncManager: ObservableObject {
                     let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
                     if let folder = folder {
                         let fileURL = folder.localPath.appendingPathComponent(relativePath)
-                        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                        try data.write(to: fileURL)
+                        let parentDir = fileURL.deletingLastPathComponent()
+                        let fileManager = FileManager.default
+                        
+                        // 检查并创建父目录
+                        if !fileManager.fileExists(atPath: parentDir.path) {
+                            do {
+                                try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                            } catch {
+                                print("[SyncManager] ❌ 无法创建目录: \(parentDir.path) - \(error.localizedDescription)")
+                                return .error("无法创建目录: \(error.localizedDescription)")
+                            }
+                        }
+                        
+                        // 检查写入权限
+                        guard fileManager.isWritableFile(atPath: parentDir.path) else {
+                            print("[SyncManager] ❌ 没有写入权限: \(parentDir.path)")
+                            return .error("没有写入权限: \(parentDir.path)")
+                        }
+                        
+                        do {
+                            try data.write(to: fileURL)
+                        } catch {
+                            print("[SyncManager] ❌ 无法写入文件: \(fileURL.path) - \(error.localizedDescription)")
+                            return .error("无法写入文件: \(error.localizedDescription)")
+                        }
                         if let vc = vectorClock {
                             try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, vc)
                         }
@@ -300,13 +353,27 @@ public class SyncManager: ObservableObject {
                 }
                 
                 // 1. Get remote MST root
+                // 使用较长的超时时间，因为首次连接可能需要时间
+                // 增加重试次数，因为首次连接建立可能需要多次尝试
                 let rootRes: SyncResponse
                 do {
-                    rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer)
+                    rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 3)
                 } catch {
                     print("[SyncManager] ❌ 获取远程 MST 根失败: \(error)")
                     print("[SyncManager] 错误详情: \(error.localizedDescription)")
-                    throw error
+                    // 如果是超时错误，提供更友好的错误信息
+                    if let nsError = error as NSError?, nsError.code == 2 {
+                        print("[SyncManager] 💡 提示: 对等点可能未响应，请检查:")
+                        print("[SyncManager]   1. 网络连接是否正常")
+                        print("[SyncManager]   2. 对等点是否在线")
+                        print("[SyncManager]   3. 防火墙是否阻止了连接")
+                        print("[SyncManager]   4. 两台设备是否在同一网络")
+                    }
+                    // 不立即抛出错误，而是标记为失败并继续
+                    await MainActor.run {
+                        self.updateFolderStatus(folder.id, status: .error, message: "无法连接到对等点: \(peerID.prefix(8))")
+                    }
+                    return
                 }
                 
                 if case .error = rootRes {
@@ -343,7 +410,7 @@ public class SyncManager: ObservableObject {
                 }
                 
                 // 2. Roots differ, get remote file list
-                let filesRes: SyncResponse = try await app.requestSync(.getFiles(syncID: folder.syncID), to: peer)
+                let filesRes: SyncResponse = try await app.requestSync(.getFiles(syncID: folder.syncID), to: peer, timeout: 90.0, maxRetries: 2)
                 guard case .files(_, let remoteEntries) = filesRes else { return }
                 let myPeerID = p2pNode.peerID ?? ""
                 var totalOps = 0
@@ -419,7 +486,7 @@ public class SyncManager: ObservableObject {
                 
                 let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
                 if !toDelete.isEmpty {
-                    let delRes: SyncResponse = try await app.requestSync(.deleteFiles(syncID: folder.syncID, paths: Array(toDelete)), to: peer)
+                    let delRes: SyncResponse = try await app.requestSync(.deleteFiles(syncID: folder.syncID, paths: Array(toDelete)), to: peer, timeout: 90.0, maxRetries: 2)
                     if case .error = delRes { /* log but continue */ }
                 }
                 
@@ -434,17 +501,42 @@ public class SyncManager: ObservableObject {
                 // 5. Download changed files (overwrite)
                 var totalDownloadBytes: Int64 = 0
                 var totalUploadBytes: Int64 = 0
+                let fileManager = FileManager.default
                 
                 for (path, remoteMeta) in changedFiles {
                     let fileName = URL(fileURLWithPath: path).lastPathComponent
                     await MainActor.run {
                         self.updateFolderStatus(folder.id, status: .syncing, message: "Downloading \(fileName)", progress: totalOps > 0 ? Double(completedOps) / Double(totalOps) : 1.0)
                     }
-                    let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer)
+                    // 文件下载可能需要更长时间，使用 120 秒超时
+                    let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer, timeout: 180.0, maxRetries: 2)
                     if case .fileData(_, _, let data) = dataRes {
                         let localURL = folder.localPath.appendingPathComponent(path)
-                        try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                        try data.write(to: localURL)
+                        let parentDir = localURL.deletingLastPathComponent()
+                        
+                        // 检查并创建父目录
+                        if !fileManager.fileExists(atPath: parentDir.path) {
+                            do {
+                                try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                            } catch {
+                                print("[SyncManager] ❌ 无法创建目录: \(parentDir.path) - \(error.localizedDescription)")
+                                throw error
+                            }
+                        }
+                        
+                        // 检查写入权限
+                        guard fileManager.isWritableFile(atPath: parentDir.path) else {
+                            let error = NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parentDir.path)"])
+                            print("[SyncManager] ❌ 没有写入权限: \(parentDir.path)")
+                            throw error
+                        }
+                        
+                        do {
+                            try data.write(to: localURL)
+                        } catch {
+                            print("[SyncManager] ❌ 无法写入文件: \(localURL.path) - \(error.localizedDescription)")
+                            throw error
+                        }
                         let vc = remoteMeta.vectorClock ?? VectorClock()
                         try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
                         totalDownloadBytes += Int64(data.count)
@@ -459,7 +551,8 @@ public class SyncManager: ObservableObject {
                     await MainActor.run {
                         self.updateFolderStatus(folder.id, status: .syncing, message: "Conflict: \(fileName)", progress: totalOps > 0 ? Double(completedOps) / Double(totalOps) : 1.0)
                     }
-                    let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer)
+                    // 文件下载可能需要更长时间，使用 120 秒超时
+                    let dataRes: SyncResponse = try await app.requestSync(.getFileData(syncID: folder.syncID, path: path), to: peer, timeout: 180.0, maxRetries: 2)
                     if case .fileData(_, _, let data) = dataRes {
                         let pathDir = (path as NSString).deletingLastPathComponent
                         let parent = pathDir.isEmpty ? folder.localPath : folder.localPath.appendingPathComponent(pathDir)
@@ -468,8 +561,31 @@ public class SyncManager: ObservableObject {
                         let suffix = ext.isEmpty ? "" : ".\(ext)"
                         let conflictName = "\(base).conflict.\(String(peerID.prefix(8))).\(Int(remoteMeta.mtime.timeIntervalSince1970))\(suffix)"
                         let conflictURL = parent.appendingPathComponent(conflictName)
-                        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-                        try data.write(to: conflictURL)
+                        let fileManager = FileManager.default
+                        
+                        // 检查并创建父目录
+                        if !fileManager.fileExists(atPath: parent.path) {
+                            do {
+                                try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                            } catch {
+                                print("[SyncManager] ❌ 无法创建冲突文件目录: \(parent.path) - \(error.localizedDescription)")
+                                throw error
+                            }
+                        }
+                        
+                        // 检查写入权限
+                        guard fileManager.isWritableFile(atPath: parent.path) else {
+                            let error = NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parent.path)"])
+                            print("[SyncManager] ❌ 没有写入权限（冲突文件）: \(parent.path)")
+                            throw error
+                        }
+                        
+                        do {
+                            try data.write(to: conflictURL)
+                        } catch {
+                            print("[SyncManager] ❌ 无法写入冲突文件: \(conflictURL.path) - \(error.localizedDescription)")
+                            throw error
+                        }
                         let relConflict = pathDir.isEmpty ? conflictName : "\(pathDir)/\(conflictName)"
                         let cf = ConflictFile(syncID: folder.syncID, relativePath: path, conflictPath: relConflict, remotePeerID: peerID)
                         try? StorageManager.shared.addConflict(cf)
@@ -489,8 +605,24 @@ public class SyncManager: ObservableObject {
                     vc.increment(for: myPeerID)
                     try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
                     let fileURL = folder.localPath.appendingPathComponent(path)
+                    
+                    // 检查文件是否存在和可读
+                    let fileManager = FileManager.default
+                    guard fileManager.fileExists(atPath: fileURL.path) else {
+                        print("[SyncManager] ⚠️ 文件不存在（跳过上传）: \(fileURL.path)")
+                        completedOps += 1
+                        continue
+                    }
+                    
+                    guard fileManager.isReadableFile(atPath: fileURL.path) else {
+                        print("[SyncManager] ⚠️ 文件无读取权限（跳过上传）: \(fileURL.path)")
+                        completedOps += 1
+                        continue
+                    }
+                    
                     let data = try Data(contentsOf: fileURL)
-                    let putRes: SyncResponse = try await app.requestSync(.putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc), to: peer)
+                    // 文件上传可能需要更长时间，使用 120 秒超时
+                    let putRes: SyncResponse = try await app.requestSync(.putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc), to: peer, timeout: 180.0, maxRetries: 2)
                     if case .error = putRes {
                         throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Upload failed for \(path)"])
                     }
@@ -617,6 +749,12 @@ public class SyncManager: ObservableObject {
         
         while let fileURL = enumerator?.nextObject() as? URL {
             do {
+                // 检查文件是否可访问
+                guard fileManager.isReadableFile(atPath: fileURL.path) else {
+                    print("[SyncManager] ⚠️ 跳过无读取权限的文件: \(fileURL.path)")
+                    continue
+                }
+                
                 let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
                 var relativePath = fileURL.path.replacingOccurrences(of: url.path, with: "")
                 if relativePath.hasPrefix("/") { relativePath.removeFirst() }
@@ -629,22 +767,30 @@ public class SyncManager: ObservableObject {
                         folderCount += 1
                     }
                 } else {
-                    // 处理文件
-                    let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-                    let hash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
-                    let mtime = resourceValues.contentModificationDate ?? Date()
-                    let vc = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
-                    
-                    mst.insert(key: relativePath, value: hash)
-                    metadata[relativePath] = FileMetadata(hash: hash, mtime: mtime, vectorClock: vc)
-                    processedInBatch += 1
-                    if processedInBatch >= Self.indexingBatchSize {
-                        processedInBatch = 0
-                        await Task.yield()
+                    // 处理文件 - 检查文件是否可读
+                    do {
+                        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+                        let hash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+                        let mtime = resourceValues.contentModificationDate ?? Date()
+                        let vc = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
+                        
+                        mst.insert(key: relativePath, value: hash)
+                        metadata[relativePath] = FileMetadata(hash: hash, mtime: mtime, vectorClock: vc)
+                        processedInBatch += 1
+                        if processedInBatch >= Self.indexingBatchSize {
+                            processedInBatch = 0
+                            await Task.yield()
+                        }
+                    } catch {
+                        // 文件读取失败（可能是权限问题或文件被锁定）
+                        print("[SyncManager] ⚠️ 无法读取文件（跳过）: \(fileURL.path) - \(error.localizedDescription)")
+                        continue
                     }
                 }
             } catch {
-                print("Error processing file \(fileURL): \(error)")
+                // 资源值获取失败（可能是权限问题）
+                print("[SyncManager] ⚠️ 无法获取文件属性（跳过）: \(fileURL.path) - \(error.localizedDescription)")
+                continue
             }
         }
         return (mst, metadata, folderCount)

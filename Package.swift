@@ -11,9 +11,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/swift-libp2p/swift-libp2p.git", from: "0.1.0"),
-        .package(url: "https://github.com/swift-libp2p/swift-libp2p-mdns.git", from: "0.1.0"),
         .package(url: "https://github.com/swift-libp2p/swift-libp2p-kad-dht.git", from: "0.1.0"),
-        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.14.1"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0")
     ],
     targets: [
@@ -21,9 +19,7 @@ let package = Package(
             name: "FolderSync",
             dependencies: [
                 .product(name: "LibP2P", package: "swift-libp2p"),
-                .product(name: "LibP2PMDNS", package: "swift-libp2p-mdns"),
                 .product(name: "LibP2PKadDHT", package: "swift-libp2p-kad-dht"),
-                .product(name: "SQLite", package: "SQLite.swift"),
                 .product(name: "Crypto", package: "swift-crypto")
             ],
             path: "Sources/FolderSync"

@@ -28,15 +28,6 @@
       }
     },
     {
-      "identity" : "dns",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Bouke/DNS.git",
-      "state" : {
-        "revision" : "78bbd1589890a90b202d11d5f9e1297050cf0eb2",
-        "version" : "1.2.0"
-      }
-    },
-    {
       "identity" : "routing-kit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vapor/routing-kit.git",
@@ -52,15 +43,6 @@
       "state" : {
         "revision" : "cd187c632fb812fd93711a9f7e644adb7e5f97f0",
         "version" : "0.1.7"
-      }
-    },
-    {
-      "identity" : "sqlite.swift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/stephencelis/SQLite.swift.git",
-      "state" : {
-        "revision" : "0c08856385fe24f7b76d8c51842d78a196e8e817",
-        "version" : "0.15.5"
       }
     },
     {
@@ -196,15 +178,6 @@
       "state" : {
         "revision" : "e6b8a296a9ca98caf9a45375dd880e6cdb3f5550",
         "version" : "0.2.0"
-      }
-    },
-    {
-      "identity" : "swift-libp2p-mdns",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swift-libp2p/swift-libp2p-mdns.git",
-      "state" : {
-        "revision" : "03acf73e8988742a1f03990a630630940f85fc61",
-        "version" : "0.1.0"
       }
     },
     {

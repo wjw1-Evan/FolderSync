@@ -138,16 +138,31 @@ public class P2PNode {
             
             // Manually trigger the discovery callback to register the peer
             // This simulates libp2p discovering the peer via its own mechanisms
-            print("[P2PNode] 🔧 Manually registering peer \(peerID.prefix(8)) in libp2p peer store...")
+            print("[P2PNode] 🔧 手动注册对等点到 libp2p peer store:")
+            print("[P2PNode]   - PeerID: \(peerIDObj.b58String)")
+            print("[P2PNode]   - Addresses: \(parsedAddresses.count) 个")
+            for (idx, addr) in parsedAddresses.enumerated() {
+                print("[P2PNode]     [\(idx + 1)] \(addr)")
+            }
             
             // Call the discovery callback that was registered in start()
             // This should add the peer to libp2p's peer store with the addresses
+            // 注意：这个回调必须在 app.startup() 之后调用才能正确工作
             if let callback = discoveryCallback {
+                print("[P2PNode] ✅ 调用发现回调注册对等点...")
                 callback(peerInfo)
-                print("[P2PNode] ✅ Peer \(peerID.prefix(8)) registered with \(parsedAddresses.count) address(es) in libp2p peer store")
+                print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
+                
+                // 等待一小段时间，确保 peer store 已更新
+                // 这给 libp2p 时间处理发现回调
+                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3秒
+                print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
             } else {
-                print("[P2PNode] ⚠️ Discovery callback not available, peer may not be registered")
-                print("[P2PNode] 💡 libp2p will attempt to connect when SyncManager makes a request")
+                print("[P2PNode] ❌ Discovery callback 不可用！")
+                print("[P2PNode] ⚠️ 严重警告: 对等点无法注册到 libp2p peer store")
+                print("[P2PNode] 💡 这可能是因为 app.startup() 尚未完成")
+                print("[P2PNode] 💡 或者 discovery callback 尚未注册")
+                print("[P2PNode] 💡 这会导致后续的 peerNotFound 错误")
             }
         } else {
             print("[P2PNode] ⚠️ No valid addresses found for \(peerID.prefix(8)): \(addresses)")
@@ -257,7 +272,13 @@ public class P2PNode {
         // When libp2p discovers a peer (via DHT or other mechanisms), it will call this callback
         // The PeerInfo includes addresses, which libp2p automatically adds to the peer store
         let discoveryHandler: (PeerInfo) -> Void = { [weak self] (peerInfo: PeerInfo) in
-            print("[P2PNode] libp2p discovered peer: \(peerInfo.peer.b58String) with \(peerInfo.addresses.count) address(es)")
+            print("[P2PNode] 📡 libp2p 发现对等点:")
+            print("[P2PNode]   - PeerID: \(peerInfo.peer.b58String)")
+            print("[P2PNode]   - Addresses: \(peerInfo.addresses.count) 个")
+            for (idx, addr) in peerInfo.addresses.enumerated() {
+                print("[P2PNode]     [\(idx + 1)] \(addr)")
+            }
+            print("[P2PNode] ✅ libp2p 已将对等点添加到 peer store（包含地址）")
             // libp2p has already added this peer to the peer store with addresses
             self?.onPeerDiscovered?(peerInfo.peer)
         }
@@ -265,15 +286,18 @@ public class P2PNode {
         app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
         
         // Save the callback so we can manually trigger it for LAN-discovered peers
+        // 注意：这个回调必须在 app.startup() 之后才能正确工作
         self.discoveryCallback = discoveryHandler
+        print("[P2PNode] ✅ 发现回调已注册，可用于手动注册 LAN 发现的对等点")
 
-        // Start the application in a background Task so it doesn't block the caller
-        Task {
-            do {
-                try await app.startup()
-            } catch {
-                print("[P2PNode] Critical failure during startup: \(error)")
-            }
+        // Start the application and wait for it to complete
+        // 必须等待 startup 完成，否则 discovery callback 可能无法正确工作
+        do {
+            try await app.startup()
+            print("[P2PNode] ✅ libp2p 应用启动完成，peer store 已就绪")
+        } catch {
+            print("[P2PNode] ❌ Critical failure during startup: \(error)")
+            throw error
         }
 
         // Give the node a moment to initialize the server and update listenAddresses

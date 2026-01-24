@@ -49,14 +49,15 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager] ✅ 新对等点已添加: \(peerIDString.prefix(12))...")
                         self.peers.append(peer)
                         
-                        // 当发现新对等点时，只同步已存在的文件夹
-                        // 新创建的同步组不应该立即同步，应该等待对等点主动发现
+                        // 当发现新对等点时，延迟同步以确保对等点已正确注册到 libp2p peer store
+                        // 这很重要，因为对等点需要时间被添加到 peer store
                         for folder in self.folders {
-                            // 检查对等点是否有这个 syncID（通过尝试获取 MST 根）
-                            // 如果对等点没有这个 syncID，同步会失败，但这是正常的
                             Task {
-                                // 延迟一小段时间，确保对等点已完全连接
-                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+                                // 延迟更长时间，确保对等点已完全注册到 libp2p peer store
+                                // 这样可以避免 peerNotFound 错误
+                                print("[SyncManager] ⏳ 等待对等点注册到 libp2p peer store...")
+                                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+                                print("[SyncManager] 🔄 开始同步: folder=\(folder.syncID), peer=\(peerIDString.prefix(12))...")
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }
                         }

@@ -44,7 +44,24 @@ public class SyncManager: ObservableObject {
                 }
             }
             
-            try? await p2pNode.start()
+            // 启动 P2P 节点，如果失败则记录详细错误
+            do {
+                try await p2pNode.start()
+                print("[SyncManager] ✅ P2P 节点启动成功")
+            } catch {
+                print("[SyncManager] ❌ P2P 节点启动失败: \(error)")
+                print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                if let nsError = error as NSError? {
+                    print("[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
+                    print("[SyncManager] 用户信息: \(nsError.userInfo)")
+                }
+                // 继续执行，但 P2P 功能将不可用
+                await MainActor.run {
+                    for folder in self.folders {
+                        self.updateFolderStatus(folder.id, status: .error, message: "P2P 节点启动失败: \(error.localizedDescription)")
+                    }
+                }
+            }
             
             // Register P2P handlers
             setupP2PHandlers()
@@ -75,12 +92,32 @@ public class SyncManager: ObservableObject {
     
     func addFolder(_ folder: SyncFolder) {
         folders.append(folder)
-        try? StorageManager.shared.saveFolder(folder)
+        do {
+            try StorageManager.shared.saveFolder(folder)
+        } catch {
+            print("[SyncManager] ❌ 无法保存文件夹配置: \(error)")
+            print("[SyncManager] 错误详情: \(error.localizedDescription)")
+        }
         startMonitoring(folder)
         
         // Announce this folder on the network
+        // 注意：如果 libp2p 没有配置 DHT 等发现服务，announce 会失败
+        // 但这不影响 LANDiscovery 的自动发现功能，所以降级为警告
         Task {
-            try? await p2pNode.announce(service: "folder-sync-\(folder.syncID)")
+            do {
+                try await p2pNode.announce(service: "folder-sync-\(folder.syncID)")
+                print("[SyncManager] ✅ 已发布服务: folder-sync-\(folder.syncID)")
+            } catch {
+                // 检查是否是发现服务不可用的错误
+                let errorString = String(describing: error)
+                if errorString.contains("noDiscoveryServicesAvailable") || errorString.contains("DiscoveryServices") {
+                    // 这是预期的，因为我们使用 LANDiscovery 而不是 DHT
+                    print("[SyncManager] ℹ️ 服务发布跳过（使用 LANDiscovery 自动发现）: folder-sync-\(folder.syncID)")
+                } else {
+                    print("[SyncManager] ⚠️ 无法发布服务: \(error)")
+                    print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                }
+            }
             
             // Try to sync with existing peers
             for peer in peers {
@@ -248,19 +285,29 @@ public class SyncManager: ObservableObject {
     // 这需要较大的协议改动
     
     private func syncWithPeer(peer: PeerID, folder: SyncFolder) {
-        guard let app = p2pNode.app else { return }
+        guard let app = p2pNode.app else {
+            print("[SyncManager] ⚠️ 警告: P2P 节点未初始化，无法同步")
+            return
+        }
         let peerID = peer.b58String
         
         Task {
             let startedAt = Date()
             do {
-                print("SyncManager: Initiating sync for \(folder.syncID) with peer \(peerID)")
+                print("[SyncManager] 开始同步: folder=\(folder.syncID), peer=\(peerID.prefix(8))")
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "Connecting to \(peerID.prefix(8))...")
                 }
                 
                 // 1. Get remote MST root
-                let rootRes: SyncResponse = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer)
+                let rootRes: SyncResponse
+                do {
+                    rootRes = try await app.requestSync(.getMST(syncID: folder.syncID), to: peer)
+                } catch {
+                    print("[SyncManager] ❌ 获取远程 MST 根失败: \(error)")
+                    print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                    throw error
+                }
                 
                 if case .error = rootRes {
                     removeFolderPeer(folder.syncID, peerID: peerID)
@@ -461,12 +508,27 @@ public class SyncManager: ObservableObject {
                 let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date())
                 try? StorageManager.shared.addSyncLog(log)
             } catch {
+                print("[SyncManager] ❌ 同步失败: folder=\(folder.syncID), peer=\(peerID.prefix(8))")
+                print("[SyncManager] 错误: \(error)")
+                print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                if let nsError = error as NSError? {
+                    print("[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
+                    if !nsError.userInfo.isEmpty {
+                        print("[SyncManager] 用户信息: \(nsError.userInfo)")
+                    }
+                }
+                
                 removeFolderPeer(folder.syncID, peerID: peerID)
                 await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: error.localizedDescription)
+                    let errorMessage = error.localizedDescription.isEmpty ? "同步失败: \(error)" : error.localizedDescription
+                    self.updateFolderStatus(folder.id, status: .error, message: errorMessage)
                 }
                 let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: nil, errorMessage: error.localizedDescription)
-                try? StorageManager.shared.addSyncLog(log)
+                do {
+                    try StorageManager.shared.addSyncLog(log)
+                } catch {
+                    print("[SyncManager] ⚠️ 无法保存同步日志: \(error)")
+                }
             }
         }
     }
@@ -598,5 +660,43 @@ public class SyncManager: ObservableObject {
         
         return syncID.count >= 4
     }
+    
+    /// 获取总设备数量（包括自身）
+    public var totalDeviceCount: Int {
+        peers.count + 1 // 包括自身
+    }
+    
+    /// 获取所有设备列表（包括自身）
+    public var allDevices: [DeviceInfo] {
+        var devices: [DeviceInfo] = []
+        
+        // 添加自身
+        if let myPeerID = p2pNode.peerID {
+            devices.append(DeviceInfo(
+                peerID: myPeerID,
+                isLocal: true,
+                status: "在线"
+            ))
+        }
+        
+        // 添加其他设备
+        for peer in peers {
+            devices.append(DeviceInfo(
+                peerID: peer.b58String,
+                isLocal: false,
+                status: "在线"
+            ))
+        }
+        
+        return devices
+    }
+}
+
+/// 设备信息结构
+public struct DeviceInfo: Identifiable {
+    public let id = UUID()
+    public let peerID: String
+    public let isLocal: Bool
+    public let status: String
 }
 

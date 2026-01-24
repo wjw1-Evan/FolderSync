@@ -215,7 +215,33 @@ public class StorageManager {
             f_status <- folder.status.rawValue,
             f_excludePatterns <- patternsJson
         )
-        try db.run(insert)
+        
+        // 添加重试机制处理 I/O 错误
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                try db.run(insert)
+                return // 成功，退出
+            } catch {
+                lastError = error
+                let nsError = error as NSError
+                
+                // 如果是磁盘 I/O 错误，等待后重试
+                if nsError.domain == "SQLite.Result" && (nsError.code == 10 || nsError.code == 11) {
+                    if attempt < 3 {
+                        // 等待一小段时间后重试
+                        Thread.sleep(forTimeInterval: 0.1 * Double(attempt))
+                        continue
+                    }
+                }
+                
+                // 其他错误或重试失败，直接抛出
+                throw error
+            }
+        }
+        
+        // 所有重试都失败
+        throw lastError ?? NSError(domain: "StorageManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "保存文件夹失败：未知错误"])
     }
     
     public func getAllFolders() throws -> [SyncFolder] {

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import LibP2P
+import LibP2PKadDHT
 import NIOCore
 
 public class P2PNode {
@@ -107,7 +108,7 @@ public class P2PNode {
             // 重新生成密码（确保使用新密码）
             let newPassword = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32).description
             _ = KeychainManager.savePassword(newPassword)
-            print("[P2PNode] 已生成新密码并保存到 Keychain")
+            print("[P2PNode] 已生成新密码并保存到文件")
             
             // 使用新密码创建新的密钥文件
             let newKeyPairFile: KeyPairFile = .persistent(
@@ -136,11 +137,13 @@ public class P2PNode {
         // Will update addresses after startup
         setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
 
-        // TODO: DHT广域网发现 - 需要添加 DHT 包并配置:
-        // app.dht.initialize()
-        // app.dht.use(KademliaDHT(...))
-        // app.discovery.use(.dht(...))
-        // 需要添加 swift-libp2p-dht 或类似包到 Package.swift
+        // 配置 Kademlia DHT 用于广域网发现
+        // 使用 DHT 作为发现服务，支持广域网设备发现
+        app.discovery.use(.kadDHT)
+        print("[P2PNode] ✅ Kademlia DHT 已配置为发现服务")
+        
+        // 也可以将 DHT 作为独立的 DHT 使用（用于值存储和检索）
+        // app.dht.use(.kadDHT)
         
         // TODO: AutoNAT 和 Circuit Relay - 需要配置:
         // app.use(.autonat)
@@ -194,6 +197,10 @@ public class P2PNode {
         } else {
             print("[P2PNode] ❌ LAN Discovery 未启用")
         }
+        
+        // 检查 DHT 状态
+        // 注意：DHT 需要一些时间才能连接到引导节点并建立路由表
+        print("[P2PNode] ℹ️ DHT 正在初始化，可能需要一些时间连接到网络...")
         
         print("[P2PNode] ======================================\n")
     }

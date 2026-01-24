@@ -190,6 +190,15 @@
       }
     },
     {
+      "identity" : "swift-libp2p-kad-dht",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-libp2p/swift-libp2p-kad-dht.git",
+      "state" : {
+        "revision" : "e6b8a296a9ca98caf9a45375dd880e6cdb3f5550",
+        "version" : "0.2.0"
+      }
+    },
+    {
       "identity" : "swift-libp2p-mdns",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swift-libp2p/swift-libp2p-mdns.git",

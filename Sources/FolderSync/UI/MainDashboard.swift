@@ -5,6 +5,7 @@ struct MainDashboard: View {
     @State private var showingAddFolder = false
     @State private var showingConflictCenter = false
     @State private var showingSyncHistory = false
+    @State private var showingAllPeers = false
     
     var body: some View {
         NavigationStack {
@@ -18,9 +19,17 @@ struct MainDashboard: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(syncManager.peers.count) 台设备在线")
+                        Button {
+                            showingAllPeers = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "laptopcomputer.and.iphone")
+                                Text("\(syncManager.totalDeviceCount) 台设备在线")
+                            }
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.vertical, 4)
                 } header: { Text("状态") }
@@ -37,6 +46,10 @@ struct MainDashboard: View {
             }
             .listStyle(.inset)
             .navigationTitle("FolderSync 仪表盘")
+            .sheet(isPresented: $showingAllPeers) {
+                AllPeersListView()
+                    .environmentObject(syncManager)
+            }
             .onAppear {
                 // 设置窗口标识符，方便检查窗口是否已存在
                 DispatchQueue.main.async {
@@ -475,6 +488,73 @@ struct SyncModeEditorView: View {
         case .downloadOnly:
             return "只下载远程更改，不上传本地更改"
         }
+    }
+}
+
+/// 所有设备列表视图（包括自身）
+struct AllPeersListView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var syncManager: SyncManager
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(syncManager.allDevices) { device in
+                    HStack(spacing: 12) {
+                        Image(systemName: device.isLocal ? "laptopcomputer" : "laptopcomputer.and.iphone")
+                            .foregroundStyle(device.isLocal ? .blue : .green)
+                            .font(.title3)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(device.isLocal ? "本机" : "远程设备")
+                                    .font(.headline)
+                                if device.isLocal {
+                                    Text("(我)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            
+                            Text(device.peerID)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(.green)
+                                    .frame(width: 6, height: 6)
+                                Text(device.status)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                if !device.isLocal {
+                                    Text("•")
+                                        .foregroundStyle(.secondary)
+                                    Label("直连", systemImage: "network")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .listStyle(.inset)
+            .navigationTitle("所有设备")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .frame(width: 500, height: 400)
     }
 }
 

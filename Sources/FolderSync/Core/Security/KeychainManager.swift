@@ -1,50 +1,65 @@
 import Foundation
-import Security
 
+/// 简单的密码管理器，使用文件存储而不是 Keychain
+/// 避免每次启动都需要用户输入密码
 public enum KeychainManager {
-    private static let service = "com.FolderSync.peerid"
-    private static let account = "PeerIDKeyPassword"
+    private static let passwordFileName = "peerid_password.txt"
     
+    /// 获取密码文件路径
+    private static func passwordFilePath() -> URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
+        // 确保目录存在
+        try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+        return folderSyncDir.appendingPathComponent(passwordFileName)
+    }
+    
+    /// 从文件加载密码
     public static func loadPassword() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let str = String(data: data, encoding: .utf8) else { return nil }
-        return str
+        guard let filePath = passwordFilePath(),
+              FileManager.default.fileExists(atPath: filePath.path),
+              let data = try? Data(contentsOf: filePath),
+              let password = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return password.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
+    /// 保存密码到文件
     public static func savePassword(_ password: String) -> Bool {
-        guard let data = password.data(using: .utf8) else { return false }
-        deletePassword()
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data
-        ]
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        guard let filePath = passwordFilePath(),
+              let data = password.data(using: .utf8) else {
+            return false
+        }
+        
+        do {
+            try data.write(to: filePath, options: [.atomic, .completeFileProtection])
+            // 设置文件权限，仅所有者可读写
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: filePath.path)
+            return true
+        } catch {
+            print("[KeychainManager] 保存密码失败: \(error)")
+            return false
+        }
     }
     
+    /// 删除密码文件
     public static func deletePassword() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
+        guard let filePath = passwordFilePath(),
+              FileManager.default.fileExists(atPath: filePath.path) else {
+            return
+        }
+        try? FileManager.default.removeItem(at: filePath)
     }
     
-    /// Returns existing password or generates, stores, and returns a new one.
+    /// 返回现有密码或生成、存储并返回新密码
     public static func loadOrCreatePassword() -> String {
-        if let existing = loadPassword() { return existing }
+        if let existing = loadPassword(), !existing.isEmpty {
+            return existing
+        }
+        // 生成新密码
         let new = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32).description
         _ = savePassword(new)
         return new

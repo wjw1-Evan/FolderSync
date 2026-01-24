@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import Security
 
 /// 环境检测工具，在程序启动时检测必要的环境配置
 public class EnvironmentChecker {
@@ -131,59 +130,39 @@ public class EnvironmentChecker {
         )
     }
     
-    /// 检测 Keychain 访问权限
+    /// 检测密码文件访问权限（不再使用 Keychain）
     private static func checkKeychainAccess() -> CheckReport {
-        let testKey = "FolderSync.EnvironmentCheck.Test"
-        let testValue = "test_value_\(UUID().uuidString)"
+        // 测试密码文件的读写权限
+        let testPassword = "test_password_\(UUID().uuidString)"
         
-        // 尝试写入
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: testKey,
-            kSecValueData as String: testValue.data(using: .utf8)!,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
-        ]
-        
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        
-        if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
+        // 尝试保存
+        let saveSuccess = KeychainManager.savePassword(testPassword)
+        if !saveSuccess {
             return CheckReport(
-                name: "Keychain 访问权限",
-                result: .error("无法写入 Keychain: \(keychainErrorDescription(addStatus))"),
-                details: "状态码: \(addStatus)"
+                name: "密码文件访问权限",
+                result: .error("无法写入密码文件"),
+                details: "请检查 Application Support 目录的写入权限"
             )
         }
         
         // 尝试读取
-        let getQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: testKey,
-            kSecReturnData as String: true
-        ]
-        
-        var result: AnyObject?
-        let getStatus = SecItemCopyMatching(getQuery as CFDictionary, &result)
-        
-        // 清理测试项
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: testKey
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        if getStatus != errSecSuccess {
+        if let loaded = KeychainManager.loadPassword(), loaded == testPassword {
+            // 清理测试密码
+            KeychainManager.deletePassword()
             return CheckReport(
-                name: "Keychain 访问权限",
-                result: .error("无法读取 Keychain: \(keychainErrorDescription(getStatus))"),
-                details: "状态码: \(getStatus)"
+                name: "密码文件访问权限",
+                result: .success("密码文件访问正常"),
+                details: "使用文件存储，无需 Keychain 权限"
+            )
+        } else {
+            // 清理测试密码
+            KeychainManager.deletePassword()
+            return CheckReport(
+                name: "密码文件访问权限",
+                result: .error("无法读取密码文件"),
+                details: "请检查 Application Support 目录的读取权限"
             )
         }
-        
-        return CheckReport(
-            name: "Keychain 访问权限",
-            result: .success("Keychain 访问正常"),
-            details: nil
-        )
     }
     
     /// 检测网络权限
@@ -419,29 +398,7 @@ public class EnvironmentChecker {
     }
     
     // MARK: - 辅助方法
-    
-    private static func keychainErrorDescription(_ status: OSStatus) -> String {
-        switch status {
-        case errSecSuccess:
-            return "成功"
-        case errSecDuplicateItem:
-            return "项目已存在"
-        case errSecItemNotFound:
-            return "项目未找到"
-        case errSecAuthFailed:
-            return "认证失败"
-        case errSecParam:
-            return "参数错误"
-        case errSecAllocate:
-            return "内存分配失败"
-        case errSecNotAvailable:
-            return "Keychain 不可用"
-        case errSecInteractionNotAllowed:
-            return "不允许交互"
-        default:
-            return "未知错误 (状态码: \(status))"
-        }
-    }
+    // 注意：已移除 keychainErrorDescription，因为不再使用 Keychain
 }
 
 extension String {

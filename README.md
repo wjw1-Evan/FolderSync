@@ -31,7 +31,7 @@
 
 ## 2. 核心技术模块
 
-- **P2P通信 (libp2p)**：集成 **libp2p** 框架，使用 UDP 广播实现局域网自动发现，支持手动连接和 Kademlia DHT 进行广域网发现（DHT 功能开发中）。通过 AutoNAT 和 Circuit Relay (v2) 解决复杂的 NAT 穿透问题，通过 Noise 协议保障传输安全。
+- **P2P通信 (libp2p)**：集成 **libp2p** 框架，使用 UDP 广播实现局域网自动发现，支持 Kademlia DHT 进行广域网发现。通过 AutoNAT 和 Circuit Relay (v2) 解决复杂的 NAT 穿透问题（开发中），通过 Noise 协议保障传输安全。
 - **系统集成 (ServiceManagement)**：利用 `ServiceManagement` 框架（`SMAppService`）实现用户可控的“开机自动启动”功能。
 - **文件监控 (FSEvents)**：利用 macOS 原生 FSEvents API 实现高效的目录递归监控，捕获文件创建、修改、删除、重命名等事件。
 - **增量同步 (CDC & Merkle Search Trees)**：
@@ -60,8 +60,8 @@
 ### （1）网络与设备发现 (libp2p)
 - **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备，无需手动配置。设备每 5 秒广播一次自己的 PeerID，并监听其他设备的广播消息。
 - **自动连接**：发现设备后自动建立连接并开始同步，无需任何手动配对步骤。
-- **广域网发现**：DHT/Bootstrap 节点广域网发现功能正在开发中。
-- **自愈连接**：当网络环境变化时，AutoNAT 自动重新探测并尝试穿透，直连失败时自动启用可信 Relay。
+- **广域网发现**：已配置 Kademlia DHT，支持通过 DHT 网络进行广域网设备发现。DHT 会自动连接到引导节点并建立路由表，实现跨网络的设备发现。
+- **自愈连接**：当网络环境变化时，AutoNAT 自动重新探测并尝试穿透，直连失败时自动启用可信 Relay（开发中）。
 - **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。
 
 ### （2）内容定义块管理 (Block Management)
@@ -246,7 +246,6 @@ class SyncManager: ObservableObject {
 - ✅ 冲突解决界面
 
 ## 开发中功能
-- 🚧 DHT 广域网发现
 - 🚧 AutoNAT 和 Circuit Relay
 - 🚧 块级别增量同步（FastCDC）
 

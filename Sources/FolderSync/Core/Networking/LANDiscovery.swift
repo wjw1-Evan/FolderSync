@@ -43,16 +43,24 @@ public class LANDiscovery {
         do {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: servicePort)!)
             
+            // 使用 UDP 的无连接接收方式
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleIncomingConnection(connection, myPeerID: peerID)
             }
             
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
-                    print("[LANDiscovery] Listener ready on port \(self.servicePort)")
+                    print("[LANDiscovery] ✅ Listener ready on port \(self?.servicePort ?? 0)")
+                    // 监听器就绪后，立即发送一次广播请求，触发其他设备响应
+                    if let self = self {
+                        // 发送一个特殊的"发现请求"广播，让其他设备知道新设备上线
+                        self.sendDiscoveryRequest()
+                    }
                 case .failed(let error):
-                    print("[LANDiscovery] Listener failed: \(error)")
+                    print("[LANDiscovery] ❌ Listener failed: \(error)")
+                case .waiting(let error):
+                    print("[LANDiscovery] ⚠️ Listener waiting: \(error)")
                 default:
                     break
                 }
@@ -61,8 +69,42 @@ public class LANDiscovery {
             listener.start(queue: DispatchQueue.global(qos: .userInitiated))
             self.listener = listener
         } catch {
-            print("[LANDiscovery] Failed to start listener: \(error)")
+            print("[LANDiscovery] ❌ Failed to start listener: \(error)")
         }
+    }
+    
+    /// 发送发现请求，让其他设备知道新设备上线并请求它们广播自己的信息
+    private func sendDiscoveryRequest() {
+        let requestMessage = "{\"type\":\"discovery_request\",\"service\":\"foldersync\"}"
+        guard let data = requestMessage.data(using: .utf8) else { return }
+        
+        let parameters = NWParameters.udp
+        parameters.allowLocalEndpointReuse = true
+        
+        let host = NWEndpoint.Host("255.255.255.255")
+        let port = NWEndpoint.Port(rawValue: servicePort)!
+        let endpoint = NWEndpoint.hostPort(host: host, port: port)
+        
+        let connection = NWConnection(to: endpoint, using: parameters)
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error = error {
+                        print("[LANDiscovery] Discovery request send error: \(error)")
+                    } else {
+                        print("[LANDiscovery] 📡 已发送发现请求，等待其他设备响应...")
+                    }
+                    connection.cancel()
+                })
+            case .failed(let error):
+                print("[LANDiscovery] Discovery request connection failed: \(error)")
+                connection.cancel()
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue.global(qos: .utility))
     }
     
     private func handleIncomingConnection(_ connection: NWConnection, myPeerID: String) {
@@ -89,13 +131,27 @@ public class LANDiscovery {
             }
             
             if let data = data, !data.isEmpty {
-                if let message = String(data: data, encoding: .utf8),
-                   let peerInfo = self?.parseDiscoveryMessage(message) {
-                    // Ignore our own broadcasts
-                    if peerInfo.peerID != myPeerID {
-                        let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
-                        print("[LANDiscovery] Discovered peer: \(peerInfo.peerID) at \(address) with addresses: \(peerInfo.addresses)")
-                        self?.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+                if let message = String(data: data, encoding: .utf8) {
+                    // 检查是否是发现请求
+                    if message.contains("\"type\":\"discovery_request\"") {
+                        // 收到发现请求，立即广播自己的信息作为响应
+                        print("[LANDiscovery] 📥 收到发现请求，立即响应...")
+                        self?.sendBroadcast(peerID: myPeerID, listenAddresses: self?.currentListenAddresses ?? [])
+                        // 继续接收
+                        if !isComplete {
+                            self?.receiveMessage(from: connection, myPeerID: myPeerID)
+                        }
+                        return
+                    }
+                    
+                    // 解析正常的发现消息
+                    if let peerInfo = self?.parseDiscoveryMessage(message) {
+                        // Ignore our own broadcasts
+                        if peerInfo.peerID != myPeerID {
+                            let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
+                            print("[LANDiscovery] ✅ Discovered peer: \(peerInfo.peerID) at \(address) with addresses: \(peerInfo.addresses)")
+                            self?.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+                        }
                     }
                 }
             }
@@ -118,8 +174,14 @@ public class LANDiscovery {
         RunLoop.current.add(timer, forMode: .common)
         self.broadcastTimer = timer
         
-        // Send initial broadcast
+        // Send initial broadcast immediately
         sendBroadcast(peerID: peerID, listenAddresses: listenAddresses)
+        
+        // 在启动后立即发送发现请求，主动寻找已有设备
+        // 延迟一小段时间确保监听器已就绪
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.sendDiscoveryRequest()
+        }
     }
     
     public func updateListenAddresses(_ addresses: [String]) {

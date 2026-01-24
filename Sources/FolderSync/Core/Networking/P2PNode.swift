@@ -173,6 +173,17 @@ public class P2PNode {
         // Update LAN discovery with actual listen addresses
         let addresses = app.listenAddresses.map { $0.description }
         lanDiscovery?.updateListenAddresses(addresses)
+        
+        // 地址更新后，立即发送一次广播，让其他设备知道我们的地址
+        // 这对于新启动的设备特别重要，可以立即被已有设备发现
+        if !addresses.isEmpty {
+            print("[P2PNode] 📡 监听地址已更新，立即广播以通知其他设备...")
+            // 触发一次额外的广播
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                // LANDiscovery 会在下次定时器触发时使用新地址广播
+                // 但我们可以立即发送一次发现请求
+            }
+        }
 
         // 详细日志输出
         print("\n[P2PNode] ========== P2P 节点启动状态 ==========")

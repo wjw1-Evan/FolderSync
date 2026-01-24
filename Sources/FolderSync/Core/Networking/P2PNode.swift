@@ -196,13 +196,13 @@ public class P2PNode {
         // 检查 LANDiscovery 状态
         if let discovery = lanDiscovery {
             print("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
+            print("[P2PNode] ✅ 局域网发现已启用，使用 UDP 广播自动发现同一网络内的设备")
+            print("[P2PNode] ℹ️ 所有通信均在客户端之间直接进行，无需任何服务器端")
         } else {
             print("[P2PNode] ❌ LAN Discovery 未启用")
+            print("[P2PNode] ⚠️ 警告: 局域网发现功能未启动，设备将无法自动发现其他设备")
+            print("[P2PNode] 💡 提示: 这可能是初始化失败，请检查日志中的错误信息")
         }
-        
-        // 局域网发现是主要机制，完全无需服务器
-        print("[P2PNode] ✅ 局域网发现已启用，使用 UDP 广播自动发现同一网络内的设备")
-        print("[P2PNode] ℹ️ 所有通信均在客户端之间直接进行，无需任何服务器端")
         
         print("[P2PNode] ======================================\n")
     }

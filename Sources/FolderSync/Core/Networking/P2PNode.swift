@@ -149,19 +149,18 @@ public class P2PNode {
             // This should add the peer to libp2p's peer store with the addresses
             // 注意：这个回调必须在 app.startup() 之后调用才能正确工作
             if let callback = discoveryCallback {
+                // 修复 Bug 1: 先等待 1.5 秒，然后再调用 callback
+                // 这样可以确保在所有情况下，通知都在等待之后发送，保持时序一致
+                // 当 callback 被调用时，discoveryHandler 会立即触发 onPeerDiscovered
+                // 所以通知发生在 T=1.5 秒，SyncManager 在 T=2.5 秒开始同步（等待 1 秒）
+                print("[P2PNode] ⏳ 等待 1.5 秒后再注册对等点（确保时序一致）...")
+                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
+                
                 print("[P2PNode] ✅ 调用发现回调注册对等点...")
                 callback(peerInfo)
                 print("[P2PNode] ✅ 发现回调已调用，对等点应该已添加到 peer store")
-                
-                // 等待更长时间，确保 peer store 已更新
-                // libp2p 需要时间处理发现回调并更新内部 peer store
-                // 注意：discoveryHandler 内部会调用 onPeerDiscovered，通知是立即的
-                // 但我们需要等待确保 peer store 已更新，这样 SyncManager 的同步操作才能成功
-                print("[P2PNode] ⏳ 等待 libp2p 处理发现回调并更新 peer store...")
-                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
+                print("[P2PNode] ✅ SyncManager 应该已收到对等点发现通知（通过 discoveryHandler）")
                 print("[P2PNode] ✅ 对等点注册完成，peer store 应该已更新")
-                // 注意：SyncManager 已经通过 discoveryHandler 收到了通知（在 callback 调用时）
-                // SyncManager 会等待 1 秒，总共约 2.5 秒，这应该足够完成注册
             } else {
                 print("[P2PNode] ❌ Discovery callback 不可用！")
                 print("[P2PNode] ⚠️ 严重警告: 对等点无法注册到 libp2p peer store")

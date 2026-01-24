@@ -102,11 +102,15 @@ public class SyncManager: ObservableObject {
     /// 刷新文件夹的文件数量和文件夹数量统计（不触发同步）
     private func refreshFileCount(for folder: SyncFolder) {
         Task {
+            print("[SyncManager] 📊 正在统计文件夹: \(folder.localPath.path)")
             let (_, metadata, folderCount) = await calculateFullState(for: folder)
             await MainActor.run {
                 if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
                     self.folders[index].fileCount = metadata.count
                     self.folders[index].folderCount = folderCount
+                    print("[SyncManager] ✅ 统计完成: \(metadata.count) 个文件, \(folderCount) 个文件夹")
+                } else {
+                    print("[SyncManager] ⚠️ 警告: 无法找到文件夹索引，统计结果未更新")
                 }
             }
         }
@@ -151,6 +155,10 @@ public class SyncManager: ObservableObject {
             return
         }
         startMonitoring(folder)
+        
+        // 立即统计文件数量和文件夹数量
+        print("[SyncManager] 📊 开始统计文件夹内容: \(folder.localPath.path)")
+        refreshFileCount(for: folder)
         
         // Announce this folder on the network
         // 注意：如果 libp2p 没有配置 DHT 等发现服务，announce 会失败
@@ -913,47 +921,79 @@ public class SyncManager: ObservableObject {
     func checkIfSyncIDExists(_ syncID: String) async -> Bool {
         // 首先检查本地是否已有该 syncID
         if folders.contains(where: { $0.syncID == syncID }) {
+            print("[SyncManager] ✅ syncID 在本地已存在: \(syncID)")
             return true
         }
         
         // 如果 syncID 太短，认为无效
         guard syncID.count >= 4 else {
+            print("[SyncManager] ❌ syncID 太短（至少需要 4 个字符）: \(syncID)")
             return false
         }
         
-        // 如果没有已知的对等点，无法验证
-        // 返回 false，因为无法确认 syncID 是否存在
-        guard !peers.isEmpty, let app = p2pNode.app else {
-            print("[SyncManager] ⚠️ 暂无已知对等点，无法验证 syncID: \(syncID)")
+        // 如果没有已知的对等点，等待一段时间让设备发现
+        // 然后再次检查
+        if peers.isEmpty || p2pNode.app == nil {
+            print("[SyncManager] ⚠️ 暂无已知对等点，等待设备发现...")
             print("[SyncManager] 💡 提示: 请确保:")
             print("[SyncManager]   1. 两台设备都在同一局域网内")
             print("[SyncManager]   2. 另一台设备已启动并配置了相同的 syncID")
-            print("[SyncManager]   3. 等待几秒让设备自动发现")
+            
+            // 等待 3 秒，让设备有时间发现对方
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            
+            // 再次检查是否有对等点
+            if peers.isEmpty || p2pNode.app == nil {
+                print("[SyncManager] ⚠️ 等待后仍无已知对等点，无法验证 syncID: \(syncID)")
+                print("[SyncManager] 💡 建议: 如果确定 syncID 正确，可以尝试直接加入")
+                // 返回 false，但提供更友好的错误信息
+                return false
+            }
+        }
+        
+        guard let app = p2pNode.app else {
+            print("[SyncManager] ❌ P2P 节点未初始化")
             return false
         }
+        
+        print("[SyncManager] 🔍 开始验证 syncID: \(syncID)")
+        print("[SyncManager]   已知对等点数量: \(peers.count)")
         
         // 向所有已知对等点查询该 syncID
         // 如果任何一个对等点有该 syncID，则返回 true
         var foundOnAnyPeer = false
-        for peer in peers {
+        var lastError: Error?
+        
+        for (index, peer) in peers.enumerated() {
+            let peerIDShort = peer.b58String.prefix(12)
+            print("[SyncManager]   检查对等点 [\(index + 1)/\(peers.count)]: \(peerIDShort)...")
+            
             do {
                 // 尝试获取该 syncID 的 MST 根，如果成功则说明对等点有该文件夹
+                // 增加超时时间和重试次数，因为首次连接可能需要时间
                 let response: SyncResponse = try await app.requestSync(
                     .getMST(syncID: syncID),
                     to: peer,
-                    timeout: 10.0,
-                    maxRetries: 1
+                    timeout: 30.0,  // 增加到 30 秒
+                    maxRetries: 2    // 增加到 2 次重试
                 )
                 
                 // 如果返回的不是错误，说明对等点有该 syncID
                 if case .mstRoot = response {
-                    print("[SyncManager] ✅ 在对等点 \(peer.b58String.prefix(8)) 找到 syncID: \(syncID)")
+                    print("[SyncManager] ✅ 在对等点 \(peerIDShort)... 找到 syncID: \(syncID)")
                     foundOnAnyPeer = true
                     break // 找到一个就足够了
+                } else {
+                    print("[SyncManager] ⚠️ 对等点 \(peerIDShort)... 返回了意外的响应类型")
                 }
             } catch {
-                // 如果返回错误（如 "Folder not found" 或超时），说明该对等点没有该 syncID
-                // 继续检查下一个对等点
+                // 记录错误，但继续检查下一个对等点
+                lastError = error
+                let errorString = String(describing: error)
+                print("[SyncManager] ⚠️ 对等点 \(peerIDShort)... 查询失败: \(errorString)")
+                
+                // 如果是 "Folder not found"，说明对等点没有该 syncID，继续检查下一个
+                // 如果是连接错误，也继续检查下一个对等点
                 continue
             }
         }
@@ -961,6 +1001,14 @@ public class SyncManager: ObservableObject {
         // 如果所有对等点都没有该 syncID，返回 false
         if !foundOnAnyPeer {
             print("[SyncManager] ❌ 未在已知对等点找到 syncID: \(syncID)")
+            if let error = lastError {
+                print("[SyncManager]   最后错误: \(error.localizedDescription)")
+            }
+            print("[SyncManager] 💡 可能的原因:")
+            print("[SyncManager]   1. 对等点还没有配置该 syncID")
+            print("[SyncManager]   2. 网络连接问题")
+            print("[SyncManager]   3. 设备还没有完全发现对方")
+            print("[SyncManager] 💡 建议: 如果确定 syncID 正确，可以尝试直接加入（系统会自动同步）")
             return false
         }
         

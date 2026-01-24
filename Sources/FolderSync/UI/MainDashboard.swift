@@ -109,7 +109,6 @@ struct FolderRow: View {
     let folder: SyncFolder
     @State private var showingPeerList = false
     @State private var showingExcludeRules = false
-    @State private var showingSyncModeEditor = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -220,12 +219,6 @@ struct FolderRow: View {
                 Label("排除规则", systemImage: "line.3.horizontal.decrease.circle")
             }
             
-            Button {
-                showingSyncModeEditor = true
-            } label: {
-                Label("同步模式", systemImage: "arrow.triangle.2.circlepath")
-            }
-            
             Divider()
             
             Button(role: .destructive) {
@@ -236,10 +229,6 @@ struct FolderRow: View {
         }
         .sheet(isPresented: $showingExcludeRules) {
             ExcludeRulesView(folder: folder)
-                .environmentObject(syncManager)
-        }
-        .sheet(isPresented: $showingSyncModeEditor) {
-            SyncModeEditorView(folder: folder)
                 .environmentObject(syncManager)
         }
     }
@@ -275,25 +264,13 @@ struct AddFolderView: View {
     @State private var selectedPath: URL?
     @State private var syncID: String = ""
     
-    @State private var syncMode: Selection = .create
-    @State private var folderSyncMode: SyncMode = .twoWay
     @State private var errorMessage: String?
     @State private var isChecking = false
     
-    enum Selection {
-        case create, join
-    }
-    
     var body: some View {
         VStack(spacing: 20) {
-            Text("同步新文件夹")
+            Text("添加同步文件夹")
                 .font(.headline)
-            
-            Picker("同步方式", selection: $syncMode) {
-                Text("创建新同步组").tag(Selection.create)
-                Text("加入现有同步组").tag(Selection.join)
-            }
-            .pickerStyle(.segmented)
             
             VStack(alignment: .leading, spacing: 10) {
                 Text("1. 本地文件夹地址")
@@ -323,35 +300,21 @@ struct AddFolderView: View {
                     .font(.subheadline).bold()
                 
                 HStack {
-                    TextField(syncMode == .create ? "输入自定义 ID 或点击右侧生成" : "输入或粘贴同步 ID", text: $syncID)
+                    TextField("输入同步 ID 或点击右侧生成", text: $syncID)
                         .textFieldStyle(.roundedBorder)
                     
-                    if syncMode == .create {
-                        Button {
-                            syncID = generateRandomSyncID()
-                        } label: {
-                            Image(systemName: "dice")
-                                .padding(4)
-                                .background(Color.blue)
-                                .foregroundColor(.white)
-                                .cornerRadius(4)
-                        }
+                    Button {
+                        syncID = generateRandomSyncID()
+                    } label: {
+                        Image(systemName: "dice")
+                            .padding(4)
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(4)
                     }
                 }
-            }
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Text("3. 同步模式")
-                    .font(.subheadline).bold()
                 
-                Picker("同步模式", selection: $folderSyncMode) {
-                    Text("双向同步").tag(SyncMode.twoWay)
-                    Text("仅上传").tag(SyncMode.uploadOnly)
-                    Text("仅下载").tag(SyncMode.downloadOnly)
-                }
-                .pickerStyle(.segmented)
-                
-                Text(folderSyncModeDescription)
+                Text("提示：如果该 ID 已存在于网络上，将自动加入现有同步组；否则将创建新的同步组。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -362,42 +325,37 @@ struct AddFolderView: View {
                     .foregroundStyle(.red)
             }
             
-            if syncMode == .join {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("提示：加入现有同步组需要两边填写相同的 ID。")
+            VStack(alignment: .leading, spacing: 4) {
+                if !syncManager.peers.isEmpty {
+                    Text("已发现 \(syncManager.peers.count) 台设备")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("系统会自动检查网络上是否有该 ID 的同步组。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.green)
+                } else {
+                    Text("等待发现其他设备...")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
             
             HStack {
                 Button("取消") { dismiss() }
                 Spacer()
-                Button(syncMode == .create ? "创建同步" : "加入同步") {
+                Button("添加同步") {
                     if let path = selectedPath, !syncID.isEmpty {
-                        if syncMode == .join {
-                            isChecking = true
-                            Task {
-                                let exists = await syncManager.checkIfSyncIDExists(syncID)
-                                await MainActor.run {
-                                    isChecking = false
-                                    if exists {
-                                        let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: folderSyncMode)
-                                        syncManager.addFolder(newFolder)
-                                        dismiss()
-                                    } else {
-                                        errorMessage = "同步 ID 不存在，请检查输入是否正确。"
-                                    }
-                                }
+                        // 自动检查 syncID 是否存在，如果存在就加入，不存在就创建
+                        isChecking = true
+                        errorMessage = nil // 清除之前的错误
+                        Task {
+                            // 先检查 syncID 是否存在（可选，用于日志）
+                            let exists = await syncManager.checkIfSyncIDExists(syncID)
+                            await MainActor.run {
+                                isChecking = false
+                                // 无论是否存在，都添加文件夹（系统会自动同步）
+                                // 如果存在，会加入现有同步组；如果不存在，会创建新同步组
+                                let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: .twoWay)
+                                syncManager.addFolder(newFolder)
+                                dismiss()
                             }
-                        } else {
-                            // Create mode: allow any ID or generated ID
-                            let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: folderSyncMode)
-                            syncManager.addFolder(newFolder)
-                            dismiss()
                         }
                     }
                 }
@@ -418,83 +376,8 @@ struct AddFolderView: View {
         let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         return String((0..<8).map { _ in letters.randomElement()! })
     }
-    
-    private var folderSyncModeDescription: String {
-        switch folderSyncMode {
-        case .twoWay:
-            return "本地和远程的更改都会同步"
-        case .uploadOnly:
-            return "只将本地更改上传到远程，不下载远程更改"
-        case .downloadOnly:
-            return "只下载远程更改，不上传本地更改"
-        }
-    }
 }
 
-struct SyncModeEditorView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var syncManager: SyncManager
-    let folder: SyncFolder
-    @State private var selectedMode: SyncMode
-    
-    init(folder: SyncFolder) {
-        self.folder = folder
-        _selectedMode = State(initialValue: folder.mode)
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("编辑同步模式")
-                .font(.headline)
-            
-            Text("文件夹: \(folder.localPath.lastPathComponent)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Text("同步模式")
-                    .font(.subheadline).bold()
-                
-                Picker("同步模式", selection: $selectedMode) {
-                    Text("双向同步").tag(SyncMode.twoWay)
-                    Text("仅上传").tag(SyncMode.uploadOnly)
-                    Text("仅下载").tag(SyncMode.downloadOnly)
-                }
-                .pickerStyle(.segmented)
-                
-                Text(modeDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            
-            HStack {
-                Button("取消") { dismiss() }
-                Spacer()
-                Button("保存") {
-                    var updatedFolder = folder
-                    updatedFolder.mode = selectedMode
-                    syncManager.updateFolder(updatedFolder)
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedMode == folder.mode)
-            }
-        }
-        .padding()
-        .frame(width: 400)
-    }
-    
-    private var modeDescription: String {
-        switch selectedMode {
-        case .twoWay:
-            return "本地和远程的更改都会同步"
-        case .uploadOnly:
-            return "只将本地更改上传到远程，不下载远程更改"
-        case .downloadOnly:
-            return "只下载远程更改，不上传本地更改"
-        }
-    }
-}
 
 /// 所有设备列表视图（包括自身）
 struct AllPeersListView: View {

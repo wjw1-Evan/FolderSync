@@ -264,6 +264,27 @@ public class PeerManager: ObservableObject {
         guard var peer = peers[peerIDString] else { return }
         peer.updateOnlineStatus(isOnline)
         peers[peerIDString] = peer
+        
+        // 同步更新设备状态
+        deviceStatuses[peerIDString] = isOnline ? .online : .offline
+        
+        // 保存到持久化存储（带防抖）
+        savePeersDebounced()
+    }
+    
+    /// 更新设备状态
+    public func updateDeviceStatus(_ peerIDString: String, status: DeviceStatus) {
+        deviceStatuses[peerIDString] = status
+        
+        // 同步更新 PeerInfo 的在线状态
+        if var peer = peers[peerIDString] {
+            let isOnline = (status == .online)
+            peer.updateOnlineStatus(isOnline)
+            peers[peerIDString] = peer
+        }
+        
+        // 保存到持久化存储（带防抖）
+        savePeersDebounced()
     }
     
     /// 标记 Peer 为正在注册（已废弃，使用 registrationService 管理）

@@ -34,6 +34,10 @@ public class SyncManager: ObservableObject {
     private var syncCooldown: [String: Date] = [:] // syncID -> 最后同步完成时间
     private let syncCooldownDuration: TimeInterval = 5.0 // 同步完成后5秒内忽略文件变化检测
     
+    // 按 peer-folder 对记录的同步冷却时间，用于避免频繁同步
+    private var peerSyncCooldown: [String: Date] = [:] // "peerID:syncID" -> 最后同步完成时间
+    private let peerSyncCooldownDuration: TimeInterval = 30.0 // 同步完成后30秒内不重复同步
+    
     // 文件监控防抖：syncID -> 防抖任务
     private var debounceTasks: [String: Task<Void, Never>] = [:]
     private let debounceDelay: TimeInterval = 2.0 // 2 秒防抖延迟
@@ -1815,6 +1819,9 @@ public class SyncManager: ObservableObject {
                 self.updateDeviceCounts()
                 // 设置同步冷却时间，防止立即触发新的同步
                 self.syncCooldown[folder.syncID] = Date()
+                // 设置按 peer-folder 对的同步冷却时间
+                let cooldownKey = "\(peerID):\(folder.syncID)"
+                self.peerSyncCooldown[cooldownKey] = Date()
             }
             let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
             let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date(), syncedFiles: syncedFiles.isEmpty ? nil : syncedFiles)
@@ -2283,35 +2290,16 @@ public class SyncManager: ObservableObject {
             folder: folder
         )
         
-        guard case .fileChunksAck = chunksRes else {
-            // 如果块级同步失败，回退到全量上传
-            print("[SyncManager] ⚠️ 块级同步失败，回退到全量上传: \(path)")
-            return try await uploadFileFull(
-                path: path,
-                localMeta: localMeta,
-                folder: folder,
-                peer: peer,
-                peerID: peerID,
-                myPeerID: myPeerID,
-                remoteEntries: remoteEntries,
-                shouldUpload: shouldUpload
-            )
-        }
-        
-        // 5. 检查远程缺失的块并上传
-        let missingHashesRes: SyncResponse = try await sendSyncRequest(
-            .putFileChunks(syncID: folder.syncID, path: path, chunkHashes: chunkHashes, vectorClock: vc),
-            to: peer,
-            peerID: peerID,
-            timeout: 90.0,
-            maxRetries: 3,
-            folder: folder
-        )
-        
         var uploadedBytes: Int64 = 0
         
-        // 如果远程返回缺失的块列表，上传这些块
-        if case .error(let errorMsg) = missingHashesRes, errorMsg.hasPrefix("缺失块:") {
+        // 检查响应类型
+        switch chunksRes {
+        case .fileChunksAck:
+            // 所有块都存在，文件已重建完成，直接返回
+            uploadedBytes = Int64(chunks.reduce(0) { $0 + $1.data.count })
+            
+        case .error(let errorMsg) where errorMsg.hasPrefix("缺失块:"):
+            // 远程缺失某些块，需要上传这些块
             let missingHashesStr = errorMsg.replacingOccurrences(of: "缺失块: ", with: "")
             let missingHashes = missingHashesStr.split(separator: ",").map { String($0) }
             
@@ -2349,9 +2337,48 @@ public class SyncManager: ObservableObject {
                     }
                 }
             }
-        } else {
-            // 所有块都已存在，只计算总大小
+            
+            // 上传完缺失的块后，再次发送 putFileChunks 确认
+            let confirmRes: SyncResponse = try await sendSyncRequest(
+                .putFileChunks(syncID: folder.syncID, path: path, chunkHashes: chunkHashes, vectorClock: vc),
+                to: peer,
+                peerID: peerID,
+                timeout: 90.0,
+                maxRetries: 3,
+                folder: folder
+            )
+            
+            guard case .fileChunksAck = confirmRes else {
+                // 确认失败，回退到全量上传
+                print("[SyncManager] ⚠️ 块级同步确认失败，回退到全量上传: \(path)")
+                return try await uploadFileFull(
+                    path: path,
+                    localMeta: localMeta,
+                    folder: folder,
+                    peer: peer,
+                    peerID: peerID,
+                    myPeerID: myPeerID,
+                    remoteEntries: remoteEntries,
+                    shouldUpload: shouldUpload
+                )
+            }
+            
+            // 计算总大小（包括已存在的块）
             uploadedBytes = Int64(chunks.reduce(0) { $0 + $1.data.count })
+            
+        default:
+            // 其他错误，回退到全量上传
+            print("[SyncManager] ⚠️ 块级同步失败，回退到全量上传: \(path)")
+            return try await uploadFileFull(
+                path: path,
+                localMeta: localMeta,
+                folder: folder,
+                peer: peer,
+                peerID: peerID,
+                myPeerID: myPeerID,
+                remoteEntries: remoteEntries,
+                shouldUpload: shouldUpload
+            )
         }
         
         // 保存 Vector Clock
@@ -2595,20 +2622,31 @@ public class SyncManager: ObservableObject {
     
     /// 检查是否应该为对等点触发同步
     /// 避免频繁触发不必要的同步（比如在短时间内多次收到广播）
+    /// - Parameter peerID: 对等点 ID
+    /// - Returns: 是否应该触发同步
     private func shouldTriggerSyncForPeer(peerID: String) -> Bool {
-        // 检查所有文件夹是否最近已经同步过（30秒内）
-        // 如果最近已经同步过，就不立即触发同步
+        // 检查该对等点与所有文件夹的同步冷却时间
+        // 如果该对等点与所有文件夹都在最近30秒内已经同步过，就不立即触发同步
+        // 如果至少有一个文件夹没有同步过或已超过冷却期，则允许触发同步
+        guard !folders.isEmpty else {
+            return true
+        }
+        
         for folder in folders {
-            if let lastSyncTime = syncCooldown[folder.syncID] {
+            let cooldownKey = "\(peerID):\(folder.syncID)"
+            if let lastSyncTime = peerSyncCooldown[cooldownKey] {
                 let timeSinceLastSync = Date().timeIntervalSince(lastSyncTime)
-                // 如果最近30秒内已经同步过，不触发
-                // 注意：syncCooldown 记录的是同步完成时间，这里检查30秒是为了避免频繁同步
-                if timeSinceLastSync < 30.0 {
-                    return false
+                // 如果该文件夹在最近30秒内已经同步过，继续检查下一个文件夹
+                if timeSinceLastSync < peerSyncCooldownDuration {
+                    continue
                 }
             }
+            // 如果至少有一个文件夹没有同步过或已超过冷却期，允许触发同步
+            return true
         }
-        return true
+        
+        // 所有文件夹都在冷却期内，不触发同步
+        return false
     }
     
 }

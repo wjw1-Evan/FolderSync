@@ -305,6 +305,12 @@ public class SyncManager: ObservableObject {
                     self.folders[index].fileCount = metadata.count
                     self.folders[index].folderCount = folderCount
                     print("[SyncManager] ✅ 统计完成: \(metadata.count) 个文件, \(folderCount) 个文件夹")
+                    // 持久化保存统计信息更新
+                    do {
+                        try StorageManager.shared.saveFolder(self.folders[index])
+                    } catch {
+                        print("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
+                    }
                 } else {
                     print("[SyncManager] ⚠️ 警告: 无法找到文件夹索引，统计结果未更新")
                 }
@@ -1202,6 +1208,12 @@ public class SyncManager: ObservableObject {
     private func updatePeerCount(for syncID: String) {
         if let index = folders.firstIndex(where: { $0.syncID == syncID }) {
             folders[index].peerCount = syncIDManager.getPeerCount(for: syncID)
+            // 持久化保存更新
+            do {
+                try StorageManager.shared.saveFolder(folders[index])
+            } catch {
+                print("[SyncManager] ⚠️ 无法保存文件夹 peerCount 更新: \(error)")
+            }
         }
     }
     
@@ -1212,6 +1224,14 @@ public class SyncManager: ObservableObject {
             folders[index].syncProgress = progress
             if status == .synced {
                 folders[index].lastSyncedAt = Date()
+            }
+            
+            // 持久化保存状态更新，确保重启后能恢复
+            do {
+                try StorageManager.shared.saveFolder(folders[index])
+            } catch {
+                print("[SyncManager] ⚠️ 无法保存文件夹状态更新: \(error)")
+                print("[SyncManager] 错误详情: \(error.localizedDescription)")
             }
         }
     }
@@ -1244,6 +1264,12 @@ public class SyncManager: ObservableObject {
                 if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
                     self.folders[index].fileCount = metadata.count
                     self.folders[index].folderCount = folderCount
+                    // 持久化保存统计信息更新
+                    do {
+                        try StorageManager.shared.saveFolder(self.folders[index])
+                    } catch {
+                        print("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
+                    }
                 }
             }
             

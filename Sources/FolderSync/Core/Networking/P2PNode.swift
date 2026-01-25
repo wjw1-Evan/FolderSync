@@ -3,12 +3,18 @@ import Foundation
 import LibP2P
 import LibP2PKadDHT
 import NIOCore
+import Network
 
 public class P2PNode {
     public var app: Application?
     private var lanDiscovery: LANDiscovery?
     private var discoveryHandler: ((LibP2P.PeerInfo) -> Void)? // 保存 discovery handler 以便手动触发
     @MainActor public let peerManager: PeerManager // 统一的 Peer 管理器
+    
+    // 网络路径监控，用于检测 IP 地址变化
+    private var pathMonitor: NWPathMonitor?
+    private var pathMonitorQueue: DispatchQueue?
+    private var lastKnownIP: String = ""
 
     public init() {
         // PeerManager 需要在 MainActor 上初始化
@@ -387,12 +393,21 @@ public class P2PNode {
         
         self.app = app
 
-        // Explicitly configure TCP to listen on all interfaces
-        // Using port 0 allows the OS to assign any available port
-        app.listen(.tcp(host: "0.0.0.0", port: 0))
+        // 获取本机真实 IP 地址用于监听
+        let localIP = getLocalIPAddress()
+        lastKnownIP = localIP
+        print("[P2PNode] 📍 检测到本机 IP 地址: \(localIP)")
+        
+        // 使用真实 IP 地址监听，而不是 0.0.0.0
+        // 使用 port 0 让系统自动分配可用端口
+        app.listen(.tcp(host: localIP, port: 0))
+        print("[P2PNode] 🔌 正在监听: \(localIP):0 (端口将由系统分配)")
 
         // 启用 LAN discovery（UDP 广播）
         setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
+        
+        // 启动网络路径监控，监听 IP 地址变化
+        startNetworkPathMonitoring()
         
         // 注册 libp2p 的 peer 发现回调
         let discoveryHandler: (LibP2P.PeerInfo) -> Void = { [weak self] (peerInfo: LibP2P.PeerInfo) in
@@ -418,7 +433,13 @@ public class P2PNode {
         try? await Task.sleep(nanoseconds: 500_000_000)
 
         // 更新 LAN discovery 的监听地址
-        let addresses = app.listenAddresses.map { $0.description }
+        // 将 0.0.0.0 替换为真实 IP 地址，确保广播的地址可以被其他设备连接
+        let localIP = getLocalIPAddress()
+        let addresses = app.listenAddresses.map { addr in
+            let addrStr = addr.description
+            // 将 /ip4/0.0.0.0/ 替换为真实 IP
+            return addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+        }
         lanDiscovery?.updateListenAddresses(addresses)
         
         // 地址更新后立即发送广播
@@ -437,8 +458,13 @@ public class P2PNode {
         if app.listenAddresses.isEmpty {
             print("[P2PNode] ⚠️ 警告: 未检测到监听地址")
         } else {
+            // 获取本机真实 IP 地址
+            let localIP = getLocalIPAddress()
+            
             for (index, addr) in app.listenAddresses.enumerated() {
-                print("[P2PNode]   [\(index + 1)] \(addr)")
+                // 将 0.0.0.0 替换为真实 IP 地址以便显示
+                let displayAddr = addr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+                print("[P2PNode]   [\(index + 1)] \(displayAddr)")
             }
             print("[P2PNode] ✅ Ready for connections")
         }
@@ -451,6 +477,178 @@ public class P2PNode {
         
         print("[P2PNode] ======================================\n")
     }
+    
+    /// 获取本机的局域网 IP 地址
+    private func getLocalIPAddress() -> String {
+        var address = "127.0.0.1" // 默认值
+        
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return address }
+        guard let firstAddr = ifaddr else { return address }
+        
+        defer { freeifaddrs(ifaddr) }
+        
+        for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+            let interface = ifptr.pointee
+            
+            // 检查是否为 IPv4 地址
+            let addrFamily = interface.ifa_addr.pointee.sa_family
+            if addrFamily == UInt8(AF_INET) {
+                // 检查接口名称，排除回环接口
+                let name = String(cString: interface.ifa_name)
+                if name.hasPrefix("en") || name.hasPrefix("eth") || name.hasPrefix("wlan") {
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    getnameinfo(interface.ifa_addr,
+                               socklen_t(interface.ifa_addr.pointee.sa_len),
+                               &hostname,
+                               socklen_t(hostname.count),
+                               nil,
+                               socklen_t(0),
+                               NI_NUMERICHOST)
+                    address = String(cString: hostname)
+                    
+                    // 优先选择非 127.0.0.1 的地址
+                    if address != "127.0.0.1" && !address.isEmpty {
+                        break
+                    }
+                }
+            }
+        }
+        
+        return address
+    }
+    
+    /// 启动网络路径监控，监听 IP 地址变化
+    private func startNetworkPathMonitoring() {
+        let monitor = NWPathMonitor()
+        let queue = DispatchQueue(label: "com.foldersync.networkPathMonitor")
+        
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            
+            // 检查网络是否可用
+            guard path.status == .satisfied else {
+                print("[P2PNode] ⚠️ 网络路径不可用")
+                return
+            }
+            
+            // 延迟一小段时间，确保网络接口已完全更新
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self else { return }
+                
+                // 获取新的 IP 地址
+                let newIP = self.getLocalIPAddress()
+                
+                // 如果 IP 地址发生变化（排除初始状态和回环地址）
+                if !self.lastKnownIP.isEmpty && newIP != self.lastKnownIP && newIP != "127.0.0.1" {
+                    print("[P2PNode] 🔄 检测到 IP 地址变化: \(self.lastKnownIP) -> \(newIP)")
+                    let oldIP = self.lastKnownIP
+                    self.lastKnownIP = newIP
+                    
+                    // 更新监听地址和广播地址
+                    Task { [weak self] in
+                        await self?.updateListenAddressForIPChange(newIP: newIP, oldIP: oldIP)
+                    }
+                } else if self.lastKnownIP.isEmpty && newIP != "127.0.0.1" {
+                    // 首次设置 IP（启动时）
+                    self.lastKnownIP = newIP
+                }
+            }
+        }
+        
+        monitor.start(queue: queue)
+        self.pathMonitor = monitor
+        self.pathMonitorQueue = queue
+        print("[P2PNode] ✅ 网络路径监控已启动")
+    }
+    
+    /// 停止网络路径监控
+    private func stopNetworkPathMonitoring() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathMonitorQueue = nil
+        print("[P2PNode] ✅ 网络路径监控已停止")
+    }
+    
+    /// 当 IP 地址改变时，更新监听地址和广播地址
+    private func updateListenAddressForIPChange(newIP: String, oldIP: String) async {
+        guard let app = app else { return }
+        
+        print("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
+        
+        // 获取当前的监听地址（包含端口信息）
+        let currentAddresses = app.listenAddresses
+        guard !currentAddresses.isEmpty else {
+            print("[P2PNode] ⚠️ 当前没有监听地址，无法更新")
+            return
+        }
+        
+        // 提取端口号（从第一个地址中）
+        var port: UInt16 = 0
+        for addr in currentAddresses {
+            let addrStr = addr.description
+            // 解析 multiaddr 格式，例如 /ip4/192.168.1.100/tcp/51027
+            if let tcpRange = addrStr.range(of: "/tcp/") {
+                let portStr = String(addrStr[tcpRange.upperBound...])
+                if let portNum = UInt16(portStr) {
+                    port = portNum
+                    break
+                }
+            }
+        }
+        
+        if port == 0 {
+            print("[P2PNode] ⚠️ 无法从当前地址提取端口号，尝试使用新 IP 重新监听")
+            // 如果无法提取端口，使用新 IP 重新监听（系统会分配新端口）
+            app.listen(.tcp(host: newIP, port: 0))
+            print("[P2PNode] 🔌 已使用新 IP 重新监听: \(newIP):0")
+            
+            // 等待系统分配端口
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        } else {
+            // 使用相同的端口，但使用新的 IP 地址重新监听
+            print("[P2PNode] 🔌 使用新 IP 和相同端口重新监听: \(newIP):\(port)")
+            app.listen(.tcp(host: newIP, port: port))
+            
+            // 等待监听启动
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        
+        // 获取更新后的监听地址
+        let updatedAddresses = app.listenAddresses.map { $0.description }
+        
+        // 更新 LAN Discovery 的广播地址，确保使用新 IP
+        let newAddresses = updatedAddresses.map { addr in
+            let addrStr = addr
+            // 将旧 IP 或 0.0.0.0 替换为新 IP
+            var newAddr = addrStr
+            // 替换 /ip4/0.0.0.0/ 或 /ip4/旧IP/
+            if newAddr.contains("/ip4/\(oldIP)/") {
+                // 替换旧 IP
+                newAddr = newAddr.replacingOccurrences(of: "/ip4/\(oldIP)/", with: "/ip4/\(newIP)/")
+            } else if newAddr.contains("/ip4/0.0.0.0/") {
+                // 替换 0.0.0.0
+                newAddr = newAddr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(newIP)/")
+            } else {
+                // 如果地址中没有旧 IP 或 0.0.0.0，尝试查找并替换任何 IP
+                if let ipRange = newAddr.range(of: "/ip4/") {
+                    let afterIP = newAddr[ipRange.upperBound...]
+                    if let nextSlash = afterIP.firstIndex(of: "/") {
+                        let oldIPPart = String(newAddr[ipRange.lowerBound..<afterIP.index(after: nextSlash)])
+                        newAddr = newAddr.replacingOccurrences(of: oldIPPart, with: "/ip4/\(newIP)/")
+                    }
+                }
+            }
+            return newAddr
+        }
+        
+        lanDiscovery?.updateListenAddresses(newAddresses)
+        print("[P2PNode] ✅ 已更新监听和广播地址: \(newAddresses)")
+        
+        // 立即发送一次广播，通知其他设备 IP 地址已改变
+        lanDiscovery?.sendDiscoveryRequest()
+        print("[P2PNode] 📡 已发送广播通知 IP 地址变化")
+    }
 
     public func announce(service: String) async throws {
         guard let app = app else { return }
@@ -460,6 +658,9 @@ public class P2PNode {
     }
 
     public func stop() async throws {
+        // 停止网络路径监控
+        stopNetworkPathMonitoring()
+        
         lanDiscovery?.stop()
         try await app?.asyncShutdown()
     }
@@ -469,6 +670,12 @@ public class P2PNode {
     }
 
     public var listenAddresses: [String] {
-        app?.listenAddresses.map { $0.description } ?? []
+        guard let app = app else { return [] }
+        let localIP = getLocalIPAddress()
+        // 返回的地址中将 0.0.0.0 替换为真实 IP，确保外部访问时使用真实地址
+        return app.listenAddresses.map { addr in
+            let addrStr = addr.description
+            return addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+        }
     }
 }

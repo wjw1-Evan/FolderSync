@@ -27,6 +27,38 @@ struct FolderSyncApp: App {
                 exit(0)
             }
         }
+        
+        // 同步系统登录项状态到 UI
+        syncLaunchAtLoginStatus()
+    }
+    
+    /// 同步系统登录项状态到 UI
+    private func syncLaunchAtLoginStatus() {
+        let service = SMAppService.mainApp
+        let systemStatus = service.status
+        
+        // 根据系统状态更新 UI 状态
+        let shouldBeEnabled: Bool
+        switch systemStatus {
+        case .enabled:
+            shouldBeEnabled = true
+            print("[FolderSyncApp] ✅ 系统登录项状态：已启用")
+        case .notRegistered, .requiresApproval, .notFound:
+            shouldBeEnabled = false
+            if systemStatus == .requiresApproval {
+                print("[FolderSyncApp] ⚠️ 系统登录项状态：需要用户批准（请在系统设置中允许）")
+            } else {
+                print("[FolderSyncApp] ℹ️ 系统登录项状态：未注册")
+            }
+        @unknown default:
+            shouldBeEnabled = false
+            print("[FolderSyncApp] ⚠️ 系统登录项状态：未知状态")
+        }
+        
+        // 只在状态不同时更新，避免不必要的 UI 刷新
+        if launchAtLogin != shouldBeEnabled {
+            launchAtLogin = shouldBeEnabled
+        }
     }
     
     var body: some Scene {
@@ -67,6 +99,10 @@ struct FolderSyncApp: App {
                 .onChange(of: launchAtLogin) { oldValue, newValue in
                     toggleLaunchAtLogin(newValue)
                 }
+                .onAppear {
+                    // 每次菜单显示时同步系统状态
+                    syncLaunchAtLoginStatus()
+                }
             Button("退出") {
                 NSApplication.shared.terminate(nil)
             }
@@ -78,11 +114,23 @@ struct FolderSyncApp: App {
         do {
             if enabled {
                 try service.register()
+                print("[FolderSyncApp] ✅ 已注册开机自动启动")
             } else {
                 try service.unregister()
+                print("[FolderSyncApp] ✅ 已取消开机自动启动")
+            }
+            
+            // 操作后立即同步状态，确保 UI 与系统状态一致
+            // 延迟一小段时间，让系统状态更新完成
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.syncLaunchAtLoginStatus()
             }
         } catch {
-            print("Failed to set launch at login: \(error)")
+            print("[FolderSyncApp] ❌ 设置开机自动启动失败: \(error)")
+            print("[FolderSyncApp] 错误详情: \(error.localizedDescription)")
+            
+            // 如果操作失败，恢复 UI 状态到系统实际状态
+            syncLaunchAtLoginStatus()
         }
     }
 }

@@ -44,7 +44,7 @@ struct SyncHistoryView: View {
 private struct SyncLogRow: View {
     let log: SyncLog
     let folderName: String
-    @State private var isExpanded = false
+    @State private var isExpanded = true // 默认展开显示文件列表
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -77,9 +77,12 @@ private struct SyncLogRow: View {
                     Button {
                         isExpanded.toggle()
                     } label: {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            Text(isExpanded ? "收起" : "展开")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                 }
@@ -90,34 +93,72 @@ private struct SyncLogRow: View {
                     .foregroundStyle(.red)
             }
             
-            // 展开显示文件列表
+            // 展开显示文件列表（默认展开）
             if isExpanded, let files = log.syncedFiles, !files.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
+                        .padding(.vertical, 2)
                     ForEach(Array(files.enumerated()), id: \.offset) { index, file in
                         HStack(spacing: 8) {
                             Image(systemName: iconForOperation(file.operation))
                                 .foregroundStyle(colorForOperation(file.operation))
                                 .font(.caption)
+                                .frame(width: 16)
                             VStack(alignment: .leading, spacing: 2) {
+                                Text(file.fileName)
+                                    .font(.caption)
+                                    .lineLimit(1)
                                 if let folderName = file.folderName {
                                     Text(folderName)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
+                                } else if !file.path.isEmpty && file.path != file.fileName {
+                                    // 显示相对路径（如果与文件名不同）
+                                    Text(file.path)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
                                 }
-                                Text(file.fileName)
-                                    .font(.caption)
                             }
                             Spacer()
                             Text(byteCount(file.size))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 4)
+                        .background(Color.secondary.opacity(0.05))
+                        .cornerRadius(4)
                     }
                 }
                 .padding(.leading, 20)
                 .padding(.top, 4)
+            } else if let files = log.syncedFiles, !files.isEmpty {
+                // 未展开时显示前几个文件名
+                HStack(spacing: 4) {
+                    Text("文件: ")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(files.prefix(3).enumerated()), id: \.offset) { index, file in
+                        Text(file.fileName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        if index < min(2, files.count - 1) {
+                            Text("、")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if files.count > 3 {
+                        Text("等 \(files.count) 个文件")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.leading, 20)
+                .padding(.top, 2)
             }
         }
         .padding(.vertical, 4)

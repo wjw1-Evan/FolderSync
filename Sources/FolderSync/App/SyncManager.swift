@@ -30,6 +30,9 @@ public class SyncManager: ObservableObject {
     private var peerStatusCheckTask: Task<Void, Never>?
     private var peersSyncTask: Task<Void, Never>? // 定期同步 peers 数组的任务
     private var peerDiscoveryTask: Task<Void, Never>? // 对等点发现处理任务
+    // 同步完成后的冷却时间：记录每个 syncID 的最后同步完成时间，在冷却期内忽略文件变化检测
+    private var syncCooldown: [String: Date] = [:] // syncID -> 最后同步完成时间
+    private let syncCooldownDuration: TimeInterval = 5.0 // 同步完成后5秒内忽略文件变化检测
     
     // 文件监控防抖：syncID -> 防抖任务
     private var debounceTasks: [String: Task<Void, Never>] = [:]
@@ -541,6 +544,14 @@ public class SyncManager: ObservableObject {
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path in
             print("[SyncManager] 📝 文件变化: \(path)")
             
+            // 检查是否在同步冷却期内（刚完成同步，忽略文件变化）
+            if let lastSyncTime = self?.syncCooldown[folder.syncID],
+               Date().timeIntervalSince(lastSyncTime) < (self?.syncCooldownDuration ?? 5.0) {
+                let remainingTime = (self?.syncCooldownDuration ?? 5.0) - Date().timeIntervalSince(lastSyncTime)
+                print("[SyncManager] ⏸️ 同步冷却期内（剩余 \(String(format: "%.1f", remainingTime)) 秒），忽略文件变化: \(path)")
+                return
+            }
+            
             // 检查文件是否正在被写入（文件大小是否稳定）
             Task { [weak self] in
                 guard let self = self else { return }
@@ -797,7 +808,14 @@ public class SyncManager: ObservableObject {
                 
                 try data.write(to: fileURL)
                 if let vc = vectorClock {
-                    try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, vc)
+                    // 合并 Vector Clock：保留本地 VC 的历史信息，同时更新远程 VC
+                    var mergedVC = vc
+                    if let localVC = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) {
+                        mergedVC.merge(with: localVC)
+                    }
+                    try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, mergedVC)
+                    print("[SyncManager] ✅ [handleSyncRequest] 接收文件并合并 VC: \(relativePath)")
+                    print("[SyncManager]   - 合并后的 VC: \(mergedVC.versions)")
                 }
                 return .putAck(syncID: syncID, path: relativePath)
             }
@@ -806,10 +824,27 @@ public class SyncManager: ObservableObject {
         case .deleteFiles(let syncID, let paths):
             let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
             if let folder = folder {
+                let fileManager = FileManager.default
                 for rel in paths {
                     let fileURL = folder.localPath.appendingPathComponent(rel)
-                    try? FileManager.default.removeItem(at: fileURL)
-                    try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
+                    // 删除文件（如果存在）
+                    if fileManager.fileExists(atPath: fileURL.path) {
+                        do {
+                            try fileManager.removeItem(at: fileURL)
+                            print("[SyncManager] ✅ [handleSyncRequest] 删除文件: \(rel)")
+                        } catch {
+                            print("[SyncManager] ⚠️ [handleSyncRequest] 删除文件失败: \(rel) - \(error)")
+                            // 继续处理其他文件，不因单个文件失败而中断
+                        }
+                    }
+                    // 删除 Vector Clock
+                    do {
+                        try StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
+                        print("[SyncManager] ✅ [handleSyncRequest] 删除 Vector Clock: \(rel)")
+                    } catch {
+                        print("[SyncManager] ⚠️ [handleSyncRequest] 删除 Vector Clock 失败: \(rel) - \(error)")
+                        // 继续处理其他文件
+                    }
                 }
                 return .deleteAck(syncID: syncID)
             }
@@ -1203,31 +1238,67 @@ public class SyncManager: ObservableObject {
                 case conflict
             }
             func downloadAction(remote: FileMetadata, local: FileMetadata?) -> DownloadAction {
-                guard let loc = local else { return .overwrite }
-                if loc.hash == remote.hash { return .skip }
+                guard let loc = local else { 
+                    print("[SyncManager] 📥 [downloadAction] 本地文件不存在，需要下载: \(remote.hash.prefix(16))...")
+                    return .overwrite 
+                }
+                // 优先检查 hash，如果相同则跳过
+                if loc.hash == remote.hash { 
+                    print("[SyncManager] ⏭️ [downloadAction] 文件 hash 相同，跳过下载: \(loc.hash.prefix(16))...")
+                    return .skip 
+                }
+                // 使用 Vector Clock 比较
                 if let rvc = remote.vectorClock, let lvc = loc.vectorClock, !rvc.versions.isEmpty || !lvc.versions.isEmpty {
                     let cmp = lvc.compare(to: rvc)
                     switch cmp {
-                    case .antecedent: return .overwrite
-                    case .successor, .equal: return .skip
-                    case .concurrent: return .conflict
+                    case .antecedent: 
+                        print("[SyncManager] ✅ [downloadAction] 本地 VC 是 antecedent，需要覆盖下载")
+                        return .overwrite
+                    case .successor, .equal: 
+                        print("[SyncManager] ⏭️ [downloadAction] 本地 VC 是 successor/equal，跳过下载")
+                        return .skip
+                    case .concurrent: 
+                        print("[SyncManager] ⚠️ [downloadAction] VC 并发冲突，保存为冲突文件")
+                        return .conflict
                     }
                 }
-                return remote.mtime > loc.mtime ? .overwrite : .skip
+                // 没有 Vector Clock，使用修改时间判断
+                let shouldOverwrite = remote.mtime > loc.mtime
+                print("[SyncManager] 📅 [downloadAction] 无 VC，使用 mtime 判断: 远程=\(remote.mtime), 本地=\(loc.mtime), 结果=\(shouldOverwrite ? "覆盖" : "跳过")")
+                return shouldOverwrite ? .overwrite : .skip
             }
             
             func shouldUpload(local: FileMetadata, remote: FileMetadata?) -> Bool {
                 guard let rem = remote else { return true }
-                if local.hash == rem.hash { return false }
+                // 如果 hash 相同，说明文件内容相同，不需要上传
+                if local.hash == rem.hash {
+                    print("[SyncManager] ⏭️ [shouldUpload] 文件 hash 相同，跳过上传: \(local.hash.prefix(16))...")
+                    return false
+                }
+                // 使用 Vector Clock 比较
                 if let lvc = local.vectorClock, let rvc = rem.vectorClock, !lvc.versions.isEmpty || !rvc.versions.isEmpty {
                     let cmp = lvc.compare(to: rvc)
                     switch cmp {
-                    case .successor: return true
-                    case .antecedent, .equal: return false
-                    case .concurrent: return local.mtime > rem.mtime
+                    case .successor:
+                        print("[SyncManager] ✅ [shouldUpload] 本地 VC 是 successor，需要上传")
+                        return true
+                    case .antecedent, .equal:
+                        print("[SyncManager] ⏭️ [shouldUpload] 本地 VC 是 antecedent/equal，跳过上传")
+                        return false
+                    case .concurrent:
+                        // 并发冲突：两个版本都有修改，需要用户决定
+                        // 为了保持一致性，使用修改时间判断，但应该标记为冲突
+                        // 这里先使用 mtime 判断，后续可以改进为真正的冲突处理
+                        let shouldUpload = local.mtime > rem.mtime
+                        print("[SyncManager] ⚠️ [shouldUpload] VC 并发冲突，使用 mtime 判断: 本地=\(local.mtime), 远程=\(rem.mtime), 结果=\(shouldUpload)")
+                        print("[SyncManager]   ⚠️ 注意：这是并发修改，可能需要手动解决冲突")
+                        return shouldUpload
                     }
                 }
-                return local.mtime > rem.mtime
+                // 没有 Vector Clock，使用修改时间判断
+                let shouldUpload = local.mtime > rem.mtime
+                print("[SyncManager] 📅 [shouldUpload] 无 VC，使用 mtime 判断: 本地=\(local.mtime), 远程=\(rem.mtime), 结果=\(shouldUpload)")
+                return shouldUpload
             }
             
             var deletedSet = deletedPaths[folder.syncID] ?? []
@@ -1260,10 +1331,14 @@ public class SyncManager: ObservableObject {
                 for (path, localMeta) in localMetadata {
                     if shouldUpload(local: localMeta, remote: remoteEntries[path]) {
                         filesToUpload.append((path, localMeta))
+                        print("[SyncManager] 📋 [performSync] 需要上传: \(path)")
+                    } else {
+                        print("[SyncManager] ⏭️ [performSync] 跳过上传: \(path)")
                     }
                 }
             }
             totalOps += filesToUpload.count
+            print("[SyncManager] 📊 [performSync] 需要上传的文件数: \(filesToUpload.count)")
             
             let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
             if !toDelete.isEmpty {
@@ -1376,8 +1451,14 @@ public class SyncManager: ObservableObject {
                         print("[SyncManager] ❌ 无法写入文件: \(localURL.path) - \(error.localizedDescription)")
                         throw error
                     }
-                    let vc = remoteMeta.vectorClock ?? VectorClock()
+                    // 合并 Vector Clock：保留本地 VC 的历史信息，同时更新远程 VC
+                    var vc = remoteMeta.vectorClock ?? VectorClock()
+                    if let localVC = localMetadata[path]?.vectorClock {
+                        vc.merge(with: localVC)
+                    }
                     try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+                    print("[SyncManager] ✅ [performSync] 下载文件并合并 VC: \(path)")
+                    print("[SyncManager]   - 合并后的 VC: \(vc.versions)")
                     totalDownloadBytes += Int64(data.count)
                     await MainActor.run { self.addDownloadBytes(Int64(data.count)) }
                     
@@ -1473,16 +1554,31 @@ public class SyncManager: ObservableObject {
             // 6. Upload files to remote
             for (path, localMeta) in filesToUpload {
                 let fileName = (path as NSString).lastPathComponent
+                print("[SyncManager] 📤 [performSync] 准备上传文件: \(fileName)")
+                print("[SyncManager]   - 本地 hash: \(localMeta.hash.prefix(16))...")
+                print("[SyncManager]   - 本地 mtime: \(localMeta.mtime)")
+                if let remoteMeta = remoteEntries[path] {
+                    print("[SyncManager]   - 远程 hash: \(remoteMeta.hash.prefix(16))...")
+                    print("[SyncManager]   - 远程 mtime: \(remoteMeta.mtime)")
+                    if let lvc = localMeta.vectorClock, let rvc = remoteMeta.vectorClock {
+                        print("[SyncManager]   - 本地 VC: \(lvc.versions)")
+                        print("[SyncManager]   - 远程 VC: \(rvc.versions)")
+                        let cmp = lvc.compare(to: rvc)
+                        print("[SyncManager]   - VC 比较结果: \(cmp)")
+                    }
+                } else {
+                    print("[SyncManager]   - 远程不存在此文件")
+                }
+                
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "正在上传: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
-                var vc = localMeta.vectorClock ?? VectorClock()
-                vc.increment(for: myPeerID)
-                try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+                
+                // 在上传之前，先重新读取文件，确保使用最新的文件内容
                 let fileURL = folder.localPath.appendingPathComponent(path)
+                let fileManager = FileManager.default
                 
                 // 检查文件是否存在和可读
-                let fileManager = FileManager.default
                 guard fileManager.fileExists(atPath: fileURL.path) else {
                     print("[SyncManager] ⚠️ 文件不存在（跳过上传）: \(fileURL.path)")
                     completedOps += 1
@@ -1495,7 +1591,37 @@ public class SyncManager: ObservableObject {
                     continue
                 }
                 
-                let data = try Data(contentsOf: fileURL)
+                // 重新读取文件内容和 hash，确保使用最新数据
+                let currentData: Data
+                let currentHash: String
+                do {
+                    currentData = try Data(contentsOf: fileURL)
+                    currentHash = SHA256.hash(data: currentData).compactMap { String(format: "%02x", $0) }.joined()
+                    
+                    // 如果文件 hash 已经变化（可能在上传过程中被修改），跳过上传
+                    if currentHash != localMeta.hash {
+                        print("[SyncManager] ⚠️ 文件在上传过程中被修改，跳过上传: \(fileName)")
+                        print("[SyncManager]   - 原始 hash: \(localMeta.hash.prefix(16))...")
+                        print("[SyncManager]   - 当前 hash: \(currentHash.prefix(16))...")
+                        completedOps += 1
+                        continue
+                    }
+                } catch {
+                    print("[SyncManager] ❌ 无法读取文件（跳过上传）: \(fileURL.path) - \(error)")
+                    completedOps += 1
+                    continue
+                }
+                
+                // 更新 Vector Clock（在上传之前）
+                var vc = localMeta.vectorClock ?? VectorClock()
+                vc.increment(for: myPeerID)
+                try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+                print("[SyncManager]   - 更新后的 VC: \(vc.versions)")
+                
+                // 使用重新读取的数据
+                let data = currentData
+                print("[SyncManager] 📤 [performSync] 开始上传文件: \(fileName) (大小: \(data.count) 字节)")
+                
                 // 文件上传可能需要更长时间，使用 180 秒超时
                 let putRes: SyncResponse = try await sendSyncRequest(
                     .putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc),
@@ -1505,9 +1631,11 @@ public class SyncManager: ObservableObject {
                     maxRetries: 3,
                     folder: folder
                 )
-                if case .error = putRes {
-                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Upload failed for \(path)"])
+                if case .error(let errorMsg) = putRes {
+                    print("[SyncManager] ❌ [performSync] 上传失败: \(fileName) - \(errorMsg)")
+                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Upload failed for \(path): \(errorMsg)"])
                 }
+                print("[SyncManager] ✅ [performSync] 上传成功: \(fileName)")
                 totalUploadBytes += Int64(data.count)
                 await MainActor.run { self.addUploadBytes(Int64(data.count)) }
                 completedOps += 1
@@ -1546,6 +1674,9 @@ public class SyncManager: ObservableObject {
                 // 同步成功，更新对等点在线状态
                 self.peerManager.updateOnlineStatus(peerID, isOnline: true)
                 self.updateDeviceCounts()
+                // 设置同步冷却时间，防止立即触发新的同步
+                self.syncCooldown[folder.syncID] = Date()
+                print("[SyncManager] ⏸️ 设置同步冷却期: \(folder.syncID) (\(self.syncCooldownDuration)秒)")
             }
             let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
             let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date(), syncedFiles: syncedFiles.isEmpty ? nil : syncedFiles)

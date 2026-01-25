@@ -1,6 +1,4 @@
 import Foundation
-import LibP2P
-import NIOCore
 
 /// 持久化的 Peer 信息（用于序列化）
 struct PersistentPeerInfo: Codable {

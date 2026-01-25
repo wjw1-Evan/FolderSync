@@ -1,15 +1,17 @@
 import Darwin
 import Foundation
-import LibP2P
-import LibP2PKadDHT
-import NIOCore
 import Network
 
 public class P2PNode {
-    public var app: Application?
     private var lanDiscovery: LANDiscovery?
     @MainActor public let peerManager: PeerManager // 统一的 Peer 管理器
     @MainActor public let registrationService: PeerRegistrationService // Peer 注册服务
+    
+    // 原生网络服务（替代 libp2p）
+    public let nativeNetwork: NativeNetworkService
+    
+    // 本机 PeerID（持久化存储）
+    private var myPeerID: PeerID?
     
     public var onPeerDiscovered: ((PeerID) -> Void)? // Peer 发现回调
     
@@ -22,6 +24,9 @@ public class P2PNode {
         // PeerManager 和 PeerRegistrationService 需要在 MainActor 上初始化
         self.peerManager = MainActor.assumeIsolated { PeerManager() }
         self.registrationService = MainActor.assumeIsolated { PeerRegistrationService() }
+        
+        // 初始化原生网络服务
+        self.nativeNetwork = NativeNetworkService()
         
         // 将 registrationService 关联到 peerManager
         Task { @MainActor in
@@ -36,14 +41,9 @@ public class P2PNode {
         }
     }
     
-    /// 从持久化存储预注册 peer 到 libp2p peer store
+    /// 从持久化存储预注册 peer（原生实现，无需 libp2p）
     @MainActor
     private func preRegisterPersistedPeers() async {
-        guard registrationService.isReady else {
-            print("[P2PNode] ⚠️ 无法预注册 peer：registrationService 未就绪")
-            return
-        }
-        
         let peersToRegister = peerManager.getPeersForPreRegistration()
         
         guard !peersToRegister.isEmpty else {
@@ -51,7 +51,7 @@ public class P2PNode {
             return
         }
         
-        print("[P2PNode] 🔄 开始预注册 \(peersToRegister.count) 个持久化的 peer 到 libp2p peer store...")
+        print("[P2PNode] 🔄 开始预注册 \(peersToRegister.count) 个持久化的 peer...")
         
         registrationService.registerPeers(peersToRegister)
         
@@ -63,6 +63,12 @@ public class P2PNode {
     func retryPeerRegistration(peer: PeerID) async {
         let peerIDString = peer.b58String
         print("[P2PNode] 🔄 [retryPeerRegistration] 开始重试注册: \(peerIDString.prefix(12))...")
+        
+        // 检查是否已经注册
+        if registrationService.isRegistered(peerIDString) {
+            print("[P2PNode] ✅ [retryPeerRegistration] Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
+            return
+        }
         
         let addresses = peerManager.getAddresses(for: peerIDString)
         
@@ -76,11 +82,13 @@ public class P2PNode {
         guard !addresses.isEmpty else {
             print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))...")
             print("[P2PNode] 💡 [retryPeerRegistration] 提示: 对等点可能还未被发现或地址信息丢失")
+            print("[P2PNode] 💡 [retryPeerRegistration] 建议: 等待 LAN Discovery 重新发现该对等点")
             return
         }
         
         guard registrationService.isReady else {
             print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: registrationService 未就绪: \(peerIDString.prefix(12))...")
+            print("[P2PNode] 💡 [retryPeerRegistration] 提示: 等待 P2P 节点完全启动")
             return
         }
         
@@ -90,6 +98,9 @@ public class P2PNode {
             print("[P2PNode] ✅ [retryPeerRegistration] 重试注册成功: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
         } else {
             print("[P2PNode] ⚠️ [retryPeerRegistration] 重试注册失败（可能正在注册中）: \(peerIDString.prefix(12))...")
+            // 检查注册状态
+            let state = registrationService.getRegistrationState(peerIDString)
+            print("[P2PNode] 📊 [retryPeerRegistration] 当前注册状态: \(state)")
         }
     }
     
@@ -164,12 +175,23 @@ public class P2PNode {
                 
                 // 通知 SyncManager
                 self.onPeerDiscovered?(peerIDObj)
+            } else {
+                // 注册失败，检查原因
+                let state = registrationService.getRegistrationState(peerID)
+                print("[P2PNode] ⚠️ Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
+                
+                // 即使注册失败，也更新设备状态并通知（让后续重试机制处理）
+                peerManager.updateDeviceStatus(peerID, status: .online)
+                self.onPeerDiscovered?(peerIDObj)
             }
         } else {
             print("[P2PNode] ⏭️ Peer 已注册且地址未变化，跳过: \(peerID.prefix(12))...")
             
             // 更新设备状态为在线
             peerManager.updateDeviceStatus(peerID, status: .online)
+            
+            // 即使已注册，也通知 SyncManager（可能状态有变化）
+            self.onPeerDiscovered?(peerIDObj)
         }
     }
     
@@ -198,181 +220,47 @@ public class P2PNode {
         let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
         try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
         
+        // 加载或生成 PeerID
+        let peerIDFile = folderSyncDir.appendingPathComponent("peerid.txt")
         let password = KeychainManager.loadOrCreatePassword()
-        let keyPairFile: KeyPairFile = .persistent(
-            type: .Ed25519,
-            encryptedWith: .password(password),
-            storedAt: .filePath(folderSyncDir)
-        )
         
-        // 尝试创建 Application，如果失败（通常是密钥文件解密失败），删除旧文件并重试
-        var app: Application
-        do {
-            app = try await Application.make(.development, peerID: keyPairFile)
-        } catch {
-            print("[P2PNode] ⚠️ 警告: 无法加载现有密钥对文件: \(error.localizedDescription)")
-            print("[P2PNode] 这通常是因为密钥文件损坏或密码不匹配")
-            print("[P2PNode] 尝试删除旧的密钥文件并重新生成...")
-            
-            // 只删除密钥相关文件，保留文件夹配置和其他数据
-            let fileManager = FileManager.default
-            
-            // 需要保护的重要文件和目录（文件夹配置、冲突、日志、向量时钟等）
-            let protectedItems: Set<String> = [
-                "folders.json",
-                "conflicts.json",
-                "sync_logs.json",
-                "peerid_password.txt",
-                "vector_clocks"
-            ]
-            
-            // 备份重要文件（不包括目录，因为目录会被保护不会被删除）
-            var fileBackups: [String: Data] = [:]
-            
-            if fileManager.fileExists(atPath: folderSyncDir.path) {
-                if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
-                    for item in items {
-                        let itemName = item.lastPathComponent
-                        
-                        // 只备份保护的文件（不包括目录，因为目录会被保护不会被删除）
-                        if protectedItems.contains(itemName) {
-                            var isDirectory: ObjCBool = false
-                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
-                                if !isDirectory.boolValue {
-                                    // 备份文件
-                                    if let data = try? Data(contentsOf: item) {
-                                        fileBackups[itemName] = data
-                                        print("[P2PNode] 📦 已备份文件: \(itemName)")
-                                    }
-                                } else {
-                                    // 目录会被保护，不会被删除，所以不需要备份
-                                    print("[P2PNode] ℹ️ 目录 \(itemName) 受保护，无需备份")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 删除密钥相关文件（排除重要文件）
-            // LibP2P 的密钥文件通常不是 JSON 格式，可能是二进制文件或其他格式
-            if fileManager.fileExists(atPath: folderSyncDir.path) {
-                if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
-                    for item in items {
-                        let itemName = item.lastPathComponent
-                        
-                        // 跳过保护的文件和目录
-                        if protectedItems.contains(itemName) {
-                            continue
-                        }
-                        
-                        // 检查是否是目录
-                        var isDirectory: ObjCBool = false
-                        if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
-                            if isDirectory.boolValue {
-                                // 跳过所有目录（受保护的目录已在上面被跳过）
-                                continue
-                            }
-                        }
-                        
-                        // 删除非保护的文件（可能是密钥文件）
-                        // 密钥文件通常不是 JSON 格式
-                        if !itemName.hasSuffix(".json") {
-                            do {
-                                try fileManager.removeItem(at: item)
-                                print("[P2PNode] 🗑️ 已删除可能的密钥文件: \(itemName)")
-                            } catch {
-                                print("[P2PNode] ⚠️ 删除密钥文件时出错: \(error.localizedDescription)")
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 确保目录存在
-            try? fileManager.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
-            
-            // 恢复备份的文件
-            for (fileName, data) in fileBackups {
-                let fileURL = folderSyncDir.appendingPathComponent(fileName)
-                try? data.write(to: fileURL, options: [.atomic])
-                print("[P2PNode] ✅ 已恢复文件: \(fileName)")
-            }
-            
-            // 注意：vector_clocks 目录在 protectedItems 中，不会被删除，因此不需要恢复逻辑
-            
-            // 重新生成密码（确保使用新密码）
-            let newPassword = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32).description
-            _ = KeychainManager.savePassword(newPassword)
-            print("[P2PNode] 已生成新密码并保存到文件")
-            
-            // 使用新密码创建新的密钥文件
-            let newKeyPairFile: KeyPairFile = .persistent(
-                type: .Ed25519,
-                encryptedWith: .password(newPassword),
-                storedAt: .filePath(folderSyncDir)
-            )
-            
-            // 重试创建 Application
-            do {
-                app = try await Application.make(.development, peerID: newKeyPairFile)
-                print("[P2PNode] ✅ 成功创建新的密钥对文件")
-            } catch {
-                print("[P2PNode] ❌ 错误: 即使删除旧文件后仍无法创建新的密钥对: \(error.localizedDescription)")
-                throw error
-            }
+        var peerID: PeerID
+        if let savedPeerID = PeerID.load(from: peerIDFile, password: password) {
+            peerID = savedPeerID
+            print("[P2PNode] ✅ 已加载现有 PeerID: \(peerID.b58String.prefix(12))...")
+        } else {
+            // 生成新的 PeerID
+            peerID = PeerID.generate()
+            try? peerID.save(to: peerIDFile, password: password)
+            print("[P2PNode] ✅ 已生成新 PeerID: \(peerID.b58String.prefix(12))...")
         }
         
-        self.app = app
+        self.myPeerID = peerID
 
         // 获取本机真实 IP 地址用于监听
         let localIP = getLocalIPAddress()
         lastKnownIP = localIP
         print("[P2PNode] 📍 检测到本机 IP 地址: \(localIP)")
         
-        // 使用真实 IP 地址监听，而不是 0.0.0.0
-        // 使用 port 0 让系统自动分配可用端口
-        app.listen(.tcp(host: localIP, port: 0))
-        print("[P2PNode] 🔌 正在监听: \(localIP):0 (端口将由系统分配)")
+        // 启动原生 TCP 服务器
+        do {
+            let nativePort = try nativeNetwork.startServer(port: 0)
+            print("[P2PNode] ✅ 原生 TCP 服务器已启动，端口: \(nativePort)")
+        } catch {
+            print("[P2PNode] ⚠️ 原生 TCP 服务器启动失败: \(error)")
+            throw error
+        }
 
         // 启用 LAN discovery（UDP 广播）
-        setupLANDiscovery(peerID: app.peerID.b58String, listenAddresses: [])
+        setupLANDiscovery(peerID: peerID.b58String, listenAddresses: [])
         
         // 启动网络路径监控，监听 IP 地址变化
         startNetworkPathMonitoring()
-        
-        // 注册 libp2p 的 peer 发现回调
-        let discoveryHandler: (LibP2P.PeerInfo) -> Void = { [weak self] (peerInfo: LibP2P.PeerInfo) in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                // 添加到 PeerManager
-                self.peerManager.addOrUpdatePeer(peerInfo.peer, addresses: peerInfo.addresses)
-                // 更新设备状态为在线
-                self.peerManager.updateDeviceStatus(peerInfo.peer.b58String, status: .online)
-                // 通知 SyncManager
-                self.onPeerDiscovered?(peerInfo.peer)
-            }
-        }
-        
-        app.discovery.onPeerDiscovered(self, closure: discoveryHandler)
-        
-        // 设置 registrationService 的 discovery handler
-        await MainActor.run {
-            registrationService.setDiscoveryHandler(discoveryHandler)
-        }
-
-        // 启动应用
-        do {
-            try await app.startup()
-        } catch {
-            print("[P2PNode] ❌ 启动失败: \(error)")
-            throw error
-        }
 
         // 等待节点初始化完成
         try? await Task.sleep(nanoseconds: 500_000_000)
         
-        // 从持久化存储预注册 peer 到 libp2p peer store
+        // 从持久化存储预注册 peer
         await MainActor.run {
             Task {
                 await self.preRegisterPersistedPeers()
@@ -380,13 +268,15 @@ public class P2PNode {
         }
 
         // 更新 LAN discovery 的监听地址
-        // 将 0.0.0.0 替换为真实 IP 地址，确保广播的地址可以被其他设备连接
-        // 重用之前获取的 localIP
-        let addresses = app.listenAddresses.map { addr in
-            let addrStr = addr.description
-            // 将 /ip4/0.0.0.0/ 替换为真实 IP
-            return addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+        var addresses: [String] = []
+        
+        // 添加原生 TCP 服务器的地址
+        if let nativePort = nativeNetwork.serverPort {
+            let nativeAddress = "/ip4/\(localIP)/tcp/\(nativePort)"
+            addresses.append(nativeAddress)
+            print("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
         }
+        
         lanDiscovery?.updateListenAddresses(addresses)
         
         // 地址更新后立即发送广播
@@ -399,22 +289,13 @@ public class P2PNode {
 
         // 输出启动状态
         print("\n[P2PNode] ========== P2P 节点启动状态 ==========")
-        print("[P2PNode] PeerID: \(app.peerID.b58String)")
-        print("[P2PNode] 监听地址数量: \(app.listenAddresses.count)")
+        print("[P2PNode] PeerID: \(peerID.b58String)")
         
-        if app.listenAddresses.isEmpty {
-            print("[P2PNode] ⚠️ 警告: 未检测到监听地址")
-        } else {
-            // 获取本机真实 IP 地址
-            let localIP = getLocalIPAddress()
-            
-            for (index, addr) in app.listenAddresses.enumerated() {
-                // 将 0.0.0.0 替换为真实 IP 地址以便显示
-                let addrStr = addr.description
-                let displayAddr = addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
-                print("[P2PNode]   [\(index + 1)] \(displayAddr)")
-            }
+        if let nativePort = nativeNetwork.serverPort {
+            print("[P2PNode] 监听地址: /ip4/\(localIP)/tcp/\(nativePort)")
             print("[P2PNode] ✅ Ready for connections")
+        } else {
+            print("[P2PNode] ⚠️ 警告: 未检测到监听地址")
         }
         
         if lanDiscovery != nil {
@@ -525,81 +406,41 @@ public class P2PNode {
     
     /// 当 IP 地址改变时，更新监听地址和广播地址
     private func updateListenAddressForIPChange(newIP: String, oldIP: String) async {
-        guard let app = app else { return }
-        
         print("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
         
-        // 获取当前的监听地址（包含端口信息）
-        let currentAddresses = app.listenAddresses
-        guard !currentAddresses.isEmpty else {
+        // 获取当前原生 TCP 服务器的端口
+        guard let currentPort = nativeNetwork.serverPort else {
             print("[P2PNode] ⚠️ 当前没有监听地址，无法更新")
             return
         }
         
-        // 提取端口号（从第一个地址中）
-        var port: UInt16 = 0
-        for addr in currentAddresses {
-            let addrStr = addr.description
-            // 解析 multiaddr 格式，例如 /ip4/192.168.1.100/tcp/51027
-            if let tcpRange = addrStr.range(of: "/tcp/") {
-                let portStr = String(addrStr[tcpRange.upperBound...])
-                if let portNum = UInt16(portStr) {
-                    port = portNum
-                    break
-                }
+        // 停止旧服务器
+        nativeNetwork.stopServer()
+        
+        // 使用新 IP 重新启动服务器（保持相同端口）
+        do {
+            let newPort = try nativeNetwork.startServer(port: currentPort)
+            print("[P2PNode] 🔌 使用新 IP 和端口重新监听: \(newIP):\(newPort)")
+        } catch {
+            print("[P2PNode] ⚠️ 重新启动服务器失败: \(error)")
+            // 尝试使用自动分配的端口
+            do {
+                let newPort = try nativeNetwork.startServer(port: 0)
+                print("[P2PNode] 🔌 使用新 IP 和自动分配端口重新监听: \(newIP):\(newPort)")
+            } catch {
+                print("[P2PNode] ❌ 无法重新启动服务器: \(error)")
+                return
             }
         }
         
-        if port == 0 {
-            print("[P2PNode] ⚠️ 无法从当前地址提取端口号，尝试使用新 IP 重新监听")
-            // 如果无法提取端口，使用新 IP 重新监听（系统会分配新端口）
-            app.listen(.tcp(host: newIP, port: 0))
-            print("[P2PNode] 🔌 已使用新 IP 重新监听: \(newIP):0")
-            
-            // 等待系统分配端口
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        } else {
-            // 使用相同的端口，但使用新的 IP 地址重新监听
-            print("[P2PNode] 🔌 使用新 IP 和相同端口重新监听: \(newIP):\(port)")
-            app.listen(.tcp(host: newIP, port: Int(port)))
-            
-            // 等待监听启动
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
+        // 等待服务器启动
+        try? await Task.sleep(nanoseconds: 500_000_000)
         
-        // 获取更新后的监听地址
-        let updatedAddresses = app.listenAddresses.map { $0.description }
-        
-        // 更新 LAN Discovery 的广播地址，确保使用新 IP
-        let newAddresses = updatedAddresses.map { addr in
-            let addrStr = addr
-            // 将旧 IP 或 0.0.0.0 替换为新 IP
-            var newAddr = addrStr
-            // 替换 /ip4/0.0.0.0/ 或 /ip4/旧IP/
-            if newAddr.contains("/ip4/\(oldIP)/") {
-                // 替换旧 IP
-                newAddr = newAddr.replacingOccurrences(of: "/ip4/\(oldIP)/", with: "/ip4/\(newIP)/")
-            } else if newAddr.contains("/ip4/0.0.0.0/") {
-                // 替换 0.0.0.0
-                newAddr = newAddr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(newIP)/")
-            } else {
-                // 如果地址中没有旧 IP 或 0.0.0.0，尝试查找并替换任何 IP
-                // 使用简单的字符串查找和替换
-                if let ipRange = newAddr.range(of: "/ip4/") {
-                    let afterIPStart = ipRange.upperBound
-                    // 在原始字符串的剩余部分中查找下一个斜杠
-                    // 使用 range(of:) 在子字符串中查找，然后转换为原始字符串的索引
-                    let remainingString = String(newAddr[afterIPStart...])
-                    if let slashIndex = remainingString.firstIndex(of: "/") {
-                        // 计算在原始字符串中的位置
-                        let slashOffset = remainingString.distance(from: remainingString.startIndex, to: slashIndex)
-                        let nextSlashInOriginal = newAddr.index(afterIPStart, offsetBy: slashOffset)
-                        let oldIPPart = String(newAddr[ipRange.lowerBound..<newAddr.index(after: nextSlashInOriginal)])
-                        newAddr = newAddr.replacingOccurrences(of: oldIPPart, with: "/ip4/\(newIP)/")
-                    }
-                }
-            }
-            return newAddr
+        // 更新 LAN Discovery 的广播地址
+        var newAddresses: [String] = []
+        if let nativePort = nativeNetwork.serverPort {
+            let nativeAddress = "/ip4/\(newIP)/tcp/\(nativePort)"
+            newAddresses.append(nativeAddress)
         }
         
         lanDiscovery?.updateListenAddresses(newAddresses)
@@ -611,10 +452,9 @@ public class P2PNode {
     }
 
     public func announce(service: String) async throws {
-        guard let app = app else { return }
-        // Announce a service (like a sync group ID) on the network
-        _ = try await app.discovery.announce(.service(service)).get()
-        print("Announced service: \(service)")
+        // 原生实现：通过 LAN Discovery 广播服务
+        print("[P2PNode] 📡 广播服务: \(service)")
+        lanDiscovery?.sendDiscoveryRequest()
     }
 
     public func stop() async throws {
@@ -622,27 +462,23 @@ public class P2PNode {
         stopNetworkPathMonitoring()
         
         // 保存所有 peer 到持久化存储
-        await MainActor.run {
-            Task {
-                await peerManager.saveAllPeers()
-            }
-        }
+        await peerManager.saveAllPeers()
+        
+        // 停止原生 TCP 服务器
+        nativeNetwork.stopServer()
         
         lanDiscovery?.stop()
-        try await app?.asyncShutdown()
     }
 
     public var peerID: String? {
-        app?.peerID.b58String
+        return myPeerID?.b58String
     }
 
     public var listenAddresses: [String] {
-        guard let app = app else { return [] }
-        let localIP = getLocalIPAddress()
-        // 返回的地址中将 0.0.0.0 替换为真实 IP，确保外部访问时使用真实地址
-        return app.listenAddresses.map { addr in
-            let addrStr = addr.description
-            return addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+        guard let nativePort = nativeNetwork.serverPort else {
+            return []
         }
+        let localIP = getLocalIPAddress()
+        return ["/ip4/\(localIP)/tcp/\(nativePort)"]
     }
 }

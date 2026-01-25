@@ -43,13 +43,13 @@ struct FolderSyncApp: App {
         case .enabled:
             shouldBeEnabled = true
             print("[FolderSyncApp] ✅ 系统登录项状态：已启用")
-        case .notRegistered, .requiresApproval, .notFound:
+        case .requiresApproval:
+            // requiresApproval 表示已注册但需要用户批准，应该显示为启用状态
+            shouldBeEnabled = true
+            print("[FolderSyncApp] ⚠️ 系统登录项状态：已注册，需要用户批准（请在系统设置中允许）")
+        case .notRegistered, .notFound:
             shouldBeEnabled = false
-            if systemStatus == .requiresApproval {
-                print("[FolderSyncApp] ⚠️ 系统登录项状态：需要用户批准（请在系统设置中允许）")
-            } else {
-                print("[FolderSyncApp] ℹ️ 系统登录项状态：未注册")
-            }
+            print("[FolderSyncApp] ℹ️ 系统登录项状态：未注册")
         @unknown default:
             shouldBeEnabled = false
             print("[FolderSyncApp] ⚠️ 系统登录项状态：未知状态")

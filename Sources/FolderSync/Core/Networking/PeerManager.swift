@@ -1,6 +1,4 @@
 import Foundation
-import LibP2P
-import NIOCore
 
 /// Peer 信息模型
 public struct PeerInfo {

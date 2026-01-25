@@ -1,8 +1,6 @@
 import SwiftUI
 import Combine
 import Crypto
-import LibP2P
-import LibP2PCore
 
 @MainActor
 public class SyncManager: ObservableObject {
@@ -183,7 +181,6 @@ public class SyncManager: ObservableObject {
     
     /// 检查所有对等点的在线状态
     private func checkAllPeersOnlineStatus() async {
-        guard p2pNode.app != nil else { return }
         
         let peersToCheck = peerManager.allPeers
         guard !peersToCheck.isEmpty else {
@@ -226,8 +223,6 @@ public class SyncManager: ObservableObject {
     
     /// 检查单个对等点是否在线
     private func checkPeerOnline(peer: PeerID) async -> Bool {
-        guard let app = p2pNode.app else { return false }
-        
         let peerIDString = peer.b58String
         let isRegistered = peerManager.isRegistered(peerIDString)
         
@@ -247,11 +242,13 @@ public class SyncManager: ObservableObject {
         // 尝试发送轻量级请求验证设备是否在线
         do {
             let randomSyncID = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).description
-            let _: SyncResponse = try await app.requestSync(
+            let _: SyncResponse = try await sendSyncRequest(
                 .getMST(syncID: randomSyncID),
                 to: peer,
+                peerID: peer.b58String,
                 timeout: 5.0,
-                maxRetries: 1
+                maxRetries: 1,
+                folder: nil
             )
             return true
         } catch {
@@ -539,89 +536,75 @@ public class SyncManager: ObservableObject {
     }
     
     private func setupP2PHandlers() {
-        guard let app = p2pNode.app else { return }
-        
-        app.on("folder-sync/1.0.0") { [weak self] req -> SyncResponse in
-            guard let self = self else { return .error("Manager deallocated") }
-            do {
-                let syncReq = try req.decode(SyncRequest.self)
-                switch syncReq {
-                case .getMST(let syncID):
-                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
-                    if let folder = folder {
-                        let (mst, _, _) = await self.calculateFullState(for: folder)
-                        return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
-                    }
-                    return .error("Folder not found")
-                    
-                case .getFiles(let syncID):
-                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
-                    if let folder = folder {
-                        let (_, metadata, _) = await self.calculateFullState(for: folder)
-                        return .files(syncID: syncID, entries: metadata)
-                    }
-                    return .error("Folder not found")
-                    
-                case .getFileData(let syncID, let relativePath):
-                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
-                    if let folder = folder {
-                        let fileURL = folder.localPath.appendingPathComponent(relativePath)
-                        let data = try Data(contentsOf: fileURL)
-                        return .fileData(syncID: syncID, path: relativePath, data: data)
-                    }
-                    return .error("Folder not found")
-                    
-                case .putFileData(let syncID, let relativePath, let data, let vectorClock):
-                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
-                    if let folder = folder {
-                        let fileURL = folder.localPath.appendingPathComponent(relativePath)
-                        let parentDir = fileURL.deletingLastPathComponent()
-                        let fileManager = FileManager.default
-                        
-                        // 检查并创建父目录
-                        if !fileManager.fileExists(atPath: parentDir.path) {
-                            do {
-                                try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-                            } catch {
-                                print("[SyncManager] ❌ 无法创建目录: \(parentDir.path) - \(error.localizedDescription)")
-                                return .error("无法创建目录: \(error.localizedDescription)")
-                            }
-                        }
-                        
-                        // 检查写入权限
-                        guard fileManager.isWritableFile(atPath: parentDir.path) else {
-                            print("[SyncManager] ❌ 没有写入权限: \(parentDir.path)")
-                            return .error("没有写入权限: \(parentDir.path)")
-                        }
-                        
-                        do {
-                            try data.write(to: fileURL)
-                        } catch {
-                            print("[SyncManager] ❌ 无法写入文件: \(fileURL.path) - \(error.localizedDescription)")
-                            return .error("无法写入文件: \(error.localizedDescription)")
-                        }
-                        if let vc = vectorClock {
-                            try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, vc)
-                        }
-                        return .putAck(syncID: syncID, path: relativePath)
-                    }
-                    return .error("Folder not found")
-                    
-                case .deleteFiles(let syncID, let paths):
-                    let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
-                    if let folder = folder {
-                        for rel in paths {
-                            let fileURL = folder.localPath.appendingPathComponent(rel)
-                            try? FileManager.default.removeItem(at: fileURL)
-                            try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
-                        }
-                        return .deleteAck(syncID: syncID)
-                    }
-                    return .error("Folder not found")
-                }
-            } catch {
-                return .error(error.localizedDescription)
+        // 设置原生网络服务的消息处理器
+        p2pNode.nativeNetwork.messageHandler = { [weak self] request in
+            guard let self = self else { return SyncResponse.error("Manager deallocated") }
+            return try await self.handleSyncRequest(request)
+        }
+    }
+    
+    /// 处理同步请求（统一处理函数）
+    private func handleSyncRequest(_ syncReq: SyncRequest) async throws -> SyncResponse {
+        switch syncReq {
+        case .getMST(let syncID):
+            let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+            if let folder = folder {
+                let (mst, _, _) = await self.calculateFullState(for: folder)
+                return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
             }
+            return .error("Folder not found")
+            
+        case .getFiles(let syncID):
+            let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+            if let folder = folder {
+                let (_, metadata, _) = await self.calculateFullState(for: folder)
+                return .files(syncID: syncID, entries: metadata)
+            }
+            return .error("Folder not found")
+            
+        case .getFileData(let syncID, let relativePath):
+            let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+            if let folder = folder {
+                let fileURL = folder.localPath.appendingPathComponent(relativePath)
+                let data = try Data(contentsOf: fileURL)
+                return .fileData(syncID: syncID, path: relativePath, data: data)
+            }
+            return .error("Folder not found")
+            
+        case .putFileData(let syncID, let relativePath, let data, let vectorClock):
+            let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+            if let folder = folder {
+                let fileURL = folder.localPath.appendingPathComponent(relativePath)
+                let parentDir = fileURL.deletingLastPathComponent()
+                let fileManager = FileManager.default
+                
+                if !fileManager.fileExists(atPath: parentDir.path) {
+                    try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                }
+                
+                guard fileManager.isWritableFile(atPath: parentDir.path) else {
+                    return .error("没有写入权限: \(parentDir.path)")
+                }
+                
+                try data.write(to: fileURL)
+                if let vc = vectorClock {
+                    try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, vc)
+                }
+                return .putAck(syncID: syncID, path: relativePath)
+            }
+            return .error("Folder not found")
+            
+        case .deleteFiles(let syncID, let paths):
+            let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
+            if let folder = folder {
+                for rel in paths {
+                    let fileURL = folder.localPath.appendingPathComponent(rel)
+                    try? FileManager.default.removeItem(at: fileURL)
+                    try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
+                }
+                return .deleteAck(syncID: syncID)
+            }
+            return .error("Folder not found")
         }
     }
     
@@ -633,10 +616,6 @@ public class SyncManager: ObservableObject {
     // 这需要较大的协议改动
     
     private func syncWithPeer(peer: PeerID, folder: SyncFolder) {
-        guard let app = p2pNode.app else {
-            print("[SyncManager] ⚠️ [syncWithPeer] P2P 节点未初始化，无法同步")
-            return
-        }
         let peerID = peer.b58String
         let syncKey = "\(folder.syncID):\(peerID)"
         
@@ -659,23 +638,55 @@ public class SyncManager: ObservableObject {
                 print("[SyncManager] 🏁 [syncWithPeer] 已移除同步标记: \(syncKey)")
             }
             
-            await self.performSync(peer: peer, folder: folder, peerID: peerID, app: app)
+            await self.performSync(peer: peer, folder: folder, peerID: peerID)
         }
     }
     
-    private func performSync(peer: PeerID, folder: SyncFolder, peerID: String, app: Application) async {
+    /// 统一的请求函数 - 使用原生 TCP
+    private func sendSyncRequest(
+        _ message: SyncRequest,
+        to peer: PeerID,
+        peerID: String,
+        timeout: TimeInterval = 90.0,
+        maxRetries: Int = 3,
+        folder: SyncFolder? = nil
+    ) async throws -> SyncResponse {
+        // 获取对等点地址
+        let peerAddresses = await MainActor.run {
+            return p2pNode.peerManager.getAddresses(for: peer.b58String)
+        }
+        
+        // 从地址中提取第一个可用的 IP:Port 地址
+        let addressStrings = peerAddresses.map { $0.description }
+        guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
+            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "对等点无可用地址"])
+        }
+        
+        // 使用原生 TCP
+        do {
+            print("[SyncManager] 🔗 使用原生 TCP 发送请求到: \(address)")
+            return try await p2pNode.nativeNetwork.sendRequest(
+                message,
+                to: address,
+                timeout: timeout,
+                maxRetries: maxRetries
+            ) as SyncResponse
+        } catch {
+            // 如果失败，尝试重新注册 peer
+            if let folder = folder {
+                print("[SyncManager] ⚠️ 请求失败，尝试重新注册: \(peerID.prefix(12))...")
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "重新注册对等点...", progress: 0.0)
+                }
+                await p2pNode.retryPeerRegistration(peer: peer)
+            }
+            throw error
+        }
+    }
+    
+    private func performSync(peer: PeerID, folder: SyncFolder, peerID: String) async {
         let startedAt = Date()
         print("[SyncManager] 📍 [performSync] 开始同步: folder=\(folder.syncID), peer=\(peerID.prefix(12))...")
-        
-        // 创建通用的 peerNotFound 回调
-        let onPeerNotFoundCallback: () async -> Void = { [weak self] in
-            guard let self = self else { return }
-            print("[SyncManager] 🔄 [performSync] requestSync 内部触发重新注册: \(peerID.prefix(12))...")
-            await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .syncing, message: "重新注册对等点...", progress: 0.0)
-            }
-            await p2pNode.retryPeerRegistration(peer: peer)
-        }
         
         do {
             guard !peerID.isEmpty else {
@@ -686,67 +697,103 @@ public class SyncManager: ObservableObject {
                 return
             }
             
+            // 在开始同步前，确保 peer 已注册到 libp2p peer store
+            let isRegistered = await MainActor.run {
+                return p2pNode.registrationService.isRegistered(peerID)
+            }
+            
+            if !isRegistered {
+                print("[SyncManager] ⚠️ [performSync] Peer 未注册，先尝试注册: \(peerID.prefix(12))...")
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .syncing, message: "注册对等点...", progress: 0.0)
+                }
+                
+                // 获取 peer 地址
+                let peerAddresses = await MainActor.run {
+                    return p2pNode.peerManager.getAddresses(for: peer.b58String)
+                }
+                
+                if peerAddresses.isEmpty {
+                    print("[SyncManager] ❌ [performSync] 无法注册：peer 无可用地址: \(peerID.prefix(12))...")
+                    await MainActor.run {
+                        self.updateFolderStatus(folder.id, status: .error, message: "对等点无可用地址，等待发现", progress: 0.0)
+                    }
+                    return
+                }
+                
+                // 尝试注册
+                let registered = await MainActor.run {
+                    return p2pNode.registrationService.registerPeer(peerID: peer, addresses: peerAddresses)
+                }
+                
+                if !registered {
+                    print("[SyncManager] ⚠️ [performSync] 注册失败或正在注册中，继续尝试同步: \(peerID.prefix(12))...")
+                    // 即使注册失败，也继续尝试同步，让 requestSync 的重试机制处理
+                } else {
+                    print("[SyncManager] ✅ [performSync] Peer 注册成功: \(peerID.prefix(12))...")
+                }
+                
+                // 等待一小段时间让注册完成
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            
             await MainActor.run {
                 self.updateFolderStatus(folder.id, status: .syncing, message: "正在连接到 \(peerID.prefix(12))...", progress: 0.0)
             }
             print("[SyncManager] 🔗 [performSync] 正在连接到对等点: \(peerID.prefix(12))...")
             
             // 获取远程 MST 根
-            // 首先获取对等点的地址，以便在请求时传递
+            // 首先获取对等点的地址
             let peerAddresses = await MainActor.run {
                 return p2pNode.peerManager.getAddresses(for: peer.b58String)
             }
             print("[SyncManager] 📍 [performSync] 对等点地址数量: \(peerAddresses.count)")
             
+            // 尝试使用原生网络服务（优先）
             let rootRes: SyncResponse
             do {
                 print("[SyncManager] 📡 [performSync] 请求远程 MST 根: syncID=\(folder.syncID)")
-                // 使用新的 onPeerNotFound 回调机制，在 requestSync 内部处理 peerNotFound
-                rootRes = try await app.requestSync(
+                
+                // 从地址中提取第一个可用的 IP:Port 地址
+                let addressStrings = peerAddresses.map { $0.description }
+                guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
+                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从地址中提取 IP:Port"])
+                }
+                
+                print("[SyncManager] 🔗 [performSync] 使用原生 TCP 连接到: \(address)")
+                
+                // 使用原生网络服务发送请求
+                rootRes = try await p2pNode.nativeNetwork.sendRequest(
                     .getMST(syncID: folder.syncID),
-                    to: peer,
+                    to: address,
                     timeout: 90.0,
-                    maxRetries: 5,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
-                )
-                print("[SyncManager] ✅ [performSync] 成功获取远程 MST 根")
+                    maxRetries: 5
+                ) as SyncResponse
+                
+                print("[SyncManager] ✅ [performSync] 成功获取远程 MST 根（原生 TCP）")
             } catch {
                 let errorString = String(describing: error)
-                print("[SyncManager] ❌ [performSync] 获取远程 MST 根失败: \(errorString)")
+                print("[SyncManager] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
                 
-                // 如果 requestSync 内部的重试都失败了，检查是否是 peerNotFound
-                if errorString.contains("peerNotFound") || errorString.contains("BasicInMemoryPeerStore") {
-                    print("[SyncManager] ❌ [performSync] 所有重试都失败，对等点仍然不可用")
-                    await MainActor.run {
-                        self.updateFolderStatus(folder.id, status: .error, message: "对等点注册失败，等待下次发现", progress: 0.0)
-                    }
-                    return
-                } else if let nsError = error as NSError?, nsError.code == 2 {
-                    // 超时错误 - 这是真正的连接问题，应该报告
-                    print("[SyncManager] ⚠️ 连接超时")
-                    print("[SyncManager] 💡 提示: 对等点可能未响应，请检查:")
-                    print("[SyncManager]   1. 网络连接是否正常")
-                    print("[SyncManager]   2. 对等点是否在线")
-                    print("[SyncManager]   3. 防火墙是否阻止了连接")
-                    print("[SyncManager]   4. 两台设备是否在同一网络")
-                    await MainActor.run {
-                        self.updateFolderStatus(folder.id, status: .error, message: "连接超时: \(peerID.prefix(12))...")
-                    }
-                    return
-                } else {
-                    // 其他错误
-                    print("[SyncManager] ❌ [performSync] 其他错误: \(errorString)")
-                    print("[SyncManager]   错误类型: \(type(of: error))")
-                    if let nsError = error as NSError? {
-                        print("[SyncManager]   NSError code: \(nsError.code)")
-                        print("[SyncManager]   NSError domain: \(nsError.domain)")
-                    }
-                    await MainActor.run {
-                        self.updateFolderStatus(folder.id, status: .error, message: "同步失败: \(error.localizedDescription)")
-                    }
-                    return
+                // 最后尝试一次注册
+                let finalAddresses = await MainActor.run {
+                    return p2pNode.peerManager.getAddresses(for: peer.b58String)
                 }
+                
+                if !finalAddresses.isEmpty {
+                    print("[SyncManager] 🔄 [performSync] 最后尝试注册对等点: \(peerID.prefix(12))...")
+                    let finalRegistered = await MainActor.run {
+                        return p2pNode.registrationService.retryRegistration(peerID: peer, addresses: finalAddresses)
+                    }
+                    if finalRegistered {
+                        print("[SyncManager] ✅ [performSync] 最后注册成功，但同步已超时")
+                    }
+                }
+                
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
+                }
+                return
             }
             
             print("[SyncManager] 📊 [performSync] 开始处理同步逻辑...")
@@ -825,13 +872,13 @@ public class SyncManager: ObservableObject {
             print("[SyncManager] 📡 [performSync] 请求远程文件列表...")
             let filesRes: SyncResponse
             do {
-                filesRes = try await app.requestSync(
+                filesRes = try await sendSyncRequest(
                     .getFiles(syncID: folder.syncID),
                     to: peer,
+                    peerID: peerID,
                     timeout: 90.0,
                     maxRetries: 3,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
+                    folder: folder
                 )
                 print("[SyncManager] ✅ [performSync] 成功获取远程文件列表")
             } catch {
@@ -937,13 +984,13 @@ public class SyncManager: ObservableObject {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "正在删除 \(toDelete.count) 个文件...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 
-                let delRes: SyncResponse = try await app.requestSync(
+                let delRes: SyncResponse = try await sendSyncRequest(
                     .deleteFiles(syncID: folder.syncID, paths: Array(toDelete)),
                     to: peer,
+                    peerID: peerID,
                     timeout: 90.0,
                     maxRetries: 3,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
+                    folder: folder
                 )
                 if case .deleteAck = delRes {
                     for rel in toDelete {
@@ -974,13 +1021,13 @@ public class SyncManager: ObservableObject {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "正在下载: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 // 文件下载可能需要更长时间，使用 180 秒超时
-                let dataRes: SyncResponse = try await app.requestSync(
+                let dataRes: SyncResponse = try await sendSyncRequest(
                     .getFileData(syncID: folder.syncID, path: path),
                     to: peer,
+                    peerID: peerID,
                     timeout: 180.0,
                     maxRetries: 3,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
+                    folder: folder
                 )
                 if case .fileData(_, _, let data) = dataRes {
                     let localURL = folder.localPath.appendingPathComponent(path)
@@ -1028,13 +1075,13 @@ public class SyncManager: ObservableObject {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "冲突文件: \(fileName)...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
                 // 文件下载可能需要更长时间，使用 180 秒超时
-                let dataRes: SyncResponse = try await app.requestSync(
+                let dataRes: SyncResponse = try await sendSyncRequest(
                     .getFileData(syncID: folder.syncID, path: path),
                     to: peer,
+                    peerID: peerID,
                     timeout: 180.0,
                     maxRetries: 3,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
+                    folder: folder
                 )
                 if case .fileData(_, _, let data) = dataRes {
                     let pathDir = (path as NSString).deletingLastPathComponent
@@ -1109,13 +1156,13 @@ public class SyncManager: ObservableObject {
                 
                 let data = try Data(contentsOf: fileURL)
                 // 文件上传可能需要更长时间，使用 180 秒超时
-                let putRes: SyncResponse = try await app.requestSync(
+                let putRes: SyncResponse = try await sendSyncRequest(
                     .putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc),
                     to: peer,
+                    peerID: peerID,
                     timeout: 180.0,
                     maxRetries: 3,
-                    peerAddresses: peerAddresses.isEmpty ? nil : peerAddresses,
-                    onPeerNotFound: onPeerNotFoundCallback
+                    folder: folder
                 )
                 if case .error = putRes {
                     throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Upload failed for \(path)"])
@@ -1373,13 +1420,13 @@ public class SyncManager: ObservableObject {
         
         // 检查远程设备
         let allPeers = peerManager.allPeers
-        guard !allPeers.isEmpty, let app = p2pNode.app else {
+        guard !allPeers.isEmpty else {
             return false
         }
         
         for peerInfo in allPeers {
             do {
-                let response: SyncResponse = try await app.requestSync(.getMST(syncID: syncID), to: peerInfo.peerID, timeout: 30.0, maxRetries: 2)
+                let response: SyncResponse = try await sendSyncRequest(.getMST(syncID: syncID), to: peerInfo.peerID, peerID: peerInfo.peerIDString, timeout: 30.0, maxRetries: 2, folder: nil)
                 if case .mstRoot = response {
                     return true
                 }

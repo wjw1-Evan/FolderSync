@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import NIOCore
 
 /// Simple LAN discovery using UDP broadcast
 public class LANDiscovery {

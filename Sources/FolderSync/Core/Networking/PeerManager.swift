@@ -95,12 +95,15 @@ public class PeerManager: ObservableObject {
                         peerID: peerID,
                         addresses: addresses,
                         isRegistered: isRegistered,
-                        isOnline: false,
+                        isOnline: false, // 从持久化恢复时默认为离线，等待状态检查
                         discoveryTime: persistent.discoveryTime,
                         lastSeenTime: persistent.lastSeenTime
                     )
-                    peers[peerID.b58String] = peerInfo
-                    print("[PeerManager] ✅ 已恢复 peer: \(peerID.b58String.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
+                    let peerIDString = peerID.b58String
+                    peers[peerIDString] = peerInfo
+                    // 初始化设备状态为离线（等待状态检查）
+                    deviceStatuses[peerIDString] = .offline
+                    print("[PeerManager] ✅ 已恢复 peer: \(peerIDString.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
                 }
             }
             if !persistentPeers.isEmpty {
@@ -144,14 +147,19 @@ public class PeerManager: ObservableObject {
         return Array(peers.values)
     }
     
-    /// 获取在线 Peer 列表
+    /// 获取在线 Peer 列表（基于 deviceStatuses，这是权威状态源）
     public var onlinePeers: [PeerInfo] {
-        return peers.values.filter { $0.isOnline }
+        return peers.values.filter { peerInfo in
+            deviceStatuses[peerInfo.peerIDString] == .online
+        }
     }
     
-    /// 获取离线 Peer 列表
+    /// 获取离线 Peer 列表（基于 deviceStatuses，这是权威状态源）
     public var offlinePeers: [PeerInfo] {
-        return peers.values.filter { !$0.isOnline }
+        return peers.values.filter { peerInfo in
+            let status = deviceStatuses[peerInfo.peerIDString] ?? .offline
+            return status != .online
+        }
     }
     
     /// 根据 PeerID 获取 Peer 信息
@@ -219,6 +227,7 @@ public class PeerManager: ObservableObject {
     public func addOrUpdatePeer(_ peerID: PeerID, addresses: [Multiaddr] = []) -> PeerInfo {
         let peerIDString = peerID.b58String
         var shouldSave = false
+        let isNewPeer = peers[peerIDString] == nil
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
@@ -232,6 +241,10 @@ public class PeerManager: ObservableObject {
             // 添加新 Peer
             var newPeer = PeerInfo(peerID: peerID, addresses: addresses)
             peers[peerIDString] = newPeer
+            // 新 peer 默认状态为离线（除非后续明确设置为在线）
+            if deviceStatuses[peerIDString] == nil {
+                deviceStatuses[peerIDString] = .offline
+            }
             shouldSave = true
         }
         

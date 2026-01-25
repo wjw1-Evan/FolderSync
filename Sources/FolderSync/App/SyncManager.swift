@@ -200,7 +200,8 @@ public class SyncManager: ObservableObject {
         
         for peerInfo in peersToCheck {
             let peerIDString = peerInfo.peerIDString
-            let wasOnline = peerInfo.isOnline
+            // 使用 deviceStatuses 作为权威状态源
+            let wasOnline = peerManager.isOnline(peerIDString)
             let isOnline = await checkPeerOnline(peer: peerInfo.peerID)
             
             if isOnline != wasOnline {
@@ -1432,12 +1433,13 @@ public class SyncManager: ObservableObject {
             ))
         }
         
-        // 添加其他设备（使用 peerManager）
+        // 添加其他设备（使用 peerManager，基于 deviceStatuses 作为权威状态源）
         for peerInfo in peerManager.allPeers {
+            let isOnline = peerManager.isOnline(peerInfo.peerIDString)
             devices.append(DeviceInfo(
                 peerID: peerInfo.peerIDString,
                 isLocal: false,
-                status: peerInfo.isOnline ? "在线" : "离线"
+                status: isOnline ? "在线" : "离线"
             ))
         }
         

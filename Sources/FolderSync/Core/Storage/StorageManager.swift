@@ -70,8 +70,7 @@ public class StorageManager {
             }
             
             guard fileManager.fileExists(atPath: foldersFile.path) else {
-                print("[StorageManager] ℹ️ 文件夹配置文件不存在: \(foldersFile.path)")
-                print("[StorageManager] ℹ️ 这是首次运行，将创建新的配置文件")
+                // 首次运行，不输出日志
                 let empty: [SyncFolder] = []
                 foldersCache = empty
                 return empty
@@ -87,7 +86,7 @@ public class StorageManager {
             do {
                 let folders = try JSONDecoder().decode([SyncFolder].self, from: data)
                 foldersCache = folders
-                print("[StorageManager] ✅ 成功加载 \(folders.count) 个文件夹配置")
+                // 成功加载，不输出日志
                 return folders
             } catch {
                 print("[StorageManager] ❌ 解析文件夹配置失败: \(error)")
@@ -140,7 +139,7 @@ public class StorageManager {
             // 写入成功后，删除备份文件（如果存在）
             try? fileManager.removeItem(at: backupFile)
             
-            print("[StorageManager] ✅ 成功保存 \(folders.count) 个文件夹配置到: \(foldersFile.path)")
+            // 成功保存，不输出日志
         } catch {
             print("[StorageManager] ❌ 保存文件夹配置失败: \(error)")
             print("[StorageManager] 错误详情: \(error.localizedDescription)")
@@ -149,11 +148,10 @@ public class StorageManager {
             // 如果写入失败，尝试从备份恢复
             let backupFile = foldersFile.appendingPathExtension("backup")
             if fileManager.fileExists(atPath: backupFile.path) {
-                print("[StorageManager] 🔄 检测到备份文件，尝试恢复...")
                 do {
                     let backupData = try Data(contentsOf: backupFile)
                     try? backupData.write(to: foldersFile, options: [.atomic])
-                    print("[StorageManager] ✅ 已从备份恢复配置文件")
+                    // 恢复成功，不输出日志
                 } catch {
                     print("[StorageManager] ❌ 从备份恢复失败: \(error.localizedDescription)")
                 }

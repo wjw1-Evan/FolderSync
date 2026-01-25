@@ -92,7 +92,20 @@ public class StorageManager {
             } catch {
                 print("[StorageManager] ❌ 解析文件夹配置失败: \(error)")
                 print("[StorageManager] 错误详情: \(error.localizedDescription)")
+                
+                // 备份损坏的文件，以便后续恢复
+                let backupFile = foldersFile.appendingPathExtension("corrupted.\(Int(Date().timeIntervalSince1970)).backup")
+                do {
+                    try data.write(to: backupFile, options: [.atomic])
+                    print("[StorageManager] 💾 已备份损坏的配置文件到: \(backupFile.lastPathComponent)")
+                    print("[StorageManager] ⚠️ 警告: 文件夹配置解析失败，已备份损坏的文件")
+                    print("[StorageManager]   如果这是重要数据，请尝试手动修复或从备份恢复")
+                } catch {
+                    print("[StorageManager] ⚠️ 无法备份损坏的配置文件: \(error.localizedDescription)")
+                }
+                
                 // 如果解析失败，返回空数组而不是抛出错误，避免应用启动失败
+                // 但用户需要知道数据可能丢失
                 let empty: [SyncFolder] = []
                 foldersCache = empty
                 return empty
@@ -103,17 +116,49 @@ public class StorageManager {
     private func saveFolders(_ folders: [SyncFolder]) throws {
         do {
             let data = try JSONEncoder().encode(folders)
+            
+            // 在写入新数据前，如果旧文件存在，先备份（以防写入失败导致数据丢失）
+            let backupFile = foldersFile.appendingPathExtension("backup")
+            if fileManager.fileExists(atPath: foldersFile.path) {
+                do {
+                    let oldData = try Data(contentsOf: foldersFile)
+                    try? oldData.write(to: backupFile, options: [.atomic])
+                } catch {
+                    // 备份失败不影响主流程，只记录警告
+                    print("[StorageManager] ⚠️ 无法备份旧配置文件: \(error.localizedDescription)")
+                }
+            }
+            
+            // 使用原子写入，确保数据完整性
             try data.write(to: foldersFile, options: [.atomic])
             
+            // 写入成功后，更新缓存
             cacheQueue.sync {
                 foldersCache = folders
             }
+            
+            // 写入成功后，删除备份文件（如果存在）
+            try? fileManager.removeItem(at: backupFile)
             
             print("[StorageManager] ✅ 成功保存 \(folders.count) 个文件夹配置到: \(foldersFile.path)")
         } catch {
             print("[StorageManager] ❌ 保存文件夹配置失败: \(error)")
             print("[StorageManager] 错误详情: \(error.localizedDescription)")
             print("[StorageManager] 文件路径: \(foldersFile.path)")
+            
+            // 如果写入失败，尝试从备份恢复
+            let backupFile = foldersFile.appendingPathExtension("backup")
+            if fileManager.fileExists(atPath: backupFile.path) {
+                print("[StorageManager] 🔄 检测到备份文件，尝试恢复...")
+                do {
+                    let backupData = try Data(contentsOf: backupFile)
+                    try? backupData.write(to: foldersFile, options: [.atomic])
+                    print("[StorageManager] ✅ 已从备份恢复配置文件")
+                } catch {
+                    print("[StorageManager] ❌ 从备份恢复失败: \(error.localizedDescription)")
+                }
+            }
+            
             throw error
         }
     }

@@ -276,24 +276,102 @@ public class P2PNode {
             print("[P2PNode] 这通常是因为密钥文件损坏或密码不匹配")
             print("[P2PNode] 尝试删除旧的密钥文件并重新生成...")
             
-            // 删除整个目录并重新创建，确保彻底清理所有密钥相关文件
+            // 只删除密钥相关文件，保留文件夹配置和其他数据
             let fileManager = FileManager.default
-            do {
-                // 尝试删除整个目录
-                if fileManager.fileExists(atPath: folderSyncDir.path) {
-                    try fileManager.removeItem(at: folderSyncDir)
-                    print("[P2PNode] 已删除旧的 FolderSync 目录")
+            
+            // 需要保护的重要文件和目录（文件夹配置、冲突、日志、向量时钟等）
+            let protectedItems: Set<String> = [
+                "folders.json",
+                "conflicts.json",
+                "sync_logs.json",
+                "peerid_password.txt",
+                "vector_clocks"
+            ]
+            
+            // 备份重要文件和目录
+            var fileBackups: [String: Data] = [:]
+            var vectorClocksBackup: URL?
+            
+            if fileManager.fileExists(atPath: folderSyncDir.path) {
+                if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+                    for item in items {
+                        let itemName = item.lastPathComponent
+                        
+                        // 跳过保护的文件和目录
+                        if protectedItems.contains(itemName) {
+                            var isDirectory: ObjCBool = false
+                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
+                                if isDirectory.boolValue && itemName == "vector_clocks" {
+                                    // 备份 vector_clocks 目录
+                                    vectorClocksBackup = item
+                                    print("[P2PNode] 📦 已标记备份目录: \(itemName)")
+                                } else if !isDirectory.boolValue {
+                                    // 备份文件
+                                    if let data = try? Data(contentsOf: item) {
+                                        fileBackups[itemName] = data
+                                        print("[P2PNode] 📦 已备份文件: \(itemName)")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                // 重新创建目录
-                try fileManager.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
-                print("[P2PNode] 已重新创建 FolderSync 目录")
+            }
+            
+            // 删除密钥相关文件（排除重要文件）
+            // LibP2P 的密钥文件通常不是 JSON 格式，可能是二进制文件或其他格式
+            do {
+                if fileManager.fileExists(atPath: folderSyncDir.path) {
+                    if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+                        for item in items {
+                            let itemName = item.lastPathComponent
+                            
+                            // 跳过保护的文件和目录
+                            if protectedItems.contains(itemName) {
+                                continue
+                            }
+                            
+                            // 检查是否是目录
+                            var isDirectory: ObjCBool = false
+                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
+                                if isDirectory.boolValue {
+                                    // 跳过所有目录（除了 vector_clocks，它已经被保护）
+                                    continue
+                                }
+                            }
+                            
+                            // 删除非保护的文件（可能是密钥文件）
+                            // 密钥文件通常不是 JSON 格式
+                            if !itemName.hasSuffix(".json") {
+                                try? fileManager.removeItem(at: item)
+                                print("[P2PNode] 🗑️ 已删除可能的密钥文件: \(itemName)")
+                            }
+                        }
+                    }
+                }
             } catch {
-                print("[P2PNode] ⚠️ 删除目录时出错: \(error.localizedDescription)")
-                // 如果删除目录失败，尝试删除目录内的所有文件
-                if let files = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: nil) {
-                    for file in files {
-                        try? fileManager.removeItem(at: file)
-                        print("[P2PNode] 已删除文件: \(file.lastPathComponent)")
+                print("[P2PNode] ⚠️ 删除密钥文件时出错: \(error.localizedDescription)")
+            }
+            
+            // 确保目录存在
+            try? fileManager.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+            
+            // 恢复备份的文件
+            for (fileName, data) in fileBackups {
+                let fileURL = folderSyncDir.appendingPathComponent(fileName)
+                try? data.write(to: fileURL, options: [.atomic])
+                print("[P2PNode] ✅ 已恢复文件: \(fileName)")
+            }
+            
+            // 恢复 vector_clocks 目录（如果存在备份且目录不存在）
+            if let backupURL = vectorClocksBackup {
+                let destURL = folderSyncDir.appendingPathComponent("vector_clocks", isDirectory: true)
+                if !fileManager.fileExists(atPath: destURL.path) && fileManager.fileExists(atPath: backupURL.path) {
+                    do {
+                        try fileManager.copyItem(at: backupURL, to: destURL)
+                        print("[P2PNode] ✅ 已恢复目录: vector_clocks")
+                    } catch {
+                        print("[P2PNode] ⚠️ 恢复 vector_clocks 目录失败: \(error.localizedDescription)")
                     }
                 }
             }

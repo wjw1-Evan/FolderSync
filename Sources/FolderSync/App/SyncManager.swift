@@ -201,8 +201,8 @@ public class SyncManager: ObservableObject {
             while !Task.isCancelled {
                 guard let self = self else { break }
                 await self.checkAllPeersOnlineStatus()
-                // 每 20 秒检查一次，提高实时性
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                // 每 10 秒检查一次，更快检测离线设备
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
     }
@@ -244,12 +244,13 @@ public class SyncManager: ObservableObject {
                 continue
             }
             
-            // 先检查最近是否收到过广播（120秒内，考虑到UDP广播可能丢失）
+            // 先检查最近是否收到过广播（30秒内）
             // 如果最近收到过广播，直接认为在线，不需要发送请求检查
-            // 注意：广播间隔是1秒，检查间隔是20秒，但UDP可能丢包，所以给更长的窗口
+            // 注意：广播间隔是1秒，检查间隔是10秒，考虑到UDP可能丢包，设置30秒窗口
+            // 这样即使连续丢失2-3个广播包，只要在30秒内收到一次，就认为在线
             let recentlySeen: Bool = {
                 let timeSinceLastSeen = Date().timeIntervalSince(currentPeer.lastSeenTime)
-                return timeSinceLastSeen < 120.0 // 增加到120秒，给UDP广播丢包更多容错时间
+                return timeSinceLastSeen < 30.0 // 30秒窗口，平衡响应速度和容错性
             }()
             
             let isOnline: Bool
@@ -267,7 +268,7 @@ public class SyncManager: ObservableObject {
             // 关键：广播是设备在线的直接证据，优先于检查结果
             // 再次检查是否最近收到过广播（双重检查，避免竞态条件）
             let finalCheck = peerManager.getPeer(peerIDString)
-            let finalRecentlySeen = finalCheck.map { Date().timeIntervalSince($0.lastSeenTime) < 120.0 } ?? false
+            let finalRecentlySeen = finalCheck.map { Date().timeIntervalSince($0.lastSeenTime) < 30.0 } ?? false
             
             // 如果最近收到过广播，强制认为在线（广播是设备在线的直接证据）
             let finalIsOnline: Bool
@@ -304,20 +305,21 @@ public class SyncManager: ObservableObject {
         // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
         let isRegistered = peerManager.isRegistered(peerIDString)
         
-        // 检查是否是新发现的（2分钟内）
+        // 检查是否是新发现的（1分钟内）
+        // 新发现的设备给更短的宽限期，加快离线检测
         let isRecentlyDiscovered: Bool = {
             if let peerInfo = peerManager.getPeer(peerIDString) {
-                return Date().timeIntervalSince(peerInfo.discoveryTime) < 120.0
+                return Date().timeIntervalSince(peerInfo.discoveryTime) < 60.0
             }
             return false
         }()
         
-        // 检查最近是否收到过广播（120秒内）
+        // 检查最近是否收到过广播（30秒内）
         // 如果最近收到过广播，说明设备在线，即使未注册也应该认为在线
-        // 注意：UDP广播可能丢包，所以给更长的窗口时间
+        // 注意：广播间隔是1秒，30秒窗口可以容忍一定的UDP丢包
         let recentlySeen: Bool = {
             if let peerInfo = peerManager.getPeer(peerIDString) {
-                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 120.0
+                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
             }
             return false
         }()
@@ -333,13 +335,14 @@ public class SyncManager: ObservableObject {
         }
         
         // 尝试发送轻量级请求验证设备是否在线
+        // 缩短超时时间，加快离线检测
         do {
             let randomSyncID = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16).description
             let _: SyncResponse = try await sendSyncRequest(
                 .getMST(syncID: randomSyncID),
                 to: peer,
                 peerID: peer.b58String,
-                timeout: 5.0,
+                timeout: 3.0, // 从5秒缩短到3秒
                 maxRetries: 1,
                 folder: nil
             )

@@ -160,6 +160,7 @@ public class P2PNode {
         let peerInfo = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
         
         // 更新最后可见时间（收到广播表示设备在线）
+        // 注意：每次收到广播都应该更新 lastSeenTime，即使地址没有变化
         peerManager.updateLastSeen(peerID)
         
         // 检查是否需要注册（地址变化或未注册）
@@ -189,6 +190,10 @@ public class P2PNode {
             }
         } else {
             print("[P2PNode] ⏭️ Peer 已注册且地址未变化，跳过: \(peerID.prefix(12))...")
+            
+            // 关键：即使地址未变化，收到广播也应该更新 lastSeenTime
+            // 这表示设备仍然在线，只是地址没有变化
+            peerManager.updateLastSeen(peerID)
             
             // 更新设备状态为在线
             peerManager.updateDeviceStatus(peerID, status: .online)

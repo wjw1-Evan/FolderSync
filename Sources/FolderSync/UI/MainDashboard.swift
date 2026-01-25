@@ -444,14 +444,23 @@ struct AllPeersListView: View {
                 }
             }
             .listStyle(.inset)
-            .navigationTitle("所有设备")
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "laptopcomputer.and.iphone")
+                            .foregroundStyle(.blue)
+                            .font(.title3)
+                        Text("所有设备")
+                            .font(.headline)
+                    }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") {
                         dismiss()
                     }
                 }
             }
+            .navigationTitle("") // 空标题，使用 toolbar principal 显示带图标的标题
         }
         .frame(width: 500, height: 400)
     }

@@ -111,10 +111,26 @@ public class SyncManager: ObservableObject {
                     self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
                     self.peerManager.updateLastSeen(peerIDString) // 更新最后可见时间
                     
-                    // 如果状态发生变化，立即更新设备计数
+                    // 验证 lastSeenTime 是否已更新
+                    if let peerInfo = self.peerManager.getPeer(peerIDString) {
+                        let timeSinceUpdate = Date().timeIntervalSince(peerInfo.lastSeenTime)
+                        if timeSinceUpdate > 1.0 {
+                            print("[SyncManager] ⚠️ 警告: lastSeenTime 更新后时间差异常: \(timeSinceUpdate)秒")
+                        }
+                    }
+                    
+                    // 收到广播时，无论状态是否变化，都更新设备统计和列表，确保同步
+                    // 这样可以确保统计数据和"所有设备"列表始终保持一致
+                    self.updateDeviceCounts()
                     if wasNew || !wasOnline {
-                        self.updateDeviceCounts()
                         print("[SyncManager] 📊 设备状态已更新: \(peerIDString.prefix(12))... (新设备: \(wasNew), 状态变化: \(!wasOnline))")
+                    } else {
+                        if let peerInfo = self.peerManager.getPeer(peerIDString) {
+                            let timeSinceLastSeen = Int(Date().timeIntervalSince(peerInfo.lastSeenTime))
+                            print("[SyncManager] 📡 收到广播，刷新设备状态: \(peerIDString.prefix(12))... (上次看到: \(timeSinceLastSeen)秒前)")
+                        } else {
+                            print("[SyncManager] 📡 收到广播，刷新设备状态: \(peerIDString.prefix(12))...")
+                        }
                     }
                     
                     if wasNew {
@@ -221,28 +237,56 @@ public class SyncManager: ObservableObject {
             // 使用 deviceStatuses 作为权威状态源
             let wasOnline = peerManager.isOnline(peerIDString)
             
-            // 先检查最近是否收到过广播（30秒内）
+            // 重新获取最新的 peerInfo（可能在检查过程中收到了新广播）
+            let currentPeerInfo = peerManager.getPeer(peerIDString)
+            guard let currentPeer = currentPeerInfo else {
+                print("[SyncManager] ⚠️ Peer 不存在，跳过检查: \(peerIDString.prefix(12))...")
+                continue
+            }
+            
+            // 先检查最近是否收到过广播（120秒内，考虑到UDP广播可能丢失）
             // 如果最近收到过广播，直接认为在线，不需要发送请求检查
+            // 注意：广播间隔是1秒，检查间隔是20秒，但UDP可能丢包，所以给更长的窗口
             let recentlySeen: Bool = {
-                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
+                let timeSinceLastSeen = Date().timeIntervalSince(currentPeer.lastSeenTime)
+                return timeSinceLastSeen < 120.0 // 增加到120秒，给UDP广播丢包更多容错时间
             }()
             
             let isOnline: Bool
             if recentlySeen {
                 // 最近收到过广播，认为在线
+                let timeSinceLastSeen = Int(Date().timeIntervalSince(currentPeer.lastSeenTime))
                 isOnline = true
-                print("[SyncManager] ✅ 设备最近收到过广播（\(Int(Date().timeIntervalSince(peerInfo.lastSeenTime)))秒前），认为在线: \(peerIDString.prefix(12))...")
+                print("[SyncManager] ✅ 设备最近收到过广播（\(timeSinceLastSeen)秒前），认为在线: \(peerIDString.prefix(12))...")
             } else {
                 // 没有最近收到广播，发送请求检查
-                isOnline = await checkPeerOnline(peer: peerInfo.peerID)
+                print("[SyncManager] 🔍 设备未收到最近广播（\(Int(Date().timeIntervalSince(currentPeer.lastSeenTime)))秒前），发送请求检查: \(peerIDString.prefix(12))...")
+                isOnline = await checkPeerOnline(peer: currentPeer.peerID)
             }
             
-            if isOnline != wasOnline {
+            // 关键：广播是设备在线的直接证据，优先于检查结果
+            // 再次检查是否最近收到过广播（双重检查，避免竞态条件）
+            let finalCheck = peerManager.getPeer(peerIDString)
+            let finalRecentlySeen = finalCheck.map { Date().timeIntervalSince($0.lastSeenTime) < 120.0 } ?? false
+            
+            // 如果最近收到过广播，强制认为在线（广播是设备在线的直接证据）
+            let finalIsOnline: Bool
+            if finalRecentlySeen {
+                finalIsOnline = true
+                if !isOnline {
+                    print("[SyncManager] ⚠️ 检查结果离线，但最近收到过广播（\(Int(Date().timeIntervalSince(finalCheck!.lastSeenTime)))秒前），强制保持在线: \(peerIDString.prefix(12))...")
+                }
+            } else {
+                // 没有最近广播，使用检查结果
+                finalIsOnline = isOnline
+            }
+            
+            if finalIsOnline != wasOnline {
                 statusChanged = true
-                print("[SyncManager] 📊 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
+                print("[SyncManager] 📊 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(finalIsOnline ? "在线" : "离线")")
             }
             
-            peerManager.updateOnlineStatus(peerIDString, isOnline: isOnline)
+            peerManager.updateOnlineStatus(peerIDString, isOnline: finalIsOnline)
         }
         
         if statusChanged {
@@ -268,11 +312,12 @@ public class SyncManager: ObservableObject {
             return false
         }()
         
-        // 检查最近是否收到过广播（30秒内）
+        // 检查最近是否收到过广播（120秒内）
         // 如果最近收到过广播，说明设备在线，即使未注册也应该认为在线
+        // 注意：UDP广播可能丢包，所以给更长的窗口时间
         let recentlySeen: Bool = {
             if let peerInfo = peerManager.getPeer(peerIDString) {
-                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
+                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 120.0
             }
             return false
         }()

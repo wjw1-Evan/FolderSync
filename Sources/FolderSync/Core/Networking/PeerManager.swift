@@ -248,6 +248,10 @@ public class PeerManager: ObservableObject {
                 existing.updateAddresses(addresses)
                 shouldSave = true
             }
+            // 注意：即使地址为空，收到广播也应该更新 lastSeenTime
+            // 这表示设备仍然在线，只是地址可能暂时不可用
+            // 但 updateAddresses 已经会更新 lastSeenTime（如果地址变化）
+            // 如果地址没有变化，updateLastSeen 会在外部调用时更新
             peers[peerIDString] = existing
         } else {
             // 添加新 Peer
@@ -362,9 +366,17 @@ public class PeerManager: ObservableObject {
     
     /// 更新所有 Peer 的最后可见时间
     public func updateLastSeen(_ peerIDString: String) {
-        guard var peer = peers[peerIDString] else { return }
+        guard var peer = peers[peerIDString] else {
+            print("[PeerManager] ⚠️ 尝试更新不存在的 peer 的 lastSeenTime: \(peerIDString.prefix(12))...")
+            return
+        }
+        let oldTime = peer.lastSeenTime
         peer.lastSeenTime = Date()
         peers[peerIDString] = peer
+        let timeDiff = Date().timeIntervalSince(oldTime)
+        if timeDiff > 5.0 {
+            print("[PeerManager] ✅ 更新 lastSeenTime: \(peerIDString.prefix(12))... (距离上次: \(Int(timeDiff))秒)")
+        }
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }

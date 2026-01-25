@@ -71,18 +71,26 @@ public class LANDiscovery {
             }
             
             listener.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
                 switch state {
                 case .ready:
-                    print("[LANDiscovery] ✅ Listener ready on port \(self?.servicePort ?? 0)")
+                    print("[LANDiscovery] ✅ Listener ready on port \(self.servicePort)")
                     // 监听器就绪后，立即发送一次广播请求，触发其他设备响应
-                    if let self = self {
-                        // 发送一个特殊的"发现请求"广播，让其他设备知道新设备上线
-                        self.sendDiscoveryRequest()
-                    }
+                    self.sendDiscoveryRequest()
                 case .failed(let error):
                     print("[LANDiscovery] ❌ Listener failed: \(error)")
+                    // 监听器失败时，尝试重新启动
+                    if self.isRunning {
+                        print("[LANDiscovery] 🔄 尝试重新启动监听器...")
+                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                            guard let self = self, self.isRunning else { return }
+                            self.startListener(peerID: peerID)
+                        }
+                    }
                 case .waiting(let error):
                     print("[LANDiscovery] ⚠️ Listener waiting: \(error)")
+                case .cancelled:
+                    print("[LANDiscovery] ℹ️ Listener cancelled")
                 default:
                     break
                 }
@@ -181,9 +189,24 @@ public class LANDiscovery {
     }
     
     private func receiveMessage(from connection: NWConnection, myPeerID: String) {
+        guard isRunning else {
+            connection.cancel()
+            return
+        }
+        
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
+            guard let self = self, self.isRunning else {
+                connection.cancel()
+                return
+            }
+            
             if let error = error {
-                print("[LANDiscovery] Receive error: \(error)")
+                // 某些错误是正常的（如连接关闭），不需要记录
+                if case .posix(let code) = error as? NWError, code == .ECANCELED {
+                    // 正常取消，不需要日志
+                } else {
+                    print("[LANDiscovery] ⚠️ 接收错误: \(error)")
+                }
                 connection.cancel()
                 return
             }
@@ -194,16 +217,16 @@ public class LANDiscovery {
                     if message.contains("\"type\":\"discovery_request\"") {
                         // 收到发现请求，立即广播自己的信息作为响应
                         print("[LANDiscovery] 📥 收到发现请求，立即响应...")
-                        self?.sendBroadcast(peerID: myPeerID, listenAddresses: self?.currentListenAddresses ?? [])
+                        self.sendBroadcast(peerID: myPeerID, listenAddresses: self.currentListenAddresses)
                         // 继续接收
                         if !isComplete {
-                            self?.receiveMessage(from: connection, myPeerID: myPeerID)
+                            self.receiveMessage(from: connection, myPeerID: myPeerID)
                         }
                         return
                     }
                     
                     // 解析正常的发现消息
-                    if let peerInfo = self?.parseDiscoveryMessage(message) {
+                    if let peerInfo = self.parseDiscoveryMessage(message) {
                         // Ignore our own broadcasts
                         if peerInfo.peerID != myPeerID {
                             let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
@@ -223,7 +246,9 @@ public class LANDiscovery {
                                 print("[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
                             }
                             
-                            self?.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+                            // 每次收到广播都触发回调，确保 lastSeenTime 被更新
+                            print("[LANDiscovery] 📡 收到广播，触发 onPeerDiscovered 回调")
+                            self.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
                         } else {
                             print("[LANDiscovery] ℹ️ 忽略自己的广播消息")
                         }
@@ -234,7 +259,7 @@ public class LANDiscovery {
             }
             
             if !isComplete {
-                self?.receiveMessage(from: connection, myPeerID: myPeerID)
+                self.receiveMessage(from: connection, myPeerID: myPeerID)
             }
         }
     }
@@ -243,13 +268,27 @@ public class LANDiscovery {
     
     private func startBroadcasting(peerID: String, listenAddresses: [String]) {
         self.currentListenAddresses = listenAddresses
-        // Broadcast every 1 second
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        
+        // 确保在主线程上创建 Timer，这样它会在主 RunLoop 上运行
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.sendBroadcast(peerID: peerID, listenAddresses: self.currentListenAddresses)
+            
+            // 如果已有定时器，先停止它
+            self.broadcastTimer?.invalidate()
+            
+            // Broadcast every 1 second
+            let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                // 在后台线程发送广播，避免阻塞主线程
+                DispatchQueue.global(qos: .utility).async {
+                    self.sendBroadcast(peerID: peerID, listenAddresses: self.currentListenAddresses)
+                }
+            }
+            RunLoop.current.add(timer, forMode: .common)
+            self.broadcastTimer = timer
+            
+            print("[LANDiscovery] ✅ 广播定时器已启动，每1秒发送一次")
         }
-        RunLoop.current.add(timer, forMode: .common)
-        self.broadcastTimer = timer
         
         // Send initial broadcast immediately
         sendBroadcast(peerID: peerID, listenAddresses: listenAddresses)
@@ -266,8 +305,16 @@ public class LANDiscovery {
     }
     
     private func sendBroadcast(peerID: String, listenAddresses: [String]) {
+        guard isRunning else {
+            print("[LANDiscovery] ⚠️ 广播已停止，跳过发送")
+            return
+        }
+        
         let message = createDiscoveryMessage(peerID: peerID, listenAddresses: listenAddresses)
-        guard let data = message.data(using: .utf8) else { return }
+        guard let data = message.data(using: .utf8) else {
+            print("[LANDiscovery] ⚠️ 无法创建广播消息数据")
+            return
+        }
         
         let parameters = NWParameters.udp
         parameters.allowLocalEndpointReuse = true
@@ -283,13 +330,21 @@ public class LANDiscovery {
             case .ready:
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
-                        print("[LANDiscovery] Broadcast send error: \(error)")
+                        print("[LANDiscovery] ⚠️ 广播发送错误: \(error)")
+                    } else {
+                        // 每10次广播输出一次日志，避免日志过多
+                        if Int.random(in: 0..<10) == 0 {
+                            print("[LANDiscovery] 📡 广播已发送 (peerID: \(peerID.prefix(12))...)")
+                        }
                     }
                     connection.cancel()
                 })
             case .failed(let error):
-                print("[LANDiscovery] Broadcast connection failed: \(error)")
+                print("[LANDiscovery] ⚠️ 广播连接失败: \(error)")
                 connection.cancel()
+            case .cancelled:
+                // 正常取消，不需要日志
+                break
             default:
                 break
             }

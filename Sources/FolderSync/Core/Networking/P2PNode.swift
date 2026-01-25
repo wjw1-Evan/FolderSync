@@ -288,29 +288,27 @@ public class P2PNode {
                 "vector_clocks"
             ]
             
-            // 备份重要文件和目录
+            // 备份重要文件（不包括目录，因为目录会被保护不会被删除）
             var fileBackups: [String: Data] = [:]
-            var vectorClocksBackup: URL?
             
             if fileManager.fileExists(atPath: folderSyncDir.path) {
                 if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
                     for item in items {
                         let itemName = item.lastPathComponent
                         
-                        // 跳过保护的文件和目录
+                        // 只备份保护的文件（不包括目录，因为目录会被保护不会被删除）
                         if protectedItems.contains(itemName) {
                             var isDirectory: ObjCBool = false
                             if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
-                                if isDirectory.boolValue && itemName == "vector_clocks" {
-                                    // 备份 vector_clocks 目录
-                                    vectorClocksBackup = item
-                                    print("[P2PNode] 📦 已标记备份目录: \(itemName)")
-                                } else if !isDirectory.boolValue {
+                                if !isDirectory.boolValue {
                                     // 备份文件
                                     if let data = try? Data(contentsOf: item) {
                                         fileBackups[itemName] = data
                                         print("[P2PNode] 📦 已备份文件: \(itemName)")
                                     }
+                                } else {
+                                    // 目录会被保护，不会被删除，所以不需要备份
+                                    print("[P2PNode] ℹ️ 目录 \(itemName) 受保护，无需备份")
                                 }
                             }
                         }
@@ -335,7 +333,7 @@ public class P2PNode {
                             var isDirectory: ObjCBool = false
                             if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
                                 if isDirectory.boolValue {
-                                    // 跳过所有目录（除了 vector_clocks，它已经被保护）
+                                    // 跳过所有目录（受保护的目录已在上面被跳过）
                                     continue
                                 }
                             }
@@ -363,18 +361,7 @@ public class P2PNode {
                 print("[P2PNode] ✅ 已恢复文件: \(fileName)")
             }
             
-            // 恢复 vector_clocks 目录（如果存在备份且目录不存在）
-            if let backupURL = vectorClocksBackup {
-                let destURL = folderSyncDir.appendingPathComponent("vector_clocks", isDirectory: true)
-                if !fileManager.fileExists(atPath: destURL.path) && fileManager.fileExists(atPath: backupURL.path) {
-                    do {
-                        try fileManager.copyItem(at: backupURL, to: destURL)
-                        print("[P2PNode] ✅ 已恢复目录: vector_clocks")
-                    } catch {
-                        print("[P2PNode] ⚠️ 恢复 vector_clocks 目录失败: \(error.localizedDescription)")
-                    }
-                }
-            }
+            // 注意：vector_clocks 目录在 protectedItems 中，不会被删除，因此不需要恢复逻辑
             
             // 重新生成密码（确保使用新密码）
             let newPassword = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32).description

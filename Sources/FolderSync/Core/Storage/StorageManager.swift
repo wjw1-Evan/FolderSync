@@ -11,6 +11,7 @@ public class StorageManager {
     private var conflictsFile: URL { appDir.appendingPathComponent("conflicts.json") }
     private var syncLogsFile: URL { appDir.appendingPathComponent("sync_logs.json") }
     private var vectorClocksDir: URL { appDir.appendingPathComponent("vector_clocks", isDirectory: true) }
+    private var blocksDir: URL { appDir.appendingPathComponent("blocks", isDirectory: true) } // 块存储目录
     
     // 内存缓存
     private var foldersCache: [SyncFolder]?
@@ -30,6 +31,11 @@ public class StorageManager {
         // 创建向量时钟目录
         if !fileManager.fileExists(atPath: vectorClocksDir.path) {
             try fileManager.createDirectory(at: vectorClocksDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
+        }
+        
+        // 创建块存储目录
+        if !fileManager.fileExists(atPath: blocksDir.path) {
+            try fileManager.createDirectory(at: blocksDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         }
         
         // 初始化缓存
@@ -64,7 +70,7 @@ public class StorageManager {
     }
     
     private func loadFolders() throws -> [SyncFolder] {
-        return try cacheQueue.sync {
+        return cacheQueue.sync {
             if let cached = foldersCache {
                 return cached
             }
@@ -245,7 +251,7 @@ public class StorageManager {
     }
     
     private func loadConflicts() throws -> [ConflictFile] {
-        return try cacheQueue.sync {
+        return cacheQueue.sync {
             if let cached = conflictsCache {
                 return cached
             }
@@ -308,7 +314,7 @@ public class StorageManager {
     }
     
     private func loadSyncLogs() throws -> [SyncLog] {
-        return try cacheQueue.sync {
+        return cacheQueue.sync {
             if let cached = syncLogsCache {
                 return cached
             }
@@ -333,5 +339,54 @@ public class StorageManager {
         cacheQueue.sync {
             syncLogsCache = logs
         }
+    }
+    
+    // MARK: - 块存储管理
+    
+    /// 获取块的存储路径（使用哈希的前2个字符作为子目录，避免单个目录文件过多）
+    private func blockPath(for hash: String) -> URL {
+        let prefix = String(hash.prefix(2))
+        let subDir = blocksDir.appendingPathComponent(prefix, isDirectory: true)
+        // 确保子目录存在
+        try? fileManager.createDirectory(at: subDir, withIntermediateDirectories: true)
+        return subDir.appendingPathComponent(hash)
+    }
+    
+    /// 保存块数据
+    public func saveBlock(hash: String, data: Data) throws {
+        let blockURL = blockPath(for: hash)
+        try data.write(to: blockURL, options: [.atomic])
+    }
+    
+    /// 获取块数据
+    public func getBlock(hash: String) throws -> Data? {
+        let blockURL = blockPath(for: hash)
+        guard fileManager.fileExists(atPath: blockURL.path) else {
+            return nil
+        }
+        return try Data(contentsOf: blockURL)
+    }
+    
+    /// 检查块是否存在
+    public func hasBlock(hash: String) -> Bool {
+        let blockURL = blockPath(for: hash)
+        return fileManager.fileExists(atPath: blockURL.path)
+    }
+    
+    /// 删除块（用于清理不再使用的块）
+    public func deleteBlock(hash: String) throws {
+        let blockURL = blockPath(for: hash)
+        if fileManager.fileExists(atPath: blockURL.path) {
+            try fileManager.removeItem(at: blockURL)
+        }
+    }
+    
+    /// 批量检查块是否存在
+    public func hasBlocks(hashes: [String]) -> [String: Bool] {
+        var result: [String: Bool] = [:]
+        for hash in hashes {
+            result[hash] = hasBlock(hash: hash)
+        }
+        return result
     }
 }

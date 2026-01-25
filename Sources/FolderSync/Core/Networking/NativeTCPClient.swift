@@ -12,8 +12,9 @@ public class NativeTCPClient {
     ///   - message: 同步请求消息
     ///   - address: 对等点地址（格式：ip:port）
     ///   - timeout: 超时时间（秒）
+    ///   - useTLS: 是否使用 TLS 加密（默认 false）
     /// - Returns: 响应数据
-    public func sendRequest(_ message: SyncRequest, to address: String, timeout: TimeInterval = 30.0) async throws -> Data {
+    public func sendRequest(_ message: SyncRequest, to address: String, timeout: TimeInterval = 30.0, useTLS: Bool = false) async throws -> Data {
         // 解析地址
         print("[NativeTCPClient] 🔍 解析地址: \(address)")
         let components = address.split(separator: ":")
@@ -42,9 +43,18 @@ public class NativeTCPClient {
         let portEndpoint = NWEndpoint.Port(rawValue: port)!
         let endpoint = NWEndpoint.hostPort(host: hostEndpoint, port: portEndpoint)
         
-        let parameters = NWParameters.tcp
-        // 设置连接参数
-        parameters.allowLocalEndpointReuse = true
+        let parameters: NWParameters
+        if useTLS {
+            // 使用 TLS 加密
+            parameters = NWParameters(tls: NWProtocolTLS.Options())
+            // 配置 TLS 选项：允许自签名证书（用于 P2P 场景）
+            // 注意：完整实现需要证书管理，当前为简化版本
+            parameters.allowLocalEndpointReuse = true
+        } else {
+            // 使用普通 TCP
+            parameters = NWParameters.tcp
+            parameters.allowLocalEndpointReuse = true
+        }
         // 不限制接口类型，允许使用任何可用网络
         let connection = NWConnection(to: endpoint, using: parameters)
         

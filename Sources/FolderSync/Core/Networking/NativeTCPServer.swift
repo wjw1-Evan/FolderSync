@@ -13,15 +13,27 @@ public class NativeTCPServer {
     public init() {}
     
     /// 启动服务器
-    /// - Parameter port: 监听端口（0 表示自动分配）
+    /// - Parameters:
+    ///   - port: 监听端口（0 表示自动分配）
+    ///   - useTLS: 是否使用 TLS 加密（默认 false）
     /// - Returns: 实际监听的端口
-    public func start(port: UInt16 = 0) throws -> UInt16 {
+    public func start(port: UInt16 = 0, useTLS: Bool = false) throws -> UInt16 {
         guard !isRunning else {
             throw NSError(domain: "NativeTCPServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器已在运行"])
         }
         
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
+        let parameters: NWParameters
+        if useTLS {
+            // 使用 TLS 加密
+            parameters = NWParameters(tls: NWProtocolTLS.Options())
+            // 配置 TLS 选项：允许自签名证书（用于 P2P 场景）
+            // 注意：完整实现需要证书管理，当前为简化版本
+            parameters.allowLocalEndpointReuse = true
+        } else {
+            // 使用普通 TCP
+            parameters = NWParameters.tcp
+            parameters.allowLocalEndpointReuse = true
+        }
         
         let portEndpoint = port == 0 ? nil : NWEndpoint.Port(rawValue: port)
         let listener = try NWListener(using: parameters, on: portEndpoint ?? NWEndpoint.Port(rawValue: 0)!)

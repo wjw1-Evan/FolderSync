@@ -46,15 +46,15 @@ public class EnvironmentChecker {
             let status: String
             
             switch report.result {
-            case .success(let message):
+            case .success:
                 icon = "✅"
                 status = "通过"
                 successCount += 1
-            case .warning(let message):
+            case .warning:
                 icon = "⚠️"
                 status = "警告"
                 warningCount += 1
-            case .error(let message):
+            case .error:
                 icon = "❌"
                 status = "失败"
                 errorCount += 1

@@ -2625,21 +2625,30 @@ public class SyncManager: ObservableObject {
     /// - Returns: 是否应该触发同步
     private func shouldTriggerSyncForPeer(peerID: String) -> Bool {
         // 检查该对等点与所有文件夹的同步冷却时间
-        // 如果该对等点与任何文件夹在最近30秒内已经同步过，就不立即触发同步
-        // 这样可以避免频繁的广播触发重复同步
+        // 如果该对等点与任何文件夹不在冷却期内，允许触发同步（因为至少有一个文件夹需要同步）
+        // 只有当该对等点与所有文件夹都在冷却期内时，才阻止同步
+        guard !folders.isEmpty else {
+            return true
+        }
+        
+        // 检查是否所有文件夹都在冷却期内
+        var allInCooldown = true
         for folder in folders {
             let cooldownKey = "\(peerID):\(folder.syncID)"
             if let lastSyncTime = peerSyncCooldown[cooldownKey] {
                 let timeSinceLastSync = Date().timeIntervalSince(lastSyncTime)
-                // 如果该文件夹在最近30秒内已经同步过，阻止同步
+                // 如果该文件夹在最近30秒内已经同步过，继续检查下一个
                 if timeSinceLastSync < peerSyncCooldownDuration {
-                    return false
+                    continue
                 }
             }
+            // 如果该文件夹不在冷却期内，说明至少有一个文件夹需要同步
+            allInCooldown = false
+            break
         }
         
-        // 该对等点与所有文件夹都不在冷却期内，允许触发同步
-        return true
+        // 如果所有文件夹都在冷却期内，阻止同步；否则允许同步
+        return !allInCooldown
     }
     
 }

@@ -491,15 +491,20 @@ public class P2PNode {
         for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ifptr.pointee
             
+            // 检查 ifa_addr 是否为 null（某些接口可能没有地址）
+            guard let ifaAddr = interface.ifa_addr else {
+                continue
+            }
+            
             // 检查是否为 IPv4 地址
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            let addrFamily = ifaAddr.pointee.sa_family
             if addrFamily == UInt8(AF_INET) {
                 // 检查接口名称，排除回环接口
                 let name = String(cString: interface.ifa_name)
                 if name.hasPrefix("en") || name.hasPrefix("eth") || name.hasPrefix("wlan") {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    getnameinfo(interface.ifa_addr,
-                               socklen_t(interface.ifa_addr.pointee.sa_len),
+                    getnameinfo(ifaAddr,
+                               socklen_t(ifaAddr.pointee.sa_len),
                                &hostname,
                                socklen_t(hostname.count),
                                nil,
@@ -631,10 +636,17 @@ public class P2PNode {
                 newAddr = newAddr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(newIP)/")
             } else {
                 // 如果地址中没有旧 IP 或 0.0.0.0，尝试查找并替换任何 IP
+                // 使用简单的字符串查找和替换
                 if let ipRange = newAddr.range(of: "/ip4/") {
-                    let afterIP = newAddr[ipRange.upperBound...]
-                    if let nextSlash = afterIP.firstIndex(of: "/") {
-                        let oldIPPart = String(newAddr[ipRange.lowerBound..<afterIP.index(after: nextSlash)])
+                    let afterIPStart = ipRange.upperBound
+                    // 在原始字符串的剩余部分中查找下一个斜杠
+                    // 使用 range(of:) 在子字符串中查找，然后转换为原始字符串的索引
+                    let remainingString = String(newAddr[afterIPStart...])
+                    if let slashIndex = remainingString.firstIndex(of: "/") {
+                        // 计算在原始字符串中的位置
+                        let slashOffset = remainingString.distance(from: remainingString.startIndex, to: slashIndex)
+                        let nextSlashInOriginal = newAddr.index(afterIPStart, offsetBy: slashOffset)
+                        let oldIPPart = String(newAddr[ipRange.lowerBound..<newAddr.index(after: nextSlashInOriginal)])
                         newAddr = newAddr.replacingOccurrences(of: oldIPPart, with: "/ip4/\(newIP)/")
                     }
                 }

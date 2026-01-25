@@ -111,6 +111,11 @@ public class NativeTCPClient {
                     print("[NativeTCPClient] ⏳ 连接等待中: \(address), 错误: \(error)")
                     // 等待状态不立即失败，但记录日志
                     // 如果等待时间过长，超时机制会处理
+                    // 注意：waiting 状态可能持续很长时间，超时机制会在 timeout 秒后取消连接
+                    
+                case .preparing:
+                    print("[NativeTCPClient] 🔄 连接准备中: \(address)")
+                    // 准备状态，继续等待
                     
                 case .failed(let error):
                     print("[NativeTCPClient] ❌ 连接失败: \(address), 错误: \(error)")
@@ -145,32 +150,46 @@ public class NativeTCPClient {
     
     /// 接收响应（带长度前缀）
     private func receiveResponse(from connection: NWConnection, completion: @escaping (Result<Data, Error>) -> Void) {
+        print("[NativeTCPClient] 📥 开始接收响应...")
         // 先接收长度（4 字节）
         connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { data, _, isComplete, error in
             if let error = error {
+                print("[NativeTCPClient] ❌ 接收长度失败: \(error)")
                 completion(.failure(error))
                 return
             }
             
             guard let lengthData = data, lengthData.count == 4 else {
+                print("[NativeTCPClient] ❌ 无法接收长度: data=\(data?.count ?? 0) 字节")
                 completion(.failure(NSError(domain: "NativeTCPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法接收长度"])))
                 return
             }
             
             let length = lengthData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            print("[NativeTCPClient] 📏 响应长度: \(length) 字节")
+            
+            guard length > 0 && length <= 100 * 1024 * 1024 else { // 最大100MB
+                print("[NativeTCPClient] ❌ 响应长度异常: \(length) 字节")
+                completion(.failure(NSError(domain: "NativeTCPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "响应长度异常: \(length)"])))
+                return
+            }
             
             // 接收实际数据
+            print("[NativeTCPClient] 📥 开始接收响应数据 (\(length) 字节)...")
             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { data, _, isComplete, error in
                 if let error = error {
+                    print("[NativeTCPClient] ❌ 接收数据失败: \(error)")
                     completion(.failure(error))
                     return
                 }
                 
                 guard let responseData = data, responseData.count == Int(length) else {
+                    print("[NativeTCPClient] ❌ 无法接收完整响应: 期望 \(length) 字节，实际 \(data?.count ?? 0) 字节")
                     completion(.failure(NSError(domain: "NativeTCPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法接收完整响应"])))
                     return
                 }
                 
+                print("[NativeTCPClient] ✅ 成功接收完整响应: \(responseData.count) 字节")
                 completion(.success(responseData))
             }
         }

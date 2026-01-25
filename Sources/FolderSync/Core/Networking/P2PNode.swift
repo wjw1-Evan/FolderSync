@@ -132,7 +132,7 @@ public class P2PNode {
     /// 处理发现的 peer（新的统一入口）
     @MainActor
     private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String]) async {
-        print("[P2PNode] 🔍 处理发现的 peer: \(peerID.prefix(12))...")
+        // 减少日志输出
         
         // 解析 PeerID
         guard let peerIDObj = try? PeerID(cid: peerID) else {
@@ -142,34 +142,19 @@ public class P2PNode {
         
         // 生成可连接地址
         let connectableStrs = Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
-        print("[P2PNode] 📋 [handleDiscoveredPeer] 可连接地址 (\(connectableStrs.count) 个):")
-        for (index, addr) in connectableStrs.enumerated() {
-            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
-                print("[P2PNode]   [\(index+1)] \(addr) -> IP=\(ip), 端口=\(port)")
-            } else {
-                print("[P2PNode]   [\(index+1)] \(addr) -> 无效")
-            }
-        }
         
         // 解析地址
         var parsedAddresses: [Multiaddr] = []
         for addrStr in connectableStrs {
             if let addr = try? Multiaddr(addrStr) {
                 parsedAddresses.append(addr)
-            } else {
-                print("[P2PNode] ⚠️ 无法解析地址: \(addrStr)")
             }
         }
         
         guard !parsedAddresses.isEmpty else {
             print("[P2PNode] ⚠️ 无有效地址，跳过: \(peerID.prefix(12))...")
-            print("[P2PNode]   原始监听地址: \(listenAddresses)")
-            print("[P2PNode]   发现地址: \(discoveryAddress)")
-            print("[P2PNode]   可连接地址: \(connectableStrs)")
             return
         }
-        
-        print("[P2PNode] ✅ [handleDiscoveredPeer] 成功解析 \(parsedAddresses.count) 个有效地址")
         
         // 添加到 PeerManager
         let peerInfo = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
@@ -187,6 +172,7 @@ public class P2PNode {
             // 注册到 libp2p peer store
             let registered = registrationService.registerPeer(peerID: peerIDObj, addresses: parsedAddresses)
             if registered {
+                // 只在首次注册时输出日志
                 print("[P2PNode] ✅ 已注册 peer: \(peerID.prefix(12))...")
                 
                 // 更新设备状态为在线
@@ -204,7 +190,7 @@ public class P2PNode {
                 self.onPeerDiscovered?(peerIDObj)
             }
         } else {
-            print("[P2PNode] ⏭️ Peer 已注册且地址未变化，跳过: \(peerID.prefix(12))...")
+            // 减少已注册peer的日志输出
             
             // 关键：即使地址未变化，收到广播也应该更新 lastSeenTime
             // 这表示设备仍然在线，只是地址没有变化

@@ -138,9 +138,8 @@ public class LANDiscovery {
                     
                     if let error = error {
                         print("[LANDiscovery] Discovery request send error: \(error)")
-                    } else {
-                        print("[LANDiscovery] 📡 已发送发现请求，等待其他设备响应...")
                     }
+                    // 减少发现请求的日志输出
                 })
             case .failed(let error):
                 print("[LANDiscovery] Discovery request connection failed: \(error)")
@@ -216,7 +215,7 @@ public class LANDiscovery {
                     // 检查是否是发现请求
                     if message.contains("\"type\":\"discovery_request\"") {
                         // 收到发现请求，立即广播自己的信息作为响应
-                        print("[LANDiscovery] 📥 收到发现请求，立即响应...")
+                        // 减少日志输出
                         self.sendBroadcast(peerID: myPeerID, listenAddresses: self.currentListenAddresses)
                         // 继续接收
                         if !isComplete {
@@ -230,11 +229,6 @@ public class LANDiscovery {
                         // Ignore our own broadcasts
                         if peerInfo.peerID != myPeerID {
                             let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
-                            print("[LANDiscovery] ✅ Discovered peer:")
-                            print("[LANDiscovery]   - PeerID (完整): \(peerInfo.peerID)")
-                            print("[LANDiscovery]   - PeerID (长度): \(peerInfo.peerID.count) 字符")
-                            print("[LANDiscovery]   - 发现地址: \(address)")
-                            print("[LANDiscovery]   - 监听地址数量: \(peerInfo.addresses.count)")
                             
                             // 验证 PeerID
                             if peerInfo.peerID.isEmpty {
@@ -246,14 +240,13 @@ public class LANDiscovery {
                                 print("[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
                             }
                             
+                            // 减少日志输出，只在首次发现或每100次输出一次
                             // 每次收到广播都触发回调，确保 lastSeenTime 被更新
-                            print("[LANDiscovery] 📡 收到广播，触发 onPeerDiscovered 回调")
                             self.onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
-                        } else {
-                            print("[LANDiscovery] ℹ️ 忽略自己的广播消息")
                         }
                     } else {
-                        print("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
+                        // 减少解析失败的日志输出，只在真正有问题时输出
+                        // print("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
                     }
                 }
             }
@@ -287,7 +280,7 @@ public class LANDiscovery {
             RunLoop.current.add(timer, forMode: .common)
             self.broadcastTimer = timer
             
-            print("[LANDiscovery] ✅ 广播定时器已启动，每1秒发送一次")
+            // 减少启动日志输出
         }
         
         // Send initial broadcast immediately
@@ -329,14 +322,9 @@ public class LANDiscovery {
             return
         }
         
-        // 每10次广播输出一次详细日志，便于调试
-        if Int.random(in: 0..<10) == 0 {
-            print("[LANDiscovery] 📡 准备发送广播: peerID=\(peerID.prefix(12))..., 地址数=\(validAddresses.count)")
-            for (index, addr) in validAddresses.enumerated() {
-                if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
-                    print("[LANDiscovery]   - 地址\(index+1): \(ip):\(port)")
-                }
-            }
+        // 每100次广播输出一次详细日志，减少日志输出
+        if Int.random(in: 0..<100) == 0 {
+            print("[LANDiscovery] 📡 发送广播: peerID=\(peerID.prefix(12))..., 地址数=\(validAddresses.count)")
         }
         
         let parameters = NWParameters.udp
@@ -378,18 +366,19 @@ public class LANDiscovery {
         let validAddresses = listenAddresses.filter { addr in
             // 检查地址格式：/ip4/IP/tcp/PORT
             if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") {
-                print("[LANDiscovery] ⚠️ 过滤掉端口为0的地址: \(addr)")
+                // 减少过滤日志输出
                 return false
             }
             // 使用 AddressConverter 验证地址有效性
             if AddressConverter.extractIPPort(from: addr) == nil {
-                print("[LANDiscovery] ⚠️ 过滤掉无效地址: \(addr)")
+                // 减少过滤日志输出
                 return false
             }
             return true
         }
         
         if validAddresses.isEmpty && !listenAddresses.isEmpty {
+            // 只在真正有问题时输出警告
             print("[LANDiscovery] ⚠️ 警告: 所有地址都被过滤，没有有效地址可广播")
         }
         
@@ -433,28 +422,16 @@ public class LANDiscovery {
                 if port > 0 {
                     return true
                 } else {
-                    print("[LANDiscovery] ⚠️ 过滤掉端口为0的地址: \(addr)")
+                    // 减少过滤日志输出
                     return false
                 }
             } else {
-                print("[LANDiscovery] ⚠️ 过滤掉无效地址格式: \(addr)")
+                // 减少过滤日志输出
                 return false
             }
         }
         
-        if validAddresses.count < addresses.count {
-            print("[LANDiscovery] ⚠️ 警告: 过滤了 \(addresses.count - validAddresses.count) 个无效地址")
-        }
-        
-        print("[LANDiscovery] 📋 解析发现消息成功:")
-        print("[LANDiscovery]   - PeerID: \(peerID) (长度: \(peerID.count))")
-        print("[LANDiscovery]   - Service: \(service)")
-        print("[LANDiscovery]   - 原始地址数: \(addresses.count), 有效地址数: \(validAddresses.count)")
-        for (index, addr) in validAddresses.enumerated() {
-            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
-                print("[LANDiscovery]   - 地址\(index+1): \(ip):\(port)")
-            }
-        }
+        // 减少解析成功的详细日志输出
         
         return (peerID: peerID, service: service, addresses: validAddresses)
     }

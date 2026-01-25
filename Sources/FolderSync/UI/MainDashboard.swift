@@ -470,8 +470,13 @@ struct PeerListView: View {
     @EnvironmentObject var syncManager: SyncManager
     let syncID: String
     
+    // 只获取在线的 peer
     var peers: [String] {
-        Array(syncManager.syncIDManager.getPeers(for: syncID))
+        let allPeerIDs = syncManager.syncIDManager.getPeers(for: syncID)
+        // 只返回在线的 peer
+        return allPeerIDs.filter { peerID in
+            syncManager.peerManager.isOnline(peerID)
+        }
     }
     
     var body: some View {

@@ -44,6 +44,7 @@ struct SyncHistoryView: View {
 private struct SyncLogRow: View {
     let log: SyncLog
     let folderName: String
+    @State private var isExpanded = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -72,11 +73,51 @@ private struct SyncLogRow: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                if let files = log.syncedFiles, !files.isEmpty {
+                    Button {
+                        isExpanded.toggle()
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             if let err = log.errorMessage {
                 Text(err)
                     .font(.caption2)
                     .foregroundStyle(.red)
+            }
+            
+            // 展开显示文件列表
+            if isExpanded, let files = log.syncedFiles, !files.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                    ForEach(Array(files.enumerated()), id: \.offset) { index, file in
+                        HStack(spacing: 8) {
+                            Image(systemName: iconForOperation(file.operation))
+                                .foregroundStyle(colorForOperation(file.operation))
+                                .font(.caption)
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let folderName = file.folderName {
+                                    Text(folderName)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(file.fileName)
+                                    .font(.caption)
+                            }
+                            Spacer()
+                            Text(byteCount(file.size))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .padding(.leading, 20)
+                .padding(.top, 4)
             }
         }
         .padding(.vertical, 4)
@@ -86,5 +127,23 @@ private struct SyncLogRow: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: n)
+    }
+    
+    private func iconForOperation(_ op: SyncLog.SyncedFileInfo.FileOperation) -> String {
+        switch op {
+        case .upload: return "arrow.up.circle.fill"
+        case .download: return "arrow.down.circle.fill"
+        case .delete: return "trash.circle.fill"
+        case .conflict: return "exclamationmark.triangle.fill"
+        }
+    }
+    
+    private func colorForOperation(_ op: SyncLog.SyncedFileInfo.FileOperation) -> Color {
+        switch op {
+        case .upload: return .blue
+        case .download: return .green
+        case .delete: return .red
+        case .conflict: return .orange
+        }
     }
 }

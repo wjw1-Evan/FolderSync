@@ -34,6 +34,9 @@ public class SyncManager: ObservableObject {
     // 文件监控防抖：syncID -> 防抖任务
     private var debounceTasks: [String: Task<Void, Never>] = [:]
     private let debounceDelay: TimeInterval = 2.0 // 2 秒防抖延迟
+    // 文件写入稳定性检测：记录文件路径和上次检查的大小
+    private var fileStabilityCheck: [String: (size: Int64, lastCheck: Date)] = [:]
+    private let fileStabilityDelay: TimeInterval = 3.0 // 文件大小稳定3秒后才认为写入完成
     
     // 设备统计（用于触发UI更新）
     @Published private(set) var onlineDeviceCountValue: Int = 1 // 包括自身，默认为1
@@ -220,6 +223,10 @@ public class SyncManager: ObservableObject {
             // 如果没有对等点，重置设备计数（只保留自身）
             onlineDeviceCountValue = 1
             offlineDeviceCountValue = 0
+            // 同时更新所有文件夹的 peerCount
+            for folder in folders {
+                updatePeerCount(for: folder.syncID)
+            }
             return
         }
         
@@ -534,41 +541,31 @@ public class SyncManager: ObservableObject {
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path in
             print("[SyncManager] 📝 文件变化: \(path)")
             
-            // 使用防抖机制，避免频繁同步
-            let syncID = folder.syncID
-            
-            // 取消之前的防抖任务
-            self?.debounceTasks[syncID]?.cancel()
-            
-            // 创建新的防抖任务
-            let debounceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
+            // 检查文件是否正在被写入（文件大小是否稳定）
+            Task { [weak self] in
+                guard let self = self else { return }
                 
-                guard !Task.isCancelled else { return }
-                
-                // 检查是否有同步正在进行
-                let hasSyncInProgress = await MainActor.run {
-                    guard let self = self else { return false }
-                    let allPeers = self.peerManager.allPeers
-                    for peerInfo in allPeers {
-                        let syncKey = "\(syncID):\(peerInfo.peerIDString)"
-                        if self.syncInProgress.contains(syncKey) {
-                            return true
-                        }
-                    }
-                    return false
-                }
-                
-                if hasSyncInProgress {
-                    print("[SyncManager] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
+                // 检查文件是否存在且是文件（不是目录）
+                let fileManager = FileManager.default
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
+                      !isDirectory.boolValue else {
+                    // 是目录或文件不存在，直接触发同步
+                    self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
                     return
                 }
                 
-                print("[SyncManager] 🔄 防抖延迟结束，开始同步: \(syncID)")
-                self?.triggerSync(for: folder)
+                // 检查文件是否正在写入
+                let isStable = await self.checkFileStability(filePath: path)
+                if isStable {
+                    // 文件已稳定，触发同步
+                    self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
+                } else {
+                    // 文件正在写入，等待稳定后再触发同步
+                    print("[SyncManager] ⏳ 文件正在写入中，等待稳定: \(path)")
+                    await self.waitForFileStability(filePath: path, folder: folder, syncID: folder.syncID)
+                }
             }
-            
-            self?.debounceTasks[syncID] = debounceTask
         }
         monitor.start()
         monitors[folder.id] = monitor
@@ -577,6 +574,102 @@ public class SyncManager: ObservableObject {
     private func stopMonitoring(_ folder: SyncFolder) {
         monitors[folder.id]?.stop()
         monitors.removeValue(forKey: folder.id)
+    }
+    
+    /// 检查文件是否稳定（文件大小在短时间内没有变化）
+    private func checkFileStability(filePath: String) async -> Bool {
+        let fileManager = FileManager.default
+        
+        guard let attributes = try? fileManager.attributesOfItem(atPath: filePath),
+              let fileSize = attributes[.size] as? Int64 else {
+            // 无法获取文件大小，认为不稳定
+            return false
+        }
+        
+        let now = Date()
+        let fileKey = filePath
+        
+        // 检查是否有之前的记录
+        if let previous = fileStabilityCheck[fileKey] {
+            // 如果文件大小没有变化，且距离上次检查已超过稳定时间
+            if previous.size == fileSize {
+                let timeSinceLastCheck = now.timeIntervalSince(previous.lastCheck)
+                if timeSinceLastCheck >= fileStabilityDelay {
+                    // 文件大小稳定，清除记录
+                    fileStabilityCheck.removeValue(forKey: fileKey)
+                    return true
+                }
+            } else {
+                // 文件大小变化了，更新记录
+                fileStabilityCheck[fileKey] = (size: fileSize, lastCheck: now)
+                return false
+            }
+        } else {
+            // 首次检查，记录当前大小
+            fileStabilityCheck[fileKey] = (size: fileSize, lastCheck: now)
+            return false
+        }
+        
+        return false
+    }
+    
+    /// 等待文件写入完成（文件大小稳定）
+    private func waitForFileStability(filePath: String, folder: SyncFolder, syncID: String) async {
+        let maxWaitTime: TimeInterval = 60.0 // 最多等待60秒
+        let checkInterval: TimeInterval = 1.0 // 每秒检查一次
+        let startTime = Date()
+        
+        while Date().timeIntervalSince(startTime) < maxWaitTime {
+            // 等待一段时间后检查
+            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            
+            let isStable = await checkFileStability(filePath: filePath)
+            if isStable {
+                print("[SyncManager] ✅ 文件写入完成，触发同步: \(filePath)")
+                triggerSyncAfterDebounce(for: folder, syncID: syncID)
+                return
+            }
+        }
+        
+        // 超时后仍然触发同步（可能文件很大，需要更长时间）
+        print("[SyncManager] ⏱️ 等待文件稳定超时，触发同步: \(filePath)")
+        triggerSyncAfterDebounce(for: folder, syncID: syncID)
+    }
+    
+    /// 防抖触发同步
+    private func triggerSyncAfterDebounce(for folder: SyncFolder, syncID: String) {
+        // 取消之前的防抖任务
+        debounceTasks[syncID]?.cancel()
+        
+        // 创建新的防抖任务
+        let debounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
+            
+            guard !Task.isCancelled else { return }
+            
+            // 检查是否有同步正在进行
+            let hasSyncInProgress = await MainActor.run {
+                guard let self = self else { return false }
+                let allPeers = self.peerManager.allPeers
+                for peerInfo in allPeers {
+                    let syncKey = "\(syncID):\(peerInfo.peerIDString)"
+                    if self.syncInProgress.contains(syncKey) {
+                        return true
+                    }
+                }
+                return false
+            }
+            
+            if hasSyncInProgress {
+                print("[SyncManager] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
+                return
+            }
+            
+            print("[SyncManager] 🔄 防抖延迟结束，开始同步: \(syncID)")
+            self?.triggerSync(for: folder)
+        }
+        
+        debounceTasks[syncID] = debounceTask
     }
     
     private let ignorePatterns = [".DS_Store", ".git/", "node_modules/", ".build/", ".swiftpm/"]
@@ -656,6 +749,32 @@ public class SyncManager: ObservableObject {
             let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
             if let folder = folder {
                 let fileURL = folder.localPath.appendingPathComponent(relativePath)
+                
+                // 检查文件是否正在写入
+                let fileManager = FileManager.default
+                if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                   let fileSize = attributes[.size] as? Int64,
+                   fileSize == 0 {
+                    // 检查文件修改时间
+                    if let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                       let mtime = resourceValues.contentModificationDate {
+                        let timeSinceModification = Date().timeIntervalSince(mtime)
+                        if timeSinceModification < fileStabilityDelay {
+                            // 文件可能是0字节且刚被修改，可能还在写入，等待一下
+                            print("[SyncManager] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
+                            try? await Task.sleep(nanoseconds: UInt64(fileStabilityDelay * 1_000_000_000))
+                            
+                            // 再次检查文件大小
+                            if let newAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                               let newFileSize = newAttributes[.size] as? Int64,
+                               newFileSize == 0 {
+                                // 仍然是0字节，返回错误
+                                return .error("文件可能正在写入中，请稍后重试")
+                            }
+                        }
+                    }
+                }
+                
                 let data = try Data(contentsOf: fileURL)
                 return .fileData(syncID: syncID, path: relativePath, data: data)
             }
@@ -1076,6 +1195,7 @@ public class SyncManager: ObservableObject {
             let myPeerID = p2pNode.peerID ?? ""
             var totalOps = 0
             var completedOps = 0
+            var syncedFiles: [SyncLog.SyncedFileInfo] = [] // 记录同步的文件信息
             
             enum DownloadAction {
                 case skip
@@ -1172,10 +1292,31 @@ public class SyncManager: ObservableObject {
                     folder: folder
                 )
                 if case .deleteAck = delRes {
+                    let fileManager = FileManager.default
                     for rel in toDelete {
                         let fileURL = folder.localPath.appendingPathComponent(rel)
-                        try? FileManager.default.removeItem(at: fileURL)
+                        let fileName = (rel as NSString).lastPathComponent
+                        let pathDir = (rel as NSString).deletingLastPathComponent
+                        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
+                        
+                        // 获取文件大小（如果文件还存在）
+                        var fileSize: Int64 = 0
+                        if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                           let size = attributes[.size] as? Int64 {
+                            fileSize = size
+                        }
+                        
+                        try? fileManager.removeItem(at: fileURL)
                         try? StorageManager.shared.deleteVectorClock(syncID: folder.syncID, path: rel)
+                        
+                        // 记录删除的文件信息
+                        syncedFiles.append(SyncLog.SyncedFileInfo(
+                            path: rel,
+                            fileName: fileName,
+                            folderName: folderName,
+                            size: fileSize,
+                            operation: .delete
+                        ))
                     }
                     completedOps += toDelete.count
                 }
@@ -1239,6 +1380,17 @@ public class SyncManager: ObservableObject {
                     try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
                     totalDownloadBytes += Int64(data.count)
                     await MainActor.run { self.addDownloadBytes(Int64(data.count)) }
+                    
+                    // 记录同步的文件信息
+                    let pathDir = (path as NSString).deletingLastPathComponent
+                    let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
+                    syncedFiles.append(SyncLog.SyncedFileInfo(
+                        path: path,
+                        fileName: fileName,
+                        folderName: folderName,
+                        size: Int64(data.count),
+                        operation: .download
+                    ))
                 }
                 completedOps += 1
                 
@@ -1300,6 +1452,16 @@ public class SyncManager: ObservableObject {
                     try? StorageManager.shared.addConflict(cf)
                     totalDownloadBytes += Int64(data.count)
                     await MainActor.run { self.addDownloadBytes(Int64(data.count)) }
+                    
+                    // 记录冲突文件信息
+                    let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
+                    syncedFiles.append(SyncLog.SyncedFileInfo(
+                        path: path,
+                        fileName: fileName,
+                        folderName: folderName,
+                        size: Int64(data.count),
+                        operation: .conflict
+                    ))
                 }
                 completedOps += 1
                 
@@ -1350,6 +1512,17 @@ public class SyncManager: ObservableObject {
                 await MainActor.run { self.addUploadBytes(Int64(data.count)) }
                 completedOps += 1
                 
+                // 记录上传的文件信息
+                let pathDir = (path as NSString).deletingLastPathComponent
+                let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
+                syncedFiles.append(SyncLog.SyncedFileInfo(
+                    path: path,
+                    fileName: fileName,
+                    folderName: folderName,
+                    size: Int64(data.count),
+                    operation: .upload
+                ))
+                
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 }
@@ -1375,7 +1548,7 @@ public class SyncManager: ObservableObject {
                 self.updateDeviceCounts()
             }
             let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
-            let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date())
+            let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date(), syncedFiles: syncedFiles.isEmpty ? nil : syncedFiles)
             try? StorageManager.shared.addSyncLog(log)
         } catch {
             let duration = Date().timeIntervalSince(startedAt)
@@ -1437,7 +1610,13 @@ public class SyncManager: ObservableObject {
     @MainActor
     private func updatePeerCount(for syncID: String) {
         if let index = folders.firstIndex(where: { $0.syncID == syncID }) {
-            folders[index].peerCount = syncIDManager.getPeerCount(for: syncID)
+            // 获取该 syncID 的所有 peer，但只统计在线的
+            let peerIDs = syncIDManager.getPeers(for: syncID)
+            let onlinePeerCount = peerIDs.filter { peerID in
+                peerManager.isOnline(peerID)
+            }.count
+            
+            folders[index].peerCount = onlinePeerCount
             // 持久化保存更新
             do {
                 try StorageManager.shared.saveFolder(folders[index])
@@ -1577,7 +1756,32 @@ public class SyncManager: ObservableObject {
                     }
                 } else {
                     // 处理文件 - 检查文件是否可读
+                    // 先检查文件是否正在写入（文件大小是否稳定）
+                    let fileKey = fileURL.path
+                    if let stability = fileStabilityCheck[fileKey] {
+                        let timeSinceLastCheck = Date().timeIntervalSince(stability.lastCheck)
+                        // 如果文件在最近3秒内被修改过，可能还在写入，跳过此文件
+                        if timeSinceLastCheck < fileStabilityDelay {
+                            print("[SyncManager] ⏳ 跳过正在写入的文件: \(relativePath)")
+                            continue
+                        }
+                    }
+                    
                     do {
+                        // 检查文件大小，如果为0且文件很新，可能还在写入
+                        let fileAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+                        if let fileSize = fileAttributes[.size] as? Int64,
+                           fileSize == 0 {
+                            // 检查文件修改时间，如果文件在最近3秒内被修改，可能还在写入
+                            if let mtime = resourceValues.contentModificationDate {
+                                let timeSinceModification = Date().timeIntervalSince(mtime)
+                                if timeSinceModification < fileStabilityDelay {
+                                    print("[SyncManager] ⏳ 跳过可能正在写入的0字节文件: \(relativePath)")
+                                    continue
+                                }
+                            }
+                        }
+                        
                         let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
                         let hash = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
                         let mtime = resourceValues.contentModificationDate ?? Date()
@@ -1672,6 +1876,11 @@ public class SyncManager: ObservableObject {
         // 如果计数发生变化，输出日志
         if oldOnline != onlineDeviceCountValue || oldOffline != offlineDeviceCountValue {
             print("[SyncManager] 📊 设备计数已更新: 在线=\(onlineDeviceCountValue) (之前: \(oldOnline)), 离线=\(offlineDeviceCountValue) (之前: \(oldOffline))")
+        }
+        
+        // 更新所有文件夹的在线设备统计
+        for folder in folders {
+            updatePeerCount(for: folder.syncID)
         }
     }
     

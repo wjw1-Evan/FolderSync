@@ -27,6 +27,9 @@ public class NativeNetworkService {
         }
         
         let actualPort = try server.start(port: port)
+        guard actualPort > 0 else {
+            throw NSError(domain: "NativeNetworkService", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：无法获取有效端口"])
+        }
         self.tcpServer = server
         self.listeningPort = actualPort
         print("[NativeNetworkService] ✅ TCP 服务器已启动，端口: \(actualPort)")
@@ -42,8 +45,12 @@ public class NativeNetworkService {
     }
     
     /// 获取监听端口
+    /// 注意：只返回有效的端口（> 0），端口为0时返回nil
     public var serverPort: UInt16? {
-        return listeningPort
+        guard let port = listeningPort, port > 0 else {
+            return nil
+        }
+        return port
     }
     
     /// 发送请求到对等点

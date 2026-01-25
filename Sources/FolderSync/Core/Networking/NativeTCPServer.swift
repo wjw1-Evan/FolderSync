@@ -48,10 +48,18 @@ public class NativeTCPServer {
         self.isRunning = true
         
         // 获取实际端口
-        if let actualPort = listener.port {
-            return actualPort.rawValue
+        // 等待监听器就绪，最多等待2秒
+        var attempts = 0
+        while attempts < 20 {
+            if let actualPort = listener.port, actualPort.rawValue > 0 {
+                return actualPort.rawValue
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+            attempts += 1
         }
-        return 0
+        
+        // 如果仍然无法获取端口，抛出错误
+        throw NSError(domain: "NativeTCPServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法获取服务器监听端口"])
     }
     
     /// 停止服务器
@@ -63,7 +71,10 @@ public class NativeTCPServer {
     
     /// 获取监听端口
     public var listeningPort: UInt16? {
-        return listener?.port?.rawValue
+        guard let port = listener?.port?.rawValue, port > 0 else {
+            return nil
+        }
+        return port
     }
     
     /// 处理连接

@@ -214,7 +214,12 @@ public class P2PNode {
             discoveryIP = discoveryAddress
         }
         guard !discoveryIP.isEmpty else { return listenAddresses }
-        return listenAddresses.map { addr in
+        return listenAddresses.compactMap { addr in
+            // 跳过端口为0的地址（0表示自动分配，不能用于连接）
+            if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") {
+                print("[P2PNode] ⚠️ 跳过端口为0的地址: \(addr)")
+                return nil
+            }
             if addr.contains("/ip4/0.0.0.0/") {
                 return addr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(discoveryIP)/")
             }
@@ -253,6 +258,9 @@ public class P2PNode {
         // 启动原生 TCP 服务器
         do {
             let nativePort = try nativeNetwork.startServer(port: 0)
+            guard nativePort > 0 else {
+                throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "TCP 服务器启动失败：无法获取有效端口"])
+            }
             print("[P2PNode] ✅ 原生 TCP 服务器已启动，端口: \(nativePort)")
         } catch {
             print("[P2PNode] ⚠️ 原生 TCP 服务器启动失败: \(error)")
@@ -279,10 +287,12 @@ public class P2PNode {
         var addresses: [String] = []
         
         // 添加原生 TCP 服务器的地址
-        if let nativePort = nativeNetwork.serverPort {
+        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
             let nativeAddress = "/ip4/\(localIP)/tcp/\(nativePort)"
             addresses.append(nativeAddress)
             print("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
+        } else {
+            print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法添加到广播")
         }
         
         lanDiscovery?.updateListenAddresses(addresses)
@@ -299,12 +309,10 @@ public class P2PNode {
         print("\n[P2PNode] ========== P2P 节点启动状态 ==========")
         print("[P2PNode] PeerID: \(peerID.b58String)")
         
-        if let nativePort = nativeNetwork.serverPort {
+        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
             print("[P2PNode] 监听地址: /ip4/\(localIP)/tcp/\(nativePort)")
-            print("[P2PNode] ✅ Ready for connections")
-        } else {
-            print("[P2PNode] ⚠️ 警告: 未检测到监听地址")
         }
+        print("[P2PNode] ✅ Ready for connections")
         
         if lanDiscovery != nil {
             print("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
@@ -417,8 +425,8 @@ public class P2PNode {
         print("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
         
         // 获取当前原生 TCP 服务器的端口
-        guard let currentPort = nativeNetwork.serverPort else {
-            print("[P2PNode] ⚠️ 当前没有监听地址，无法更新")
+        guard let currentPort = nativeNetwork.serverPort, currentPort > 0 else {
+            print("[P2PNode] ⚠️ 当前没有有效的监听端口，无法更新")
             return
         }
         
@@ -428,12 +436,18 @@ public class P2PNode {
         // 使用新 IP 重新启动服务器（保持相同端口）
         do {
             let newPort = try nativeNetwork.startServer(port: currentPort)
+            guard newPort > 0 else {
+                throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：端口无效"])
+            }
             print("[P2PNode] 🔌 使用新 IP 和端口重新监听: \(newIP):\(newPort)")
         } catch {
             print("[P2PNode] ⚠️ 重新启动服务器失败: \(error)")
             // 尝试使用自动分配的端口
             do {
                 let newPort = try nativeNetwork.startServer(port: 0)
+                guard newPort > 0 else {
+                    throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：无法获取有效端口"])
+                }
                 print("[P2PNode] 🔌 使用新 IP 和自动分配端口重新监听: \(newIP):\(newPort)")
             } catch {
                 print("[P2PNode] ❌ 无法重新启动服务器: \(error)")
@@ -446,9 +460,12 @@ public class P2PNode {
         
         // 更新 LAN Discovery 的广播地址
         var newAddresses: [String] = []
-        if let nativePort = nativeNetwork.serverPort {
+        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
             let nativeAddress = "/ip4/\(newIP)/tcp/\(nativePort)"
             newAddresses.append(nativeAddress)
+            print("[P2PNode] ✅ 已更新广播地址: \(nativeAddress)")
+        } else {
+            print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法更新广播地址")
         }
         
         lanDiscovery?.updateListenAddresses(newAddresses)
@@ -483,7 +500,8 @@ public class P2PNode {
     }
 
     public var listenAddresses: [String] {
-        guard let nativePort = nativeNetwork.serverPort else {
+        guard let nativePort = nativeNetwork.serverPort, nativePort > 0 else {
+            print("[P2PNode] ⚠️ 无法获取有效的监听端口")
             return []
         }
         let localIP = getLocalIPAddress()

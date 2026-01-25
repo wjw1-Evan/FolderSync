@@ -19,8 +19,9 @@ public class NativeTCPClient {
         guard components.count == 2,
               let host = String(components[0]).removingPercentEncoding,
               let portString = String(components[1]).removingPercentEncoding,
-              let port = UInt16(portString) else {
-            throw NSError(domain: "NativeTCPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的地址格式: \(address)"])
+              let port = UInt16(portString),
+              port > 0 else {
+            throw NSError(domain: "NativeTCPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的地址格式或端口为0: \(address)"])
         }
         
         // 编码请求

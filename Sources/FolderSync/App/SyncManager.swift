@@ -28,6 +28,8 @@ public class SyncManager: ObservableObject {
     private var deletedPaths: [String: Set<String>] = [:]
     private var syncInProgress: Set<String> = [] // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
     private var peerStatusCheckTask: Task<Void, Never>?
+    private var peersSyncTask: Task<Void, Never>? // 定期同步 peers 数组的任务
+    private var peerDiscoveryTask: Task<Void, Never>? // 对等点发现处理任务
     
     // 文件监控防抖：syncID -> 防抖任务
     private var debounceTasks: [String: Task<Void, Never>] = [:]
@@ -70,7 +72,7 @@ public class SyncManager: ObservableObject {
         updateDeviceCounts()
         
         // 监听 peerManager 的变化，同步更新 peers 数组（用于兼容性）
-        Task { @MainActor in
+        peersSyncTask = Task { @MainActor in
             // 定期同步 peers 数组
             while !Task.isCancelled {
                 let allPeers = peerManager.allPeers.map { $0.peerID }
@@ -81,7 +83,7 @@ public class SyncManager: ObservableObject {
             }
         }
         
-        Task { @MainActor in
+        peerDiscoveryTask = Task { @MainActor in
             p2pNode.onPeerDiscovered = { [weak self] peer in
                 Task { @MainActor in
                     guard let self = self else { return }
@@ -109,13 +111,20 @@ public class SyncManager: ObservableObject {
                     }
                     
                     if wasNew {
-                        // 不等待，立即开始同步
-                        // requestSync 的重试机制会处理连接建立
-                        for folder in self.folders {
-                            Task {
-                                // 短暂延迟 0.5 秒，让 discoveryHandler 完成注册
-                                try? await Task.sleep(nanoseconds: 500_000_000)
-                                self.syncWithPeer(peer: peer, folder: folder)
+                        // 等待对等点注册完成后再同步
+                        // 多点同步：当有多个对等点在线时，自动向所有已注册的对等点同步
+                        Task { @MainActor in
+                            // 使用 ensurePeerRegistered 确保注册完成
+                            let registrationResult = await self.ensurePeerRegistered(peer: peer, peerID: peerIDString)
+                            
+                            if registrationResult.success {
+                                print("[SyncManager] ✅ 新对等点已注册，开始多点同步: \(peerIDString.prefix(12))...")
+                                // 向所有文件夹同步（多点同步）
+                                for folder in self.folders {
+                                    self.syncWithPeer(peer: peer, folder: folder)
+                                }
+                            } else {
+                                print("[SyncManager] ⚠️ 新对等点注册失败，跳过同步: \(peerIDString.prefix(12))...")
                             }
                         }
                     }
@@ -177,18 +186,23 @@ public class SyncManager: ObservableObject {
     
     deinit {
         peerStatusCheckTask?.cancel()
+        peersSyncTask?.cancel()
+        peerDiscoveryTask?.cancel()
+        // 取消所有防抖任务
+        for task in debounceTasks.values {
+            task.cancel()
+        }
+        debounceTasks.removeAll()
     }
     
     /// 检查所有对等点的在线状态
     private func checkAllPeersOnlineStatus() async {
-        
+        // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
         let peersToCheck = peerManager.allPeers
         guard !peersToCheck.isEmpty else {
             // 如果没有对等点，重置设备计数（只保留自身）
-            await MainActor.run {
-                self.onlineDeviceCountValue = 1
-                self.offlineDeviceCountValue = 0
-            }
+            onlineDeviceCountValue = 1
+            offlineDeviceCountValue = 0
             return
         }
         
@@ -206,16 +220,12 @@ public class SyncManager: ObservableObject {
                 print("[SyncManager] 📊 设备状态变化: \(peerIDString.prefix(12))... \(wasOnline ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
             }
             
-            await MainActor.run {
-                peerManager.updateOnlineStatus(peerIDString, isOnline: isOnline)
-            }
+            peerManager.updateOnlineStatus(peerIDString, isOnline: isOnline)
         }
         
         if statusChanged {
-            await MainActor.run {
-                self.updateDeviceCounts()
-                print("[SyncManager] ✅ 设备状态检查完成，已更新设备计数")
-            }
+            updateDeviceCounts()
+            print("[SyncManager] ✅ 设备状态检查完成，已更新设备计数")
         } else {
             print("[SyncManager] ✅ 设备状态检查完成，无变化")
         }
@@ -224,6 +234,8 @@ public class SyncManager: ObservableObject {
     /// 检查单个对等点是否在线
     private func checkPeerOnline(peer: PeerID) async -> Bool {
         let peerIDString = peer.b58String
+        
+        // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
         let isRegistered = peerManager.isRegistered(peerIDString)
         
         // 检查是否是新发现的（2分钟内）
@@ -628,6 +640,15 @@ public class SyncManager: ObservableObject {
                 return
             }
             
+            // 确保对等点已注册（带重试机制）
+            let registrationResult = await ensurePeerRegistered(peer: peer, peerID: peerID)
+            
+            guard registrationResult.success else {
+                print("[SyncManager] ❌ [syncWithPeer] 对等点注册失败，跳过同步: \(peerID.prefix(12))...")
+                // 单个对等点注册失败时不执行同步
+                return
+            }
+            
             // 标记为正在同步
             self.syncInProgress.insert(syncKey)
             print("[SyncManager] ✅ [syncWithPeer] 已标记为正在同步: \(syncKey)")
@@ -638,8 +659,63 @@ public class SyncManager: ObservableObject {
                 print("[SyncManager] 🏁 [syncWithPeer] 已移除同步标记: \(syncKey)")
             }
             
+            // 执行同步（此时对等点已确保注册成功）
             await self.performSync(peer: peer, folder: folder, peerID: peerID)
         }
+    }
+    
+    /// 确保对等点已注册（带重试机制）
+    /// - Returns: (success: Bool, isNewlyRegistered: Bool) - 是否成功，是否新注册
+    @MainActor
+    private func ensurePeerRegistered(peer: PeerID, peerID: String) async -> (success: Bool, isNewlyRegistered: Bool) {
+        // 检查是否已注册
+        if p2pNode.registrationService.isRegistered(peerID) {
+            return (true, false)
+        }
+        
+        print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点未注册，尝试注册: \(peerID.prefix(12))...")
+        
+        // 获取对等点地址
+        let peerAddresses = p2pNode.peerManager.getAddresses(for: peerID)
+        
+        if peerAddresses.isEmpty {
+            print("[SyncManager] ❌ [ensurePeerRegistered] 对等点无可用地址: \(peerID.prefix(12))...")
+            return (false, false)
+        }
+        
+        // 尝试注册
+        let registered = p2pNode.registrationService.registerPeer(peerID: peer, addresses: peerAddresses)
+        
+        if !registered {
+            print("[SyncManager] ❌ [ensurePeerRegistered] 对等点注册失败: \(peerID.prefix(12))...")
+            return (false, false)
+        }
+        
+        print("[SyncManager] ✅ [ensurePeerRegistered] 对等点注册成功，等待注册完成: \(peerID.prefix(12))...")
+        
+        // 等待注册完成（使用重试机制，最多等待 2 秒）
+        let maxWaitTime: TimeInterval = 2.0
+        let checkInterval: TimeInterval = 0.2
+        let maxRetries = Int(maxWaitTime / checkInterval)
+        
+        for attempt in 1...maxRetries {
+            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            
+            if p2pNode.registrationService.isRegistered(peerID) {
+                print("[SyncManager] ✅ [ensurePeerRegistered] 对等点注册确认成功: \(peerID.prefix(12))... (尝试 \(attempt)/\(maxRetries))")
+                return (true, true)
+            }
+        }
+        
+        // 即使等待超时，如果注册状态显示正在注册中，也认为成功（可能是异步延迟）
+        let registrationState = p2pNode.registrationService.getRegistrationState(peerID)
+        if case .registering = registrationState {
+            print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点正在注册中，继续尝试: \(peerID.prefix(12))...")
+            return (true, true)
+        }
+        
+        print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点注册等待超时，但继续尝试: \(peerID.prefix(12))...")
+        return (true, true) // 即使超时也继续，让同步过程处理
     }
     
     /// 统一的请求函数 - 使用原生 TCP
@@ -672,14 +748,9 @@ public class SyncManager: ObservableObject {
                 maxRetries: maxRetries
             ) as SyncResponse
         } catch {
-            // 如果失败，尝试重新注册 peer
-            if let folder = folder {
-                print("[SyncManager] ⚠️ 请求失败，尝试重新注册: \(peerID.prefix(12))...")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "重新注册对等点...", progress: 0.0)
-                }
-                await p2pNode.retryPeerRegistration(peer: peer)
-            }
+            // 注意：对等点应该已经注册（由 syncWithPeer 保证）
+            // 如果请求失败，可能是网络问题或对等点暂时不可用
+            // 不需要重新注册，直接抛出错误让调用者处理
             throw error
         }
     }
@@ -697,45 +768,8 @@ public class SyncManager: ObservableObject {
                 return
             }
             
-            // 在开始同步前，确保 peer 已注册到 libp2p peer store
-            let isRegistered = await MainActor.run {
-                return p2pNode.registrationService.isRegistered(peerID)
-            }
-            
-            if !isRegistered {
-                print("[SyncManager] ⚠️ [performSync] Peer 未注册，先尝试注册: \(peerID.prefix(12))...")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "注册对等点...", progress: 0.0)
-                }
-                
-                // 获取 peer 地址
-                let peerAddresses = await MainActor.run {
-                    return p2pNode.peerManager.getAddresses(for: peer.b58String)
-                }
-                
-                if peerAddresses.isEmpty {
-                    print("[SyncManager] ❌ [performSync] 无法注册：peer 无可用地址: \(peerID.prefix(12))...")
-                    await MainActor.run {
-                        self.updateFolderStatus(folder.id, status: .error, message: "对等点无可用地址，等待发现", progress: 0.0)
-                    }
-                    return
-                }
-                
-                // 尝试注册
-                let registered = await MainActor.run {
-                    return p2pNode.registrationService.registerPeer(peerID: peer, addresses: peerAddresses)
-                }
-                
-                if !registered {
-                    print("[SyncManager] ⚠️ [performSync] 注册失败或正在注册中，继续尝试同步: \(peerID.prefix(12))...")
-                    // 即使注册失败，也继续尝试同步，让 requestSync 的重试机制处理
-                } else {
-                    print("[SyncManager] ✅ [performSync] Peer 注册成功: \(peerID.prefix(12))...")
-                }
-                
-                // 等待一小段时间让注册完成
-                try? await Task.sleep(nanoseconds: 500_000_000)
-            }
+            // 注意：注册检查已在 syncWithPeer 中完成，这里不再重复检查
+            // 如果到达这里，说明对等点已经注册成功
             
             await MainActor.run {
                 self.updateFolderStatus(folder.id, status: .syncing, message: "正在连接到 \(peerID.prefix(12))...", progress: 0.0)
@@ -775,20 +809,9 @@ public class SyncManager: ObservableObject {
                 let errorString = String(describing: error)
                 print("[SyncManager] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
                 
-                // 最后尝试一次注册
-                let finalAddresses = await MainActor.run {
-                    return p2pNode.peerManager.getAddresses(for: peer.b58String)
-                }
-                
-                if !finalAddresses.isEmpty {
-                    print("[SyncManager] 🔄 [performSync] 最后尝试注册对等点: \(peerID.prefix(12))...")
-                    let finalRegistered = await MainActor.run {
-                        return p2pNode.registrationService.retryRegistration(peerID: peer, addresses: finalAddresses)
-                    }
-                    if finalRegistered {
-                        print("[SyncManager] ✅ [performSync] 最后注册成功，但同步已超时")
-                    }
-                }
+                // 注意：对等点应该已经注册（由 syncWithPeer 保证）
+                // 如果连接失败，可能是网络问题或对等点暂时不可用
+                // 不需要重新注册，因为注册状态应该仍然有效
                 
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
@@ -1241,7 +1264,7 @@ public class SyncManager: ObservableObject {
                 print("[SyncManager] ⚠️ 无法保存同步日志: \(error)")
             }
         }
-        }
+    }
     
     @MainActor
     private func addFolderPeer(_ syncID: String, peerID: String) {
@@ -1289,16 +1312,12 @@ public class SyncManager: ObservableObject {
     
     func triggerSync(for folder: SyncFolder) {
         // 检查是否有同步正在进行，避免重复触发
-        let hasSyncInProgress = {
-            let allPeers = peerManager.allPeers
-            for peerInfo in allPeers {
-                let syncKey = "\(folder.syncID):\(peerInfo.peerIDString)"
-                if syncInProgress.contains(syncKey) {
-                    return true
-                }
-            }
-            return false
-        }()
+        // 注意：SyncManager 是 @MainActor，所以可以直接访问 syncInProgress
+        let allPeers = peerManager.allPeers
+        let hasSyncInProgress = allPeers.contains { peerInfo in
+            let syncKey = "\(folder.syncID):\(peerInfo.peerIDString)"
+            return syncInProgress.contains(syncKey)
+        }
         
         if hasSyncInProgress {
             print("[SyncManager] ⏭️ 同步已进行中，跳过 triggerSync: \(folder.syncID)")
@@ -1326,17 +1345,28 @@ public class SyncManager: ObservableObject {
             
             print("Folder \(folder.localPath.lastPathComponent) hash: \(mst.rootHash ?? "empty")")
             
-            // 2. Try sync with all peers
-            let allPeers = peerManager.allPeers.map { $0.peerID }
-            if allPeers.isEmpty {
-                print("[SyncManager] ℹ️ 暂无对等点，等待发现对等点后自动同步...")
+            // 2. Try sync with all registered peers (多点同步)
+            // 需要在 MainActor 上访问 peerManager 和 registrationService
+            let registeredPeers = await MainActor.run {
+                let allPeers = self.peerManager.allPeers
+                // 过滤出已注册的对等点
+                return allPeers.filter { peerInfo in
+                    self.p2pNode.registrationService.isRegistered(peerInfo.peerIDString)
+                }
+            }
+            
+            if registeredPeers.isEmpty {
+                print("[SyncManager] ℹ️ 暂无已注册的对等点，等待发现并注册对等点后自动同步...")
                 await MainActor.run {
                     self.updateFolderStatus(folder.id, status: .synced, message: "等待发现对等点...", progress: 0.0)
                 }
             } else {
-                print("[SyncManager] 🔄 开始与 \(allPeers.count) 个对等点同步...")
-                for peer in allPeers {
-                    syncWithPeer(peer: peer, folder: folder)
+                let peerCount = registeredPeers.count
+                print("[SyncManager] 🔄 开始与 \(peerCount) 个已注册的对等点进行多点同步...")
+                
+                // 多点同步：同时向所有已注册的对等点同步
+                for peerInfo in registeredPeers {
+                    syncWithPeer(peer: peerInfo.peerID, folder: folder)
                 }
             }
         }

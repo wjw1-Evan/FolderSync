@@ -153,10 +153,11 @@ public class PeerManager: ObservableObject {
     }
     
     /// 获取离线 Peer 列表（基于 deviceStatuses，这是权威状态源）
+    /// 注意：只统计明确为 .offline 状态的 peer，不包括 .connecting 和 .disconnected
     public var offlinePeers: [PeerInfo] {
         return peers.values.filter { peerInfo in
             let status = deviceStatuses[peerInfo.peerIDString] ?? .offline
-            return status != .online
+            return status == .offline
         }
     }
     
@@ -213,8 +214,21 @@ public class PeerManager: ObservableObject {
     
     /// 获取设备统计
     public var deviceCounts: (online: Int, offline: Int) {
-        let online = onlinePeers.count
-        let offline = offlinePeers.count
+        var online = 0
+        var offline = 0
+        
+        // 遍历所有 peers，统计在线和离线设备
+        for peerInfo in peers.values {
+            let status = deviceStatuses[peerInfo.peerIDString] ?? .offline
+            if status == .online {
+                online += 1
+            } else if status == .offline {
+                offline += 1
+            }
+            // 注意：.connecting 和 .disconnected 状态不统计到在线或离线中
+            // 这样可以避免在连接过程中统计错误
+        }
+        
         return (online, offline)
     }
     
@@ -257,8 +271,15 @@ public class PeerManager: ObservableObject {
     /// 更新 Peer 地址
     public func updateAddresses(_ peerIDString: String, addresses: [Multiaddr]) {
         guard var peer = peers[peerIDString] else { return }
+        let oldAddressSet = Set(peer.addresses.map { $0.description })
         peer.updateAddresses(addresses)
         peers[peerIDString] = peer
+        
+        // 如果地址发生变化，保存到持久化存储（带防抖）
+        let newAddressSet = Set(peer.addresses.map { $0.description })
+        if oldAddressSet != newAddressSet {
+            savePeersDebounced()
+        }
     }
     
     /// 标记 Peer 为已注册

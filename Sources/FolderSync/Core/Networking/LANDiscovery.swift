@@ -243,8 +243,8 @@ public class LANDiscovery {
     
     private func startBroadcasting(peerID: String, listenAddresses: [String]) {
         self.currentListenAddresses = listenAddresses
-        // Broadcast every 5 seconds
-        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        // Broadcast every 1 second
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.sendBroadcast(peerID: peerID, listenAddresses: self.currentListenAddresses)
         }

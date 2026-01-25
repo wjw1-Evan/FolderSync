@@ -159,6 +159,9 @@ public class P2PNode {
         // 添加到 PeerManager
         let peerInfo = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
         
+        // 更新最后可见时间（收到广播表示设备在线）
+        peerManager.updateLastSeen(peerID)
+        
         // 检查是否需要注册（地址变化或未注册）
         let existing = peerManager.getPeer(peerID)
         let addressesChanged = Set(parsedAddresses.map { $0.description }) != Set(existing?.addresses.map { $0.description } ?? [])

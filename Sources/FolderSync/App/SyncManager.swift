@@ -38,6 +38,7 @@ public class SyncManager: ObservableObject {
     // 设备统计（用于触发UI更新）
     @Published private(set) var onlineDeviceCountValue: Int = 1 // 包括自身，默认为1
     @Published private(set) var offlineDeviceCountValue: Int = 0
+    @Published private(set) var allDevicesValue: [DeviceInfo] = [] // 设备列表（用于触发UI更新）
     
     public init() {
         // 运行环境检测
@@ -69,16 +70,20 @@ public class SyncManager: ObservableObject {
         }
         
         // 初始化设备统计（自身始终在线）
-        updateDeviceCounts()
+        updateDeviceCounts() // 这会同时更新 allDevicesValue
         
-        // 监听 peerManager 的变化，同步更新 peers 数组（用于兼容性）
+        // 监听 peerManager 的变化，同步更新 peers 数组和设备列表（用于兼容性和自动刷新）
         peersSyncTask = Task { @MainActor in
-            // 定期同步 peers 数组
+            // 定期同步 peers 数组和设备列表
             while !Task.isCancelled {
                 let allPeers = peerManager.allPeers.map { $0.peerID }
                 if self.peers != allPeers {
                     self.peers = allPeers
                 }
+                
+                // 同时更新设备列表，确保 UI 自动刷新
+                self.updateAllDevices()
+                
                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 每秒同步一次
             }
         }
@@ -101,8 +106,10 @@ public class SyncManager: ObservableObject {
                         self.peerManager.addOrUpdatePeer(peer, addresses: [])
                     }
                     // 更新在线状态（无论新旧 peer 都需要更新）
+                    // 收到广播表示设备在线，更新 lastSeenTime 和在线状态
                     let wasOnline = self.peerManager.isOnline(peerIDString)
                     self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
+                    self.peerManager.updateLastSeen(peerIDString) // 更新最后可见时间
                     
                     // 如果状态发生变化，立即更新设备计数
                     if wasNew || !wasOnline {
@@ -213,7 +220,22 @@ public class SyncManager: ObservableObject {
             let peerIDString = peerInfo.peerIDString
             // 使用 deviceStatuses 作为权威状态源
             let wasOnline = peerManager.isOnline(peerIDString)
-            let isOnline = await checkPeerOnline(peer: peerInfo.peerID)
+            
+            // 先检查最近是否收到过广播（30秒内）
+            // 如果最近收到过广播，直接认为在线，不需要发送请求检查
+            let recentlySeen: Bool = {
+                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
+            }()
+            
+            let isOnline: Bool
+            if recentlySeen {
+                // 最近收到过广播，认为在线
+                isOnline = true
+                print("[SyncManager] ✅ 设备最近收到过广播（\(Int(Date().timeIntervalSince(peerInfo.lastSeenTime)))秒前），认为在线: \(peerIDString.prefix(12))...")
+            } else {
+                // 没有最近收到广播，发送请求检查
+                isOnline = await checkPeerOnline(peer: peerInfo.peerID)
+            }
             
             if isOnline != wasOnline {
                 statusChanged = true
@@ -245,6 +267,20 @@ public class SyncManager: ObservableObject {
             }
             return false
         }()
+        
+        // 检查最近是否收到过广播（30秒内）
+        // 如果最近收到过广播，说明设备在线，即使未注册也应该认为在线
+        let recentlySeen: Bool = {
+            if let peerInfo = peerManager.getPeer(peerIDString) {
+                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
+            }
+            return false
+        }()
+        
+        // 如果最近收到过广播，认为在线（广播是设备在线的直接证据）
+        if recentlySeen {
+            return true
+        }
         
         // 如果未注册且不是新发现的，认为离线
         if !isRegistered && !isRecentlyDiscovered {
@@ -1484,12 +1520,20 @@ public class SyncManager: ObservableObject {
     }
     
     /// 更新设备统计（内部方法）
+    /// 注意：统计逻辑与 allDevices 保持一致，只统计 .online 和 .offline 状态的设备
     private func updateDeviceCounts() {
-        let counts = peerManager.deviceCounts
+        // 先更新设备列表
+        updateAllDevices()
+        
+        // 然后基于列表计算统计数据，确保一致性
+        let deviceListOnline = allDevicesValue.filter { $0.status == "在线" && !$0.isLocal }.count
+        let deviceListOffline = allDevicesValue.filter { $0.status == "离线" }.count
+        
         let oldOnline = onlineDeviceCountValue
         let oldOffline = offlineDeviceCountValue
-        onlineDeviceCountValue = counts.online + 1 // 包括自身
-        offlineDeviceCountValue = counts.offline
+        
+        onlineDeviceCountValue = deviceListOnline + 1 // 包括自身
+        offlineDeviceCountValue = deviceListOffline
         
         // 如果计数发生变化，输出日志
         if oldOnline != onlineDeviceCountValue || oldOffline != offlineDeviceCountValue {
@@ -1498,7 +1542,13 @@ public class SyncManager: ObservableObject {
     }
     
     /// 获取所有设备列表（包括自身）
+    /// 注意：只显示 .online 和 .offline 状态的设备，与 deviceCounts 保持一致
     public var allDevices: [DeviceInfo] {
+        return allDevicesValue
+    }
+    
+    /// 更新设备列表（内部方法）
+    private func updateAllDevices() {
         var devices: [DeviceInfo] = []
         
         // 添加自身
@@ -1511,24 +1561,35 @@ public class SyncManager: ObservableObject {
         }
         
         // 添加其他设备（使用 peerManager，基于 deviceStatuses 作为权威状态源）
+        // 只显示 .online 和 .offline 状态的设备，与 deviceCounts 统计逻辑保持一致
         for peerInfo in peerManager.allPeers {
-            let isOnline = peerManager.isOnline(peerInfo.peerIDString)
-            devices.append(DeviceInfo(
-                peerID: peerInfo.peerIDString,
-                isLocal: false,
-                status: isOnline ? "在线" : "离线"
-            ))
+            let status = peerManager.getDeviceStatus(peerInfo.peerIDString)
+            // 只显示明确为在线或离线的设备，忽略 .connecting 和 .disconnected 状态
+            if status == .online || status == .offline {
+                devices.append(DeviceInfo(
+                    peerID: peerInfo.peerIDString,
+                    isLocal: false,
+                    status: status == .online ? "在线" : "离线"
+                ))
+            }
         }
         
-        return devices
+        // 只有当列表真正变化时才更新，避免不必要的 UI 刷新
+        if devices != allDevicesValue {
+            allDevicesValue = devices
+        }
     }
 }
 
 /// 设备信息结构
-public struct DeviceInfo: Identifiable {
+public struct DeviceInfo: Identifiable, Equatable {
     public let id = UUID()
     public let peerID: String
     public let isLocal: Bool
     public let status: String
+    
+    public static func == (lhs: DeviceInfo, rhs: DeviceInfo) -> Bool {
+        return lhs.peerID == rhs.peerID && lhs.isLocal == rhs.isLocal && lhs.status == rhs.status
+    }
 }
 

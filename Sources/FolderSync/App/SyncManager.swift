@@ -2295,8 +2295,8 @@ public class SyncManager: ObservableObject {
         // 检查响应类型
         switch chunksRes {
         case .fileChunksAck:
-            // 所有块都存在，文件已重建完成，直接返回
-            uploadedBytes = Int64(chunks.reduce(0) { $0 + $1.data.count })
+            // 所有块都存在，文件已重建完成，没有实际传输字节
+            uploadedBytes = 0
             
         case .error(let errorMsg) where errorMsg.hasPrefix("缺失块:"):
             // 远程缺失某些块，需要上传这些块
@@ -2363,8 +2363,7 @@ public class SyncManager: ObservableObject {
                 )
             }
             
-            // 计算总大小（包括已存在的块）
-            uploadedBytes = Int64(chunks.reduce(0) { $0 + $1.data.count })
+            // uploadedBytes 已经在上面计算了实际传输的缺失块的大小，不需要重新计算
             
         default:
             // 其他错误，回退到全量上传
@@ -2626,27 +2625,21 @@ public class SyncManager: ObservableObject {
     /// - Returns: 是否应该触发同步
     private func shouldTriggerSyncForPeer(peerID: String) -> Bool {
         // 检查该对等点与所有文件夹的同步冷却时间
-        // 如果该对等点与所有文件夹都在最近30秒内已经同步过，就不立即触发同步
-        // 如果至少有一个文件夹没有同步过或已超过冷却期，则允许触发同步
-        guard !folders.isEmpty else {
-            return true
-        }
-        
+        // 如果该对等点与任何文件夹在最近30秒内已经同步过，就不立即触发同步
+        // 这样可以避免频繁的广播触发重复同步
         for folder in folders {
             let cooldownKey = "\(peerID):\(folder.syncID)"
             if let lastSyncTime = peerSyncCooldown[cooldownKey] {
                 let timeSinceLastSync = Date().timeIntervalSince(lastSyncTime)
-                // 如果该文件夹在最近30秒内已经同步过，继续检查下一个文件夹
+                // 如果该文件夹在最近30秒内已经同步过，阻止同步
                 if timeSinceLastSync < peerSyncCooldownDuration {
-                    continue
+                    return false
                 }
             }
-            // 如果至少有一个文件夹没有同步过或已超过冷却期，允许触发同步
-            return true
         }
         
-        // 所有文件夹都在冷却期内，不触发同步
-        return false
+        // 该对等点与所有文件夹都不在冷却期内，允许触发同步
+        return true
     }
     
 }

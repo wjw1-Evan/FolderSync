@@ -142,19 +142,34 @@ public class P2PNode {
         
         // 生成可连接地址
         let connectableStrs = Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
+        print("[P2PNode] 📋 [handleDiscoveredPeer] 可连接地址 (\(connectableStrs.count) 个):")
+        for (index, addr) in connectableStrs.enumerated() {
+            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
+                print("[P2PNode]   [\(index+1)] \(addr) -> IP=\(ip), 端口=\(port)")
+            } else {
+                print("[P2PNode]   [\(index+1)] \(addr) -> 无效")
+            }
+        }
         
         // 解析地址
         var parsedAddresses: [Multiaddr] = []
         for addrStr in connectableStrs {
             if let addr = try? Multiaddr(addrStr) {
                 parsedAddresses.append(addr)
+            } else {
+                print("[P2PNode] ⚠️ 无法解析地址: \(addrStr)")
             }
         }
         
         guard !parsedAddresses.isEmpty else {
             print("[P2PNode] ⚠️ 无有效地址，跳过: \(peerID.prefix(12))...")
+            print("[P2PNode]   原始监听地址: \(listenAddresses)")
+            print("[P2PNode]   发现地址: \(discoveryAddress)")
+            print("[P2PNode]   可连接地址: \(connectableStrs)")
             return
         }
+        
+        print("[P2PNode] ✅ [handleDiscoveredPeer] 成功解析 \(parsedAddresses.count) 个有效地址")
         
         // 添加到 PeerManager
         let peerInfo = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
@@ -291,8 +306,25 @@ public class P2PNode {
             let nativeAddress = "/ip4/\(localIP)/tcp/\(nativePort)"
             addresses.append(nativeAddress)
             print("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
+            print("[P2PNode] 📋 地址详情: IP=\(localIP), 端口=\(nativePort), 格式验证: ✅")
+            
+            // 验证地址格式
+            if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(from: nativeAddress) {
+                if extractedIP == localIP && extractedPort == nativePort {
+                    print("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
+                } else {
+                    print("[P2PNode] ⚠️ 警告: 地址格式验证失败: 期望 \(localIP):\(nativePort), 实际 \(extractedIP):\(extractedPort)")
+                }
+            } else {
+                print("[P2PNode] ❌ 错误: 无法从广播地址中提取 IP:Port: \(nativeAddress)")
+            }
         } else {
             print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法添加到广播")
+            if let port = nativeNetwork.serverPort {
+                print("[P2PNode]   当前端口值: \(port) (无效)")
+            } else {
+                print("[P2PNode]   当前端口值: nil (未启动)")
+            }
         }
         
         lanDiscovery?.updateListenAddresses(addresses)
@@ -464,6 +496,16 @@ public class P2PNode {
             let nativeAddress = "/ip4/\(newIP)/tcp/\(nativePort)"
             newAddresses.append(nativeAddress)
             print("[P2PNode] ✅ 已更新广播地址: \(nativeAddress)")
+            print("[P2PNode] 📋 地址详情: IP=\(newIP), 端口=\(nativePort)")
+            
+            // 验证地址格式
+            if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(from: nativeAddress) {
+                if extractedIP == newIP && extractedPort == nativePort {
+                    print("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
+                } else {
+                    print("[P2PNode] ⚠️ 警告: 地址格式验证失败")
+                }
+            }
         } else {
             print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法更新广播地址")
         }

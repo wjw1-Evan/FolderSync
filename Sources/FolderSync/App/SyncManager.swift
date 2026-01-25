@@ -818,9 +818,33 @@ public class SyncManager: ObservableObject {
         
         // 从地址中提取第一个可用的 IP:Port 地址
         let addressStrings = peerAddresses.map { $0.description }
+        print("[SyncManager] 📋 [sendSyncRequest] 对等点地址列表 (\(addressStrings.count) 个):")
+        for (index, addr) in addressStrings.enumerated() {
+            print("[SyncManager]   [\(index+1)] \(addr)")
+        }
+        
         guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
+            print("[SyncManager] ❌ [sendSyncRequest] 无法提取有效地址")
             throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "对等点无可用地址"])
         }
+        
+        // 验证提取的地址
+        let addressComponents = address.split(separator: ":")
+        guard addressComponents.count == 2,
+              let extractedIP = String(addressComponents[0]).removingPercentEncoding,
+              let extractedPort = UInt16(String(addressComponents[1])),
+              extractedPort > 0,
+              extractedPort <= 65535,
+              !extractedIP.isEmpty,
+              extractedIP != "0.0.0.0" else {
+            print("[SyncManager] ❌ [sendSyncRequest] 地址格式验证失败: \(address)")
+            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
+        }
+        
+        print("[SyncManager] ✅ [sendSyncRequest] 地址验证通过:")
+        print("[SyncManager]   - IP: \(extractedIP)")
+        print("[SyncManager]   - 端口: \(extractedPort)")
+        print("[SyncManager]   - 完整地址: \(address)")
         
         // 使用原生 TCP
         do {
@@ -866,6 +890,17 @@ public class SyncManager: ObservableObject {
                 return p2pNode.peerManager.getAddresses(for: peer.b58String)
             }
             print("[SyncManager] 📍 [performSync] 对等点地址数量: \(peerAddresses.count)")
+            if peerAddresses.isEmpty {
+                print("[SyncManager] ⚠️ [performSync] 警告: 对等点没有可用地址")
+                await MainActor.run {
+                    self.updateFolderStatus(folder.id, status: .error, message: "对等点无可用地址", progress: 0.0)
+                }
+                return
+            }
+            // 输出所有地址，便于调试
+            for (index, addr) in peerAddresses.enumerated() {
+                print("[SyncManager] 📍 [performSync] 地址\(index+1): \(addr.description)")
+            }
             
             // 尝试使用原生网络服务（优先）
             let rootRes: SyncResponse
@@ -874,18 +909,55 @@ public class SyncManager: ObservableObject {
                 
                 // 从地址中提取第一个可用的 IP:Port 地址
                 let addressStrings = peerAddresses.map { $0.description }
-                guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
-                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法从地址中提取 IP:Port"])
+                print("[SyncManager] 📋 [performSync] 原始地址列表 (\(addressStrings.count) 个):")
+                for (index, addr) in addressStrings.enumerated() {
+                    print("[SyncManager]   [\(index+1)] \(addr)")
                 }
                 
+                guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
+                    let errorMsg = "无法从地址中提取 IP:Port（地址数: \(addressStrings.count)）"
+                    print("[SyncManager] ❌ [performSync] \(errorMsg)")
+                    print("[SyncManager] 📋 [performSync] 原始地址详情:")
+                    for (index, addr) in addressStrings.enumerated() {
+                        if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
+                            print("[SyncManager]   [\(index+1)] \(addr) -> IP=\(ip), 端口=\(port)")
+                        } else {
+                            print("[SyncManager]   [\(index+1)] \(addr) -> 无效")
+                        }
+                    }
+                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
+                }
+                
+                // 验证提取的地址
+                let addressComponents = address.split(separator: ":")
+                guard addressComponents.count == 2,
+                      let extractedIP = String(addressComponents[0]).removingPercentEncoding,
+                      let extractedPort = UInt16(String(addressComponents[1])),
+                      extractedPort > 0,
+                      extractedPort <= 65535 else {
+                    print("[SyncManager] ❌ [performSync] 地址格式验证失败: \(address)")
+                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
+                }
+                
+                // 验证IP地址格式
+                if extractedIP.isEmpty || extractedIP == "0.0.0.0" {
+                    print("[SyncManager] ❌ [performSync] IP地址无效: '\(extractedIP)'")
+                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "IP地址无效: \(extractedIP)"])
+                }
+                
+                print("[SyncManager] ✅ [performSync] 地址验证通过:")
+                print("[SyncManager]   - IP: \(extractedIP)")
+                print("[SyncManager]   - 端口: \(extractedPort)")
+                print("[SyncManager]   - 完整地址: \(address)")
                 print("[SyncManager] 🔗 [performSync] 使用原生 TCP 连接到: \(address)")
                 
                 // 使用原生网络服务发送请求
+                // 缩短超时时间，加快失败检测
                 rootRes = try await p2pNode.nativeNetwork.sendRequest(
                     .getMST(syncID: folder.syncID),
                     to: address,
-                    timeout: 90.0,
-                    maxRetries: 5
+                    timeout: 10.0, // 从90秒缩短到10秒，加快失败检测
+                    maxRetries: 2  // 从5次减少到2次，避免长时间等待
                 ) as SyncResponse
                 
                 print("[SyncManager] ✅ [performSync] 成功获取远程 MST 根（原生 TCP）")

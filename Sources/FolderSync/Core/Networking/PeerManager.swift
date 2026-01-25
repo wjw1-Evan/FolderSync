@@ -209,7 +209,20 @@ public class PeerManager: ObservableObject {
     
     /// 获取 Peer 的地址
     public func getAddresses(for peerIDString: String) -> [Multiaddr] {
-        return peers[peerIDString]?.addresses ?? []
+        let addresses = peers[peerIDString]?.addresses ?? []
+        if addresses.isEmpty {
+            print("[PeerManager] ⚠️ 对等点 \(peerIDString.prefix(12))... 没有地址")
+        } else {
+            print("[PeerManager] 📍 对等点 \(peerIDString.prefix(12))... 有 \(addresses.count) 个地址:")
+            for (index, addr) in addresses.enumerated() {
+                if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
+                    print("[PeerManager]   [\(index+1)] \(addr.description) -> IP=\(ip), 端口=\(port)")
+                } else {
+                    print("[PeerManager]   [\(index+1)] \(addr.description) -> 无效")
+                }
+            }
+        }
+        return addresses
     }
     
     /// 获取设备统计

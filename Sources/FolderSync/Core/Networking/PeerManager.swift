@@ -12,14 +12,14 @@ public struct PeerInfo {
     public var discoveryTime: Date
     public var lastSeenTime: Date
     
-    public init(peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false, isOnline: Bool = false) {
+    public init(peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false, isOnline: Bool = false, discoveryTime: Date? = nil, lastSeenTime: Date? = nil) {
         self.peerID = peerID
         self.peerIDString = peerID.b58String
         self.addresses = addresses
         self.isRegistered = isRegistered
         self.isOnline = isOnline
-        self.discoveryTime = Date()
-        self.lastSeenTime = Date()
+        self.discoveryTime = discoveryTime ?? Date()
+        self.lastSeenTime = lastSeenTime ?? Date()
     }
     
     /// 更新地址
@@ -49,19 +49,93 @@ public struct PeerInfo {
     }
 }
 
-/// 统一的 Peer 管理器
+/// 设备状态
+public enum DeviceStatus {
+    case offline          // 离线
+    case online           // 在线
+    case connecting       // 连接中
+    case disconnected     // 已断开
+}
+
+/// 统一的 Peer 管理器 - 管理所有已知设备
 @MainActor
 public class PeerManager: ObservableObject {
     /// 所有已知的 Peer（PeerID String -> PeerInfo）
     @Published private(set) var peers: [String: PeerInfo] = [:]
     
-    /// 正在注册的 Peer ID 集合（用于去重）
-    private var registeringPeerIDs: Set<String> = []
+    /// 设备状态（PeerID String -> DeviceStatus）
+    @Published private(set) var deviceStatuses: [String: DeviceStatus] = [:]
     
     /// 线程安全的队列，用于处理并发访问
     private let queue = DispatchQueue(label: "com.foldersync.peermanager", attributes: .concurrent)
     
-    public init() {}
+    /// 持久化存储
+    private let persistentStore = PersistentPeerStore.shared
+    
+    /// 保存防抖：避免频繁保存
+    private var saveTask: Task<Void, Never>?
+    private let saveDebounceDelay: TimeInterval = 2.0
+    
+    /// Peer 注册服务（可选，如果设置则自动同步注册状态）
+    public weak var registrationService: PeerRegistrationService?
+    
+    public init() {
+        // 从持久化存储加载 peer 信息
+        loadPersistedPeers()
+    }
+    
+    /// 从持久化存储加载 peer 信息
+    private func loadPersistedPeers() {
+        do {
+            let persistentPeers = try persistentStore.loadPeers()
+            for persistent in persistentPeers {
+                if let (peerID, addresses, isRegistered) = persistentStore.convertToPeerInfo(persistent) {
+                    // 恢复时间戳
+                    let peerInfo = PeerInfo(
+                        peerID: peerID,
+                        addresses: addresses,
+                        isRegistered: isRegistered,
+                        isOnline: false,
+                        discoveryTime: persistent.discoveryTime,
+                        lastSeenTime: persistent.lastSeenTime
+                    )
+                    peers[peerID.b58String] = peerInfo
+                    print("[PeerManager] ✅ 已恢复 peer: \(peerID.b58String.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
+                }
+            }
+            if !persistentPeers.isEmpty {
+                print("[PeerManager] ✅ 成功从持久化存储恢复 \(persistentPeers.count) 个 peer")
+            }
+        } catch {
+            print("[PeerManager] ❌ 加载持久化 peer 失败: \(error)")
+        }
+    }
+    
+    /// 获取需要预注册到 libp2p 的 peer 列表（已注册但需要重新注册的）
+    public func getPeersForPreRegistration() -> [(peerID: PeerID, addresses: [Multiaddr])] {
+        return peers.values
+            .filter { $0.isRegistered && !$0.addresses.isEmpty }
+            .map { (peerID: $0.peerID, addresses: $0.addresses) }
+    }
+    
+    /// 保存 peer 信息到持久化存储（带防抖）
+    private func savePeersDebounced() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(self?.saveDebounceDelay ?? 2.0) * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.savePeers()
+        }
+    }
+    
+    /// 保存 peer 信息到持久化存储
+    private func savePeers() async {
+        do {
+            try persistentStore.savePeers(peers)
+        } catch {
+            print("[PeerManager] ❌ 保存 peer 到持久化存储失败: \(error)")
+        }
+    }
     
     // MARK: - 查询方法
     
@@ -97,19 +171,33 @@ public class PeerManager: ObservableObject {
     
     /// 检查 Peer 是否正在注册
     public func isRegistering(_ peerIDString: String) -> Bool {
-        return queue.sync {
-            return registeringPeerIDs.contains(peerIDString)
+        // 如果设置了 registrationService，使用它来检查
+        if let registrationService = registrationService {
+            let state = registrationService.getRegistrationState(peerIDString)
+            if case .registering = state {
+                return true
+            }
         }
+        return false
     }
     
     /// 检查 Peer 是否已注册
     public func isRegistered(_ peerIDString: String) -> Bool {
+        // 优先从 registrationService 获取状态
+        if let registrationService = registrationService {
+            return registrationService.isRegistered(peerIDString)
+        }
         return peers[peerIDString]?.isRegistered ?? false
     }
     
     /// 检查 Peer 是否在线
     public func isOnline(_ peerIDString: String) -> Bool {
-        return peers[peerIDString]?.isOnline ?? false
+        return deviceStatuses[peerIDString] == .online
+    }
+    
+    /// 获取设备状态
+    public func getDeviceStatus(_ peerIDString: String) -> DeviceStatus {
+        return deviceStatuses[peerIDString] ?? .offline
     }
     
     /// 获取 Peer 的地址
@@ -130,21 +218,29 @@ public class PeerManager: ObservableObject {
     @discardableResult
     public func addOrUpdatePeer(_ peerID: PeerID, addresses: [Multiaddr] = []) -> PeerInfo {
         let peerIDString = peerID.b58String
+        var shouldSave = false
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
             // 只有当新地址不为空时才更新地址，避免用空数组覆盖已有地址
             if !addresses.isEmpty {
                 existing.updateAddresses(addresses)
+                shouldSave = true
             }
             peers[peerIDString] = existing
-            return existing
         } else {
             // 添加新 Peer
             var newPeer = PeerInfo(peerID: peerID, addresses: addresses)
             peers[peerIDString] = newPeer
-            return newPeer
+            shouldSave = true
         }
+        
+        // 保存到持久化存储（带防抖）
+        if shouldSave {
+            savePeersDebounced()
+        }
+        
+        return peers[peerIDString]!
     }
     
     /// 更新 Peer 地址
@@ -159,6 +255,8 @@ public class PeerManager: ObservableObject {
         guard var peer = peers[peerIDString] else { return }
         peer.markAsRegistered()
         peers[peerIDString] = peer
+        // 保存到持久化存储（带防抖）
+        savePeersDebounced()
     }
     
     /// 更新 Peer 在线状态
@@ -168,37 +266,44 @@ public class PeerManager: ObservableObject {
         peers[peerIDString] = peer
     }
     
-    /// 标记 Peer 为正在注册（用于去重）
+    /// 标记 Peer 为正在注册（已废弃，使用 registrationService 管理）
+    @available(*, deprecated, message: "使用 PeerRegistrationService 管理注册状态")
     public func startRegistering(_ peerIDString: String) -> Bool {
-        return queue.sync(flags: .barrier) {
-            if registeringPeerIDs.contains(peerIDString) {
+        // 如果设置了 registrationService，使用它来检查
+        if let registrationService = registrationService {
+            let state = registrationService.getRegistrationState(peerIDString)
+            if case .registering = state {
                 return false
             }
-            registeringPeerIDs.insert(peerIDString)
             return true
         }
+        // 如果没有 registrationService，总是返回 true（允许注册）
+        return true
     }
     
-    /// 标记 Peer 注册完成
+    /// 标记 Peer 注册完成（已废弃，使用 registrationService 管理）
+    @available(*, deprecated, message: "使用 PeerRegistrationService 管理注册状态")
     public func finishRegistering(_ peerIDString: String) {
-        queue.async(flags: .barrier) {
-            self.registeringPeerIDs.remove(peerIDString)
-        }
+        // 不再需要，由 registrationService 管理
     }
     
     /// 移除 Peer
     public func removePeer(_ peerIDString: String) {
         peers.removeValue(forKey: peerIDString)
-        queue.async(flags: .barrier) {
-            self.registeringPeerIDs.remove(peerIDString)
+        deviceStatuses.removeValue(forKey: peerIDString)
+        // 保存到持久化存储
+        Task {
+            await savePeers()
         }
     }
     
     /// 清除所有 Peer
     public func clearAll() {
         peers.removeAll()
-        queue.async(flags: .barrier) {
-            self.registeringPeerIDs.removeAll()
+        deviceStatuses.removeAll()
+        // 保存到持久化存储
+        Task {
+            await savePeers()
         }
     }
     
@@ -207,5 +312,12 @@ public class PeerManager: ObservableObject {
         guard var peer = peers[peerIDString] else { return }
         peer.lastSeenTime = Date()
         peers[peerIDString] = peer
+        // 保存到持久化存储（带防抖）
+        savePeersDebounced()
+    }
+    
+    /// 立即保存所有 peer 到持久化存储（用于应用关闭时）
+    public func saveAllPeers() async {
+        await savePeers()
     }
 }

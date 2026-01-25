@@ -55,7 +55,10 @@ public class SyncManager: ObservableObject {
             } else {
                 for folder in loadedFolders {
                     // 注册 syncID 到管理器
-                    syncIDManager.registerSyncID(folder.syncID, folderID: folder.id)
+                    let registered = syncIDManager.registerSyncID(folder.syncID, folderID: folder.id)
+                    if !registered {
+                        print("[SyncManager] ⚠️ 警告: syncID 注册失败（可能已存在）: \(folder.syncID)")
+                    }
                     print("[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))")
                 }
             }

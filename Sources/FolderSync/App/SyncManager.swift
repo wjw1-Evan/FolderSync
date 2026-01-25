@@ -141,13 +141,19 @@ public class SyncManager: ObservableObject {
                         let registrationResult = await self.ensurePeerRegistered(peer: peer, peerID: peerIDString)
                         
                         if registrationResult.success {
-                            // 检查是否最近已经同步过（避免频繁同步）
-                            let shouldSync = wasNew || self.shouldTriggerSyncForPeer(peerID: peerIDString)
-                            
-                            if shouldSync {
+                            // 对于新对等点，立即同步所有文件夹
+                            // 对于已存在的对等点，只同步不在冷却期内的文件夹
+                            if wasNew {
                                 // 向所有文件夹同步（多点同步）
                                 for folder in self.folders {
                                     self.syncWithPeer(peer: peer, folder: folder)
+                                }
+                            } else {
+                                // 只同步不在冷却期内的文件夹
+                                for folder in self.folders {
+                                    if self.shouldSyncFolderWithPeer(peerID: peerIDString, folder: folder) {
+                                        self.syncWithPeer(peer: peer, folder: folder)
+                                    }
                                 }
                             }
                         } else {
@@ -2619,7 +2625,26 @@ public class SyncManager: ObservableObject {
         }
     }
     
-    /// 检查是否应该为对等点触发同步
+    /// 检查是否应该为特定对等点和文件夹触发同步
+    /// 避免频繁触发不必要的同步（比如在短时间内多次收到广播）
+    /// - Parameters:
+    ///   - peerID: 对等点 ID
+    ///   - folder: 文件夹
+    /// - Returns: 是否应该触发同步
+    private func shouldSyncFolderWithPeer(peerID: String, folder: SyncFolder) -> Bool {
+        let cooldownKey = "\(peerID):\(folder.syncID)"
+        if let lastSyncTime = peerSyncCooldown[cooldownKey] {
+            let timeSinceLastSync = Date().timeIntervalSince(lastSyncTime)
+            // 如果该 peer-folder 对在最近30秒内已经同步过，阻止同步
+            if timeSinceLastSync < peerSyncCooldownDuration {
+                return false
+            }
+        }
+        // 不在冷却期内，允许同步
+        return true
+    }
+    
+    /// 检查是否应该为对等点触发同步（用于判断是否有任何文件夹需要同步）
     /// 避免频繁触发不必要的同步（比如在短时间内多次收到广播）
     /// - Parameter peerID: 对等点 ID
     /// - Returns: 是否应该触发同步

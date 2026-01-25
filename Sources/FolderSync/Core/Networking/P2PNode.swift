@@ -211,15 +211,19 @@ public class P2PNode {
         }
         
         // 更新或添加 Peer 到管理器
-        let peerInfo = await MainActor.run {
-            return peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
+        // 创建地址数组的副本，避免并发访问问题
+        let addressesCopy = parsedAddresses
+        _ = await MainActor.run {
+            return peerManager.addOrUpdatePeer(peerIDObj, addresses: addressesCopy)
         }
         
         // 检查是否需要注册（已注册且地址未变化则跳过）
+        // 创建地址数组的副本，避免并发访问问题
+        let addressesCopyForCheck = parsedAddresses
         let shouldRegister = await MainActor.run {
             let existing = peerManager.getPeer(peerID)
             if let existing = existing, existing.isRegistered {
-                let addressesChanged = Set(parsedAddresses.map { $0.description }) != Set(existing.addresses.map { $0.description })
+                let addressesChanged = Set(addressesCopyForCheck.map { $0.description }) != Set(existing.addresses.map { $0.description })
                 if !addressesChanged {
                     print("[P2PNode] ⏭️ 对等点已注册且地址未变化，跳过: \(peerID.prefix(12))...")
                 }
@@ -324,37 +328,37 @@ public class P2PNode {
             
             // 删除密钥相关文件（排除重要文件）
             // LibP2P 的密钥文件通常不是 JSON 格式，可能是二进制文件或其他格式
-            do {
-                if fileManager.fileExists(atPath: folderSyncDir.path) {
-                    if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
-                        for item in items {
-                            let itemName = item.lastPathComponent
-                            
-                            // 跳过保护的文件和目录
-                            if protectedItems.contains(itemName) {
+            if fileManager.fileExists(atPath: folderSyncDir.path) {
+                if let items = try? fileManager.contentsOfDirectory(at: folderSyncDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+                    for item in items {
+                        let itemName = item.lastPathComponent
+                        
+                        // 跳过保护的文件和目录
+                        if protectedItems.contains(itemName) {
+                            continue
+                        }
+                        
+                        // 检查是否是目录
+                        var isDirectory: ObjCBool = false
+                        if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
+                            if isDirectory.boolValue {
+                                // 跳过所有目录（受保护的目录已在上面被跳过）
                                 continue
                             }
-                            
-                            // 检查是否是目录
-                            var isDirectory: ObjCBool = false
-                            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory) {
-                                if isDirectory.boolValue {
-                                    // 跳过所有目录（受保护的目录已在上面被跳过）
-                                    continue
-                                }
-                            }
-                            
-                            // 删除非保护的文件（可能是密钥文件）
-                            // 密钥文件通常不是 JSON 格式
-                            if !itemName.hasSuffix(".json") {
-                                try? fileManager.removeItem(at: item)
+                        }
+                        
+                        // 删除非保护的文件（可能是密钥文件）
+                        // 密钥文件通常不是 JSON 格式
+                        if !itemName.hasSuffix(".json") {
+                            do {
+                                try fileManager.removeItem(at: item)
                                 print("[P2PNode] 🗑️ 已删除可能的密钥文件: \(itemName)")
+                            } catch {
+                                print("[P2PNode] ⚠️ 删除密钥文件时出错: \(error.localizedDescription)")
                             }
                         }
                     }
                 }
-            } catch {
-                print("[P2PNode] ⚠️ 删除密钥文件时出错: \(error.localizedDescription)")
             }
             
             // 确保目录存在
@@ -434,7 +438,7 @@ public class P2PNode {
 
         // 更新 LAN discovery 的监听地址
         // 将 0.0.0.0 替换为真实 IP 地址，确保广播的地址可以被其他设备连接
-        let localIP = getLocalIPAddress()
+        // 重用之前获取的 localIP
         let addresses = app.listenAddresses.map { addr in
             let addrStr = addr.description
             // 将 /ip4/0.0.0.0/ 替换为真实 IP
@@ -463,7 +467,8 @@ public class P2PNode {
             
             for (index, addr) in app.listenAddresses.enumerated() {
                 // 将 0.0.0.0 替换为真实 IP 地址以便显示
-                let displayAddr = addr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
+                let addrStr = addr.description
+                let displayAddr = addrStr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(localIP)/")
                 print("[P2PNode]   [\(index + 1)] \(displayAddr)")
             }
             print("[P2PNode] ✅ Ready for connections")
@@ -613,7 +618,7 @@ public class P2PNode {
         } else {
             // 使用相同的端口，但使用新的 IP 地址重新监听
             print("[P2PNode] 🔌 使用新 IP 和相同端口重新监听: \(newIP):\(port)")
-            app.listen(.tcp(host: newIP, port: port))
+            app.listen(.tcp(host: newIP, port: Int(port)))
             
             // 等待监听启动
             try? await Task.sleep(nanoseconds: 500_000_000)

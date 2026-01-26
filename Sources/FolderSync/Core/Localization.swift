@@ -57,6 +57,16 @@ enum LocalizedString {
     static let onlineSuffix = "台在线".localized
     static let openInFinder = "在 Finder 中打开".localized
     static let copySyncID = "复制同步 ID".localized
+    static let viewLogs = "查看日志".localized
+    static let viewLocalChanges = "查看本地变更".localized
+    static let localChangeHistory = "本地变更历史".localized
+    static let searchLocalChanges = "搜索文件路径...".localized
+    static let noLocalChanges = "暂无本地变更记录".localized
+    static let changeCreated = "新建".localized
+    static let changeModified = "修改".localized
+    static let changeDeleted = "删除".localized
+    static let changeRenamed = "重命名".localized
+    static let showCurrentChangesOnly = "仅显示当前未同步变更".localized
     static let excludeRules = "排除规则".localized
     static let removeFolder = "移除文件夹".localized
 

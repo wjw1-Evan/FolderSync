@@ -7,6 +7,8 @@ struct MainDashboard: View {
     @State private var showingSyncHistory = false
     @State private var showingAllPeers = false
     @State private var conflictCount: Int = 0
+    @State private var selectedLogFolderID: UUID? = nil
+    @State private var selectedLocalChangesFolder: SyncFolder? = nil
 
     var body: some View {
         NavigationStack {
@@ -129,8 +131,19 @@ struct MainDashboard: View {
                 }
                 Section(LocalizedString.syncFolders) {
                     ForEach(syncManager.folders) { folder in
-                        FolderRow(folderID: folder.id)
-                            .environmentObject(syncManager)
+                        FolderRow(
+                            folderID: folder.id,
+                            onViewLocalChanges: { folder in
+                                // 直接设置 selectedLocalChangesFolder，sheet 会自动显示
+                                print("[MainDashboard] 准备显示本地变更视图，文件夹: \(folder.localPath.lastPathComponent)")
+                                selectedLocalChangesFolder = folder
+                            },
+                            onViewSyncLogs: { folderID in
+                                selectedLogFolderID = folderID
+                                showingSyncHistory = true
+                            }
+                        )
+                        .environmentObject(syncManager)
                     }
                     if syncManager.folders.isEmpty {
                         VStack(spacing: 12) {
@@ -211,6 +224,7 @@ struct MainDashboard: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        selectedLogFolderID = nil
                         showingSyncHistory = true
                     } label: {
                         Label(LocalizedString.syncHistory, systemImage: "clock.arrow.circlepath")
@@ -224,8 +238,12 @@ struct MainDashboard: View {
                 ConflictCenter()
                     .environmentObject(syncManager)
             }
+            .sheet(item: $selectedLocalChangesFolder) { folder in
+                LocalChangeHistoryView(folder: folder)
+                    .environmentObject(syncManager)
+            }
             .sheet(isPresented: $showingSyncHistory) {
-                SyncHistoryView()
+                SyncHistoryView(preselectedFolderID: selectedLogFolderID)
                     .environmentObject(syncManager)
             }
         }
@@ -265,6 +283,8 @@ struct MainDashboard: View {
 struct FolderRow: View {
     @EnvironmentObject var syncManager: SyncManager
     let folderID: UUID
+    let onViewLocalChanges: (SyncFolder) -> Void
+    let onViewSyncLogs: (UUID) -> Void
     @State private var showingPeerList = false
     @State private var showingExcludeRules = false
     @State private var isHovered = false
@@ -497,6 +517,29 @@ struct FolderRow: View {
                     Label(
                         LocalizedString.excludeRules,
                         systemImage: "line.3.horizontal.decrease.circle")
+                }
+
+                Button {
+                    // 确保使用最新的 folder 对象
+                    if let currentFolder = syncManager.folders.first(where: { $0.id == folder.id }) {
+                        print("[FolderRow] 打开本地变更视图: \(currentFolder.localPath.lastPathComponent)")
+                        // 直接传递最新的 folder 对象
+                        onViewLocalChanges(currentFolder)
+                    } else {
+                        print("[FolderRow] ⚠️ 无法找到文件夹，使用计算属性中的 folder 对象")
+                        // 如果找不到，使用计算属性中的 folder（应该总是有值）
+                        onViewLocalChanges(folder)
+                    }
+                } label: {
+                    Label(
+                        LocalizedString.viewLocalChanges, systemImage: "clock.badge.exclamationmark"
+                    )
+                }
+
+                Button {
+                    onViewSyncLogs(folder.id)
+                } label: {
+                    Label(LocalizedString.syncHistory, systemImage: "clock.arrow.circlepath")
                 }
 
                 Divider()

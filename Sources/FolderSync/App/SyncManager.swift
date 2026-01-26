@@ -1,4 +1,5 @@
 import Combine
+import CoreServices
 import Crypto
 import SwiftUI
 
@@ -31,6 +32,14 @@ public class SyncManager: ObservableObject {
     var lastKnownMetadata: [String: [String: FileMetadata]] = [:]  // syncID -> [path: metadata] 用于重命名检测
     private var deletedRecords: [String: Set<String>] = [:]
     var syncInProgress: Set<String> = []  // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
+    
+    // 去重机制：记录最近处理的变更，避免短时间内重复记录
+    private var recentChanges: [String: Date] = [:]  // "syncID:relativePath" -> 时间戳
+    private let changeDeduplicationWindow: TimeInterval = 1.0  // 1秒内的重复变更会被忽略
+    
+    // 重命名检测：记录可能的重命名操作（旧路径 -> 等待新路径）
+    private var pendingRenames: [String: (hash: String, timestamp: Date)] = [:]  // "syncID:relativePath" -> (哈希值, 时间戳)
+    private let renameDetectionWindow: TimeInterval = 2.0  // 2秒内检测重命名
     private var peerStatusCheckTask: Task<Void, Never>?
     private var peersSyncTask: Task<Void, Never>?  // 定期同步 peers 数组的任务
     private var peerDiscoveryTask: Task<Void, Never>?  // 对等点发现处理任务
@@ -42,6 +51,7 @@ public class SyncManager: ObservableObject {
     // 按 peer-folder 对记录的同步冷却时间，用于避免频繁同步
     var peerSyncCooldown: [String: Date] = [:]  // "peerID:syncID" -> 最后同步完成时间
     var peerSyncCooldownDuration: TimeInterval = 30.0  // 同步完成后30秒内不重复同步
+
 
     // 设备统计（用于触发UI更新）
     @Published private(set) var onlineDeviceCountValue: Int = 1  // 包括自身，默认为1
@@ -100,6 +110,9 @@ public class SyncManager: ObservableObject {
             self.folders = []
             self.deletedRecords = [:]
         }
+        
+        // 从快照恢复 lastKnownLocalPaths 和 lastKnownMetadata
+        restoreSnapshots()
 
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
@@ -711,6 +724,337 @@ public class SyncManager: ObservableObject {
             return try await self.handleSyncRequest(request)
         }
     }
+
+    // MARK: - 本地变更记录
+
+    func recordLocalChange(
+        for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags
+    ) {
+        let basePath = folder.localPath.standardizedFileURL.path
+        guard absolutePath.hasPrefix(basePath) else { return }
+
+        var relativePath = String(absolutePath.dropFirst(basePath.count))
+        if relativePath.hasPrefix("/") { relativePath.removeFirst() }
+        if relativePath.isEmpty { relativePath = "." }
+
+        // 忽略文件夹本身（根路径）
+        if relativePath == "." {
+            print("[recordLocalChange] ⏭️ 忽略文件夹本身: \(relativePath)")
+            return
+        }
+
+        let fileManager = FileManager.default
+        let exists = fileManager.fileExists(atPath: absolutePath)
+        
+        // 检查是否为目录，如果是目录则忽略（只记录文件变更）
+        if exists {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: absolutePath, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                print("[recordLocalChange] ⏭️ 忽略目录（只记录文件变更）: \(relativePath)")
+                return
+            }
+        }
+
+        // 忽略排除规则或隐藏文件
+        if isIgnored(relativePath, folder: folder) {
+            print("[recordLocalChange] ⏭️ 忽略文件（排除规则）: \(relativePath)")
+            return
+        }
+
+        // 清理过期的待处理重命名操作
+        let now = Date()
+        pendingRenames = pendingRenames.filter { _, value in
+            now.timeIntervalSince(value.timestamp) <= renameDetectionWindow
+        }
+        
+        // 去重检查：如果在短时间内已经处理过这个路径，跳过
+        let changeKey = "\(folder.syncID):\(relativePath)"
+        if let lastProcessed = recentChanges[changeKey],
+           now.timeIntervalSince(lastProcessed) < changeDeduplicationWindow {
+            print("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
+            return
+        }
+        // 记录本次处理时间
+        recentChanges[changeKey] = now
+
+        var size: Int64?
+        if exists,
+            let attrs = try? fileManager.attributesOfItem(atPath: absolutePath),
+            let s = attrs[.size] as? Int64
+        {
+            size = s
+        }
+
+        // 检查文件是否在已知路径列表中，用于区分新建和修改
+        let isKnownPath = lastKnownLocalPaths[folder.syncID]?.contains(relativePath) ?? false
+        
+        // 解析 FSEvents 标志
+        let hasRemovedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved) != 0)
+        let hasCreatedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated) != 0)
+        let hasModifiedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified) != 0)
+        let hasRenamedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0)
+        
+        print("[recordLocalChange] 📝 开始处理变更:")
+        print("  - 文件路径: \(relativePath)")
+        print("  - 绝对路径: \(absolutePath)")
+        print("  - 文件存在: \(exists)")
+        print("  - 文件大小: \(size ?? 0) bytes")
+        print("  - 在已知路径: \(isKnownPath)")
+        print("  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)")
+        
+        // 逻辑判断：基于文件状态和已知路径列表确定变更类型
+        // 1. 优先检查删除：如果文件不存在，且设置了 Removed 或 Renamed 标志
+        // 注意：如果设置了 Renamed 标志且文件在已知路径中，可能是重命名操作，需要延迟判断
+        if !exists {
+            print("[recordLocalChange] 🔍 文件不存在，检查删除逻辑...")
+            
+            // 如果文件在已知路径中且设置了 Renamed 标志，可能是重命名操作
+            // 保存旧文件的哈希值，等待新文件出现
+            if isKnownPath && hasRenamedFlag {
+                if let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
+                    let pendingKey = "\(folder.syncID):\(relativePath)"
+                    pendingRenames[pendingKey] = (hash: knownMeta.hash, timestamp: now)
+                    print("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
+                    // 暂时不记录，等待新文件出现
+                    return
+                }
+            }
+            
+            // 如果文件在已知路径列表中，或者设置了 Removed 标志，记录为删除
+            // 注意：如果只设置了 Renamed 标志但文件不在已知路径中，也记录为删除（可能是真正的删除）
+            if isKnownPath || hasRemovedFlag || (hasRenamedFlag && !isKnownPath) {
+                print("[recordLocalChange] ✅ 记录为删除: isKnownPath=\(isKnownPath), hasRemovedFlag=\(hasRemovedFlag), hasRenamedFlag=\(hasRenamedFlag)")
+                let change = LocalChange(
+                    folderID: folder.id,
+                    path: relativePath,
+                    changeType: .deleted,
+                    size: nil,
+                    timestamp: Date(),
+                    sequence: nil
+                )
+                // 立即从已知路径列表中移除
+                lastKnownLocalPaths[folder.syncID]?.remove(relativePath)
+                lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
+                print("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(relativePath)")
+                
+                Task.detached {
+                    try? StorageManager.shared.addLocalChange(change)
+                    print("[recordLocalChange] 💾 已保存删除记录: \(relativePath)")
+                }
+            } else {
+                print("[recordLocalChange] ⏭️ 跳过：文件不存在但不在已知列表中，且无 Removed/Renamed 标志")
+            }
+            // 如果文件不在已知列表中，且没有 Removed/Renamed 标志，可能是从未存在过的文件，不记录
+            return
+        }
+        
+        // 2. 文件存在的情况
+        // 如果文件在已知路径列表中，需要验证是否真的变化了
+        if isKnownPath {
+            print("[recordLocalChange] 🔍 文件在已知路径中，检查是否真的变化...")
+            
+            // 检查文件内容是否真的变化了（通过比较哈希值）
+            if let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
+                print("[recordLocalChange] 📊 找到已知元数据，哈希值: \(knownMeta.hash.prefix(16))...")
+                do {
+                    let fileURL = URL(fileURLWithPath: absolutePath)
+                    let currentHash = try computeFileHash(fileURL: fileURL)
+                    print("[recordLocalChange] 📊 当前文件哈希值: \(currentHash.prefix(16))...")
+                    
+                    if currentHash == knownMeta.hash {
+                        // 文件内容没有变化，可能是文件系统触发的误报（如复制操作时原文件触发事件）
+                        // 不记录任何变更
+                        print("[recordLocalChange] ⏭️ 跳过：文件内容未变化（哈希值相同），可能是复制操作时的误报")
+                        return
+                    } else {
+                        // 文件内容确实变化了，记录为修改
+                        print("[recordLocalChange] ✅ 记录为修改：文件内容已变化（哈希值不同）")
+                        let change = LocalChange(
+                            folderID: folder.id,
+                            path: relativePath,
+                            changeType: .modified,
+                            size: size,
+                            timestamp: Date(),
+                            sequence: nil
+                        )
+                        Task.detached {
+                            try? StorageManager.shared.addLocalChange(change)
+                            print("[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                        }
+                        return
+                    }
+                } catch {
+                    print("[recordLocalChange] ⚠️ 无法计算哈希值: \(error)")
+                    // 无法计算哈希值，根据标志判断
+                    // 如果明确设置了 Modified 标志，记录为修改
+                    if hasModifiedFlag {
+                        print("[recordLocalChange] ✅ 记录为修改：无法计算哈希但设置了 Modified 标志")
+                        let change = LocalChange(
+                            folderID: folder.id,
+                            path: relativePath,
+                            changeType: .modified,
+                            size: size,
+                            timestamp: Date(),
+                            sequence: nil
+                        )
+                        Task.detached {
+                            try? StorageManager.shared.addLocalChange(change)
+                            print("[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                        }
+                    } else {
+                        print("[recordLocalChange] ⏭️ 跳过：无法计算哈希且无 Modified 标志")
+                    }
+                    return
+                }
+            } else {
+                // 文件在已知路径列表中，但没有元数据，可能是新添加的
+                // 这种情况不应该发生，但为了安全，不记录
+                print("[recordLocalChange] ⚠️ 文件在已知路径中但没有元数据，跳过记录")
+                return
+            }
+        }
+        
+        // 3. 文件不在已知路径列表中，是新文件
+        // 但需要检查是否有明确的 Created 标志，避免误判
+        // 如果明确设置了 Removed 标志，不应该记录为新建（即使文件存在，可能是中间状态）
+        if hasRemovedFlag {
+            // 有 Removed 标志，即使文件存在，也不应该记录为新建
+            // 可能是删除操作的中间状态，不记录
+            print("[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Removed 标志（可能是删除中间状态）")
+            return
+        }
+        
+        // 检查是否是重命名（通过 Renamed 标志或哈希值匹配）
+        let changeType: LocalChange.ChangeType
+        
+        // 首先检查是否有待处理的重命名操作（通过哈希值匹配）
+        var matchedRename: String? = nil
+        if hasRenamedFlag || !isKnownPath {
+            // 计算当前文件的哈希值
+            do {
+                let fileURL = URL(fileURLWithPath: absolutePath)
+                let currentHash = try computeFileHash(fileURL: fileURL)
+                
+                // 检查是否有待处理的重命名操作（旧文件哈希值匹配）
+                for (pendingKey, pendingInfo) in pendingRenames {
+                    let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
+                    if keyParts.count == 2, keyParts[0] == folder.syncID {
+                        let oldPath = String(keyParts[1])
+                        // 检查时间窗口和哈希值
+                        if now.timeIntervalSince(pendingInfo.timestamp) <= renameDetectionWindow,
+                           pendingInfo.hash == currentHash {
+                            // 找到匹配的重命名操作
+                            matchedRename = oldPath
+                            print("[recordLocalChange] 🔄 检测到重命名操作: \(oldPath) -> \(relativePath) (哈希值匹配)")
+                            // 从待处理列表中移除
+                            pendingRenames.removeValue(forKey: pendingKey)
+                            break
+                        }
+                    }
+                }
+            } catch {
+                print("[recordLocalChange] ⚠️ 无法计算哈希值以检测重命名: \(error)")
+            }
+        }
+        
+        if let oldPath = matchedRename {
+            // 这是重命名操作
+            changeType = .renamed
+            print("[recordLocalChange] ✅ 记录为重命名：通过哈希值匹配检测到 \(oldPath) -> \(relativePath)")
+        } else if hasRenamedFlag {
+            changeType = .renamed
+            print("[recordLocalChange] ✅ 记录为重命名：设置了 Renamed 标志")
+        } else if hasCreatedFlag {
+            // 明确设置了 Created 标志，记录为新建
+            changeType = .created
+            print("[recordLocalChange] ✅ 记录为新建：设置了 Created 标志")
+        } else {
+            // 没有明确的标志，但文件不在已知列表中，应该是新建（如复制文件）
+            changeType = .created
+            print("[recordLocalChange] ✅ 记录为新建：文件不在已知列表中且无明确标志（可能是复制文件）")
+        }
+        
+        let change = LocalChange(
+            folderID: folder.id,
+            path: relativePath,
+            changeType: changeType,
+            size: size,
+            timestamp: Date(),
+            sequence: nil
+        )
+
+        // 立即更新已知路径列表和元数据，避免后续重复事件
+        if changeType == .created || changeType == .renamed {
+            // 如果是重命名操作，需要先移除旧路径
+            if changeType == .renamed, let oldPath = matchedRename {
+                lastKnownLocalPaths[folder.syncID]?.remove(oldPath)
+                lastKnownMetadata[folder.syncID]?.removeValue(forKey: oldPath)
+                print("[recordLocalChange] 🔄 已从已知路径和元数据中移除旧路径: \(oldPath)")
+            }
+            
+            // 新建或重命名：添加到已知路径列表
+            if lastKnownLocalPaths[folder.syncID] == nil {
+                lastKnownLocalPaths[folder.syncID] = Set<String>()
+            }
+            lastKnownLocalPaths[folder.syncID]?.insert(relativePath)
+            
+            // 计算并保存元数据
+            if exists {
+                do {
+                    let fileURL = URL(fileURLWithPath: absolutePath)
+                    let hash = try computeFileHash(fileURL: fileURL)
+                    let attrs = try? fileManager.attributesOfItem(atPath: absolutePath)
+                    let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                    
+                    if lastKnownMetadata[folder.syncID] == nil {
+                        lastKnownMetadata[folder.syncID] = [:]
+                    }
+                    lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
+                        hash: hash,
+                        mtime: mtime,
+                        vectorClock: nil
+                    )
+                    print("[recordLocalChange] 🔄 已更新已知路径和元数据: \(relativePath)")
+                } catch {
+                    print("[recordLocalChange] ⚠️ 无法计算哈希值以更新元数据: \(error)")
+                }
+            }
+        } else if changeType == .modified {
+            // 修改：更新元数据
+            if exists {
+                do {
+                    let fileURL = URL(fileURLWithPath: absolutePath)
+                    let hash = try computeFileHash(fileURL: fileURL)
+                    let attrs = try? fileManager.attributesOfItem(atPath: absolutePath)
+                    let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                    
+                    if lastKnownMetadata[folder.syncID] == nil {
+                        lastKnownMetadata[folder.syncID] = [:]
+                    }
+                    lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
+                        hash: hash,
+                        mtime: mtime,
+                        vectorClock: nil
+                    )
+                    print("[recordLocalChange] 🔄 已更新元数据: \(relativePath)")
+                } catch {
+                    print("[recordLocalChange] ⚠️ 无法计算哈希值以更新元数据: \(error)")
+                }
+            }
+        } else if changeType == .deleted {
+            // 删除：从已知路径列表中移除
+            lastKnownLocalPaths[folder.syncID]?.remove(relativePath)
+            lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
+            print("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(relativePath)")
+        }
+
+        Task.detached {
+            try? StorageManager.shared.addLocalChange(change)
+            print("[recordLocalChange] 💾 已保存\(changeType == .created ? "新建" : changeType == .renamed ? "重命名" : changeType == .deleted ? "删除" : "修改")记录: \(relativePath)")
+        }
+    }
+
 
     /// 处理同步请求（统一处理函数）
     private func handleSyncRequest(_ syncReq: SyncRequest) async throws -> SyncResponse {
@@ -1417,6 +1761,35 @@ public class SyncManager: ObservableObject {
 
         // 如果所有文件夹都在冷却期内，阻止同步；否则允许同步
         return !allInCooldown
+    }
+    
+    /// 从快照恢复 lastKnownLocalPaths 和 lastKnownMetadata
+    private func restoreSnapshots() {
+        Task.detached {
+            do {
+                let snapshots = try StorageManager.shared.loadAllSnapshots()
+                await MainActor.run {
+                    for snapshot in snapshots {
+                        // 恢复路径集合
+                        self.lastKnownLocalPaths[snapshot.syncID] = Set(snapshot.files.keys)
+                        
+                        // 恢复元数据
+                        var metadata: [String: FileMetadata] = [:]
+                        for (path, fileSnapshot) in snapshot.files {
+                            metadata[path] = FileMetadata(
+                                hash: fileSnapshot.hash,
+                                mtime: fileSnapshot.mtime,
+                                vectorClock: fileSnapshot.vectorClock
+                            )
+                        }
+                        self.lastKnownMetadata[snapshot.syncID] = metadata
+                    }
+                    print("[SyncManager] ✅ 已从快照恢复 \(snapshots.count) 个文件夹的状态")
+                }
+            } catch {
+                print("[SyncManager] ⚠️ 从快照恢复状态失败: \(error)")
+            }
+        }
     }
 
 }

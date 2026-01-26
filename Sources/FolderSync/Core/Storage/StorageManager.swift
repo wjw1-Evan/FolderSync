@@ -2,6 +2,8 @@ import Foundation
 
 extension Notification.Name {
     static let syncLogAdded = Notification.Name("syncLogAdded")
+    static let localChangeAdded = Notification.Name("localChangeAdded")
+    static let localChangeHistoryRefresh = Notification.Name("localChangeHistoryRefresh")
 }
 
 public class StorageManager {
@@ -14,7 +16,9 @@ public class StorageManager {
     private var foldersFile: URL { appDir.appendingPathComponent("folders.json") }
     private var conflictsFile: URL { appDir.appendingPathComponent("conflicts.json") }
     private var syncLogsFile: URL { appDir.appendingPathComponent("sync_logs.json") }
+    private var localChangesFile: URL { appDir.appendingPathComponent("local_changes.json") }
     private var deletedRecordsFile: URL { appDir.appendingPathComponent("deleted_records.json") }
+    private var snapshotsDir: URL { appDir.appendingPathComponent("snapshots", isDirectory: true) }
     private var vectorClocksDir: URL {
         appDir.appendingPathComponent("vector_clocks", isDirectory: true)
     }
@@ -24,8 +28,11 @@ public class StorageManager {
     private var foldersCache: [SyncFolder]?
     private var conflictsCache: [ConflictFile]?
     private var syncLogsCache: [SyncLog]?
+    private var localChangesCache: [LocalChange]?
     private var deletedRecordsCache: [String: Set<String>]?
     private let cacheQueue = DispatchQueue(label: "com.foldersync.storage.cache")
+    private var nextLogSequence: Int64 = 1
+    private var nextLocalChangeSequence: Int64 = 1
 
     init() throws {
         let path = NSSearchPathForDirectoriesInDomains(
@@ -53,12 +60,30 @@ public class StorageManager {
                 at: blocksDir, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o755])
         }
+        
+        // 创建快照存储目录
+        if !fileManager.fileExists(atPath: snapshotsDir.path) {
+            try fileManager.createDirectory(
+                at: snapshotsDir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o755])
+        }
 
         // 初始化缓存
         _ = try? loadFolders()
         _ = try? loadConflicts()
         _ = try? loadSyncLogs()
+        _ = try? loadLocalChanges()
         _ = try? loadDeletedRecords()
+
+        // 初始化同步日志的序列号，确保并发写入有全局递增顺序
+        let logs = (try? loadSyncLogs(forceReload: true)) ?? []
+        let maxSeq = logs.compactMap { $0.sequence }.max() ?? 0
+        self.nextLogSequence = maxSeq + 1
+
+        // 初始化本地变更日志序列
+        let localChanges = (try? loadLocalChanges(forceReload: true)) ?? []
+        let maxLocalSeq = localChanges.compactMap { $0.sequence }.max() ?? 0
+        self.nextLocalChangeSequence = maxLocalSeq + 1
     }
 
     // MARK: - 文件夹管理
@@ -304,22 +329,40 @@ public class StorageManager {
     // MARK: - 同步日志管理
 
     public func addSyncLog(_ log: SyncLog) throws {
-        var logs = try loadSyncLogs()
+        var newLog = log
+        var caughtError: Error?
 
-        // 检查是否已存在（相同 ID）
-        if let index = logs.firstIndex(where: { $0.id == log.id }) {
-            logs[index] = log
-        } else {
-            logs.append(log)
+        cacheQueue.sync {
+            do {
+                var logs = try loadSyncLogsLocked()
+
+                // 分配全局递增序列，解决并发写入顺序问题
+                if newLog.sequence == nil {
+                    newLog.sequence = nextLogSequence
+                    nextLogSequence += 1
+                } else if let seq = newLog.sequence, seq >= nextLogSequence {
+                    nextLogSequence = seq + 1
+                }
+
+                if let index = logs.firstIndex(where: { $0.id == newLog.id }) {
+                    logs[index] = newLog
+                } else {
+                    logs.append(newLog)
+                }
+
+                // 排序并限制日志数量（保留最新的 1000 条），按 sequence 降序优先，其次 startedAt
+                logs = sortLogsForDisplay(logs)
+                if logs.count > 1000 {
+                    logs = Array(logs.prefix(1000))
+                }
+
+                try saveSyncLogsLocked(logs)
+            } catch {
+                caughtError = error
+            }
         }
 
-        // 限制日志数量（保留最新的 1000 条）
-        if logs.count > 1000 {
-            logs.sort { $0.startedAt > $1.startedAt }
-            logs = Array(logs.prefix(1000))
-        }
-
-        try saveSyncLogs(logs)
+        if let err = caughtError { throw err }
 
         // 发送通知，通知视图刷新
         NotificationCenter.default.post(name: .syncLogAdded, object: nil)
@@ -335,8 +378,8 @@ public class StorageManager {
             logs = logs.filter { $0.syncID == sid }
         }
 
-        // 按时间倒序排序
-        logs.sort { $0.startedAt > $1.startedAt }
+        // 按 sequence 优先排序（降序），解决并发写入的时间一致性问题
+        logs = sortLogsForDisplay(logs)
 
         // 限制数量
         return Array(logs.prefix(limit))
@@ -347,19 +390,27 @@ public class StorageManager {
             if !forceReload, let cached = syncLogsCache {
                 return cached
             }
-
-            guard fileManager.fileExists(atPath: syncLogsFile.path),
-                let data = try? Data(contentsOf: syncLogsFile),
-                let logs = try? JSONDecoder().decode([SyncLog].self, from: data)
-            else {
-                let empty: [SyncLog] = []
-                syncLogsCache = empty
-                return empty
-            }
-
-            syncLogsCache = logs
-            return logs
+            return (try? loadSyncLogsLocked()) ?? []
         }
+    }
+
+    // 仅在 cacheQueue 内调用，避免重复加锁
+    private func loadSyncLogsLocked() throws -> [SyncLog] {
+        if let cached = syncLogsCache {
+            return cached
+        }
+
+        guard fileManager.fileExists(atPath: syncLogsFile.path),
+            let data = try? Data(contentsOf: syncLogsFile),
+            let logs = try? JSONDecoder().decode([SyncLog].self, from: data)
+        else {
+            let empty: [SyncLog] = []
+            syncLogsCache = empty
+            return empty
+        }
+
+        syncLogsCache = logs
+        return logs
     }
 
     private func saveSyncLogs(_ logs: [SyncLog]) throws {
@@ -369,6 +420,271 @@ public class StorageManager {
         cacheQueue.sync {
             syncLogsCache = logs
         }
+    }
+
+    // 仅在 cacheQueue 内调用，避免重复加锁
+    private func saveSyncLogsLocked(_ logs: [SyncLog]) throws {
+        let data = try JSONEncoder().encode(logs)
+        try data.write(to: syncLogsFile, options: [.atomic])
+        syncLogsCache = logs
+    }
+
+    // 统一排序：sequence 优先（越大越新），否则按 startedAt
+    private func sortLogsForDisplay(_ logs: [SyncLog]) -> [SyncLog] {
+        return logs.sorted { lhs, rhs in
+            switch (lhs.sequence, rhs.sequence) {
+            case (let ls?, let rs?):
+                if ls == rs { return lhs.startedAt > rhs.startedAt }
+                return ls > rs
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.startedAt > rhs.startedAt
+            }
+        }
+    }
+
+    // MARK: - 本地变更历史
+
+    public func addLocalChange(_ change: LocalChange) throws {
+        var newChange = change
+        var caughtError: Error?
+
+        cacheQueue.sync {
+            do {
+                var changes = try loadLocalChangesLocked()
+
+                // 分配全局递增序列，解决并发写入顺序问题
+                if newChange.sequence == nil {
+                    newChange.sequence = nextLocalChangeSequence
+                    nextLocalChangeSequence += 1
+                } else if let seq = newChange.sequence, seq >= nextLocalChangeSequence {
+                    nextLocalChangeSequence = seq + 1
+                }
+
+                // 检查是否已有相同 ID 的记录
+                if let index = changes.firstIndex(where: { $0.id == newChange.id }) {
+                    changes[index] = newChange
+                } else {
+                    changes.append(newChange)
+                }
+
+                // 按 sequence 降序排序，限制数量（保留最新的 2000 条）
+                changes = sortLocalChangesForDisplay(changes)
+                if changes.count > 2000 {
+                    changes = Array(changes.prefix(2000))
+                }
+
+                try saveLocalChangesLocked(changes)
+            } catch {
+                caughtError = error
+            }
+        }
+
+        if let err = caughtError { throw err }
+
+        NotificationCenter.default.post(name: .localChangeAdded, object: nil)
+    }
+
+    public func getLocalChanges(folderID: UUID? = nil, limit: Int = 200, forceReload: Bool = false)
+        throws -> [LocalChange]
+    {
+        var changes = try loadLocalChanges(forceReload: forceReload)
+        if let fid = folderID {
+            changes = changes.filter { $0.folderID == fid }
+        }
+
+        changes = sortLocalChangesForDisplay(changes)
+        return Array(changes.prefix(limit))
+    }
+
+    private func loadLocalChanges(forceReload: Bool = false) throws -> [LocalChange] {
+        return cacheQueue.sync {
+            if !forceReload, let cached = localChangesCache {
+                return cached
+            }
+            return (try? loadLocalChangesLocked()) ?? []
+        }
+    }
+
+    // 仅在 cacheQueue 内调用，避免重复加锁
+    private func loadLocalChangesLocked() throws -> [LocalChange] {
+        if let cached = localChangesCache {
+            return cached
+        }
+
+        guard fileManager.fileExists(atPath: localChangesFile.path),
+            let data = try? Data(contentsOf: localChangesFile),
+            let changes = try? JSONDecoder().decode([LocalChange].self, from: data)
+        else {
+            let empty: [LocalChange] = []
+            localChangesCache = empty
+            return empty
+        }
+
+        localChangesCache = changes
+        return changes
+    }
+
+    private func saveLocalChanges(_ changes: [LocalChange]) throws {
+        let data = try JSONEncoder().encode(changes)
+        try data.write(to: localChangesFile, options: [.atomic])
+
+        cacheQueue.sync {
+            localChangesCache = changes
+        }
+    }
+
+    // 仅在 cacheQueue 内调用，避免重复加锁
+    private func saveLocalChangesLocked(_ changes: [LocalChange]) throws {
+        let data = try JSONEncoder().encode(changes)
+        try data.write(to: localChangesFile, options: [.atomic])
+        localChangesCache = changes
+    }
+
+    // 统一排序：sequence 优先（越大越新），否则按 timestamp
+    private func sortLocalChangesForDisplay(_ changes: [LocalChange]) -> [LocalChange] {
+        return changes.sorted { lhs, rhs in
+            switch (lhs.sequence, rhs.sequence) {
+            case (let ls?, let rs?):
+                if ls == rs { return lhs.timestamp > rhs.timestamp }
+                return ls > rs
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.timestamp > rhs.timestamp
+            }
+        }
+    }
+
+    // MARK: - 文件夹快照管理（原子记录）
+    
+    /// 原子性地保存文件夹快照
+    /// 使用临时文件 + 原子移动确保原子性
+    public func saveSnapshot(_ snapshot: FolderSnapshot) throws {
+        let snapshotFile = snapshotsDir.appendingPathComponent("\(snapshot.syncID).json")
+        let tempFile = snapshotFile.appendingPathExtension("tmp")
+        
+        // 先写入临时文件
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(snapshot)
+        try data.write(to: tempFile, options: [.atomic])
+        
+        // 原子性地移动到目标文件
+        try fileManager.moveItem(at: tempFile, to: snapshotFile)
+    }
+    
+    /// 加载指定 syncID 的最新快照
+    public func loadSnapshot(syncID: String) throws -> FolderSnapshot? {
+        let snapshotFile = snapshotsDir.appendingPathComponent("\(syncID).json")
+        
+        guard fileManager.fileExists(atPath: snapshotFile.path) else {
+            return nil
+        }
+        
+        let data = try Data(contentsOf: snapshotFile)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(FolderSnapshot.self, from: data)
+    }
+    
+    /// 加载所有快照
+    public func loadAllSnapshots() throws -> [FolderSnapshot] {
+        guard fileManager.fileExists(atPath: snapshotsDir.path) else {
+            return []
+        }
+        
+        let files = try fileManager.contentsOfDirectory(at: snapshotsDir, includingPropertiesForKeys: nil)
+        let jsonFiles = files.filter { $0.pathExtension == "json" }
+        
+        var snapshots: [FolderSnapshot] = []
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        
+        for file in jsonFiles {
+            do {
+                let data = try Data(contentsOf: file)
+                let snapshot = try decoder.decode(FolderSnapshot.self, from: data)
+                snapshots.append(snapshot)
+            } catch {
+                print("[StorageManager] ⚠️ 无法加载快照 \(file.lastPathComponent): \(error)")
+                // 继续处理其他文件
+            }
+        }
+        
+        return snapshots
+    }
+    
+    /// 删除指定 syncID 的快照
+    public func deleteSnapshot(syncID: String) throws {
+        let snapshotFile = snapshotsDir.appendingPathComponent("\(syncID).json")
+        if fileManager.fileExists(atPath: snapshotFile.path) {
+            try fileManager.removeItem(at: snapshotFile)
+        }
+    }
+    
+    /// 比较两个快照，返回变更列表
+    public func compareSnapshots(_ old: FolderSnapshot?, _ new: FolderSnapshot) -> (
+        created: [String],
+        modified: [String],
+        deleted: [String],
+        renamed: [(old: String, new: String)]
+    ) {
+        guard let old = old else {
+            // 如果没有旧快照，所有文件都是新建的
+            return (created: Array(new.files.keys), modified: [], deleted: [], renamed: [])
+        }
+        
+        var created: [String] = []
+        var modified: [String] = []
+        var deleted: [String] = []
+        var renamed: [(old: String, new: String)] = []
+        
+        let oldPaths = Set(old.files.keys)
+        let newPaths = Set(new.files.keys)
+        
+        // 检测删除和可能的重命名
+        for oldPath in oldPaths {
+            if !newPaths.contains(oldPath) {
+                let oldFile = old.files[oldPath]!
+                // 尝试通过哈希值匹配重命名
+                var foundRename = false
+                for (newPath, newFile) in new.files {
+                    if !oldPaths.contains(newPath) && oldFile.hash == newFile.hash {
+                        renamed.append((old: oldPath, new: newPath))
+                        foundRename = true
+                        break
+                    }
+                }
+                if !foundRename {
+                    deleted.append(oldPath)
+                }
+            }
+        }
+        
+        // 检测新建和修改
+        for newPath in newPaths {
+            if !oldPaths.contains(newPath) {
+                // 检查是否已经在重命名列表中
+                if !renamed.contains(where: { $0.new == newPath }) {
+                    created.append(newPath)
+                }
+            } else {
+                // 检查是否修改（通过哈希值比较）
+                let oldFile = old.files[newPath]!
+                let newFile = new.files[newPath]!
+                if oldFile.hash != newFile.hash {
+                    modified.append(newPath)
+                }
+            }
+        }
+        
+        return (created: created, modified: modified, deleted: deleted, renamed: renamed)
     }
 
     // MARK: - 删除记录（Tombstones）

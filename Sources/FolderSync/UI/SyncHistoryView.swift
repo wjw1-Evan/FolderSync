@@ -4,11 +4,17 @@ import SwiftUI
 struct SyncHistoryView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var syncManager: SyncManager
+    private let preselectedFolderID: UUID?
     @State private var logs: [SyncLog] = []
     @State private var filteredLogs: [SyncLog] = []
     @State private var searchText: String = ""
     @State private var selectedFolderID: UUID? = nil
     @State private var showErrorsOnly: Bool = false
+
+    init(preselectedFolderID: UUID? = nil) {
+        self.preselectedFolderID = preselectedFolderID
+        _selectedFolderID = State(initialValue: preselectedFolderID)
+    }
 
     var body: some View {
         NavigationStack {

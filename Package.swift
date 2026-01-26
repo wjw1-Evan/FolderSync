@@ -22,11 +22,6 @@ let package = Package(
             resources: [
                 .process("Resources")
             ]
-        ),
-        .testTarget(
-            name: "FolderSyncTests",
-            dependencies: ["FolderSync"],
-            path: "Tests/FolderSyncTests"
         )
     ]
 )

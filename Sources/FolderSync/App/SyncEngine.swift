@@ -367,6 +367,15 @@ class SyncEngine {
                 // 本地和远程已经同步
                 syncManager.lastKnownLocalPaths[syncID] = currentPaths
                 syncManager.lastKnownMetadata[syncID] = localMetadata  // 保存当前元数据用于下次重命名检测
+                
+                // 原子性地保存文件夹快照（即使没有文件操作）
+                await saveSnapshotAtomically(
+                    syncID: syncID,
+                    folderID: folderID,
+                    metadata: localMetadata,
+                    folderCount: 0,  // 这里不需要重新计算，使用占位值
+                    totalSize: 0
+                )
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .synced, message: "Up to date", progress: 1.0)
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
@@ -693,6 +702,15 @@ class SyncEngine {
             if totalOps == 0 {
                 syncManager.lastKnownLocalPaths[syncID] = currentPaths
                 syncManager.lastKnownMetadata[syncID] = localMetadata  // 保存当前元数据用于下次重命名检测
+                
+                // 原子性地保存文件夹快照（即使没有文件操作）
+                await saveSnapshotAtomically(
+                    syncID: syncID,
+                    folderID: folderID,
+                    metadata: localMetadata,
+                    folderCount: 0,  // 这里不需要重新计算，使用占位值
+                    totalSize: 0
+                )
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .synced, message: "Up to date", progress: 1.0)
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
@@ -1156,6 +1174,15 @@ class SyncEngine {
             let finalPaths = Set(finalMetadata.keys)
             syncManager.lastKnownLocalPaths[syncID] = finalPaths
             syncManager.lastKnownMetadata[syncID] = finalMetadata  // 保存当前元数据用于下次重命名检测
+            
+            // 原子性地保存文件夹快照（用于多端同步）
+            await saveSnapshotAtomically(
+                syncID: syncID,
+                folderID: folderID,
+                metadata: finalMetadata,
+                folderCount: finalFolderCount,
+                totalSize: finalTotalSize
+            )
 
             // 更新统计值（同步后文件可能已变化）
             // 注意：SyncEngine 是 @MainActor，但这里需要确保在 MainActor 上下文中更新
@@ -1218,6 +1245,48 @@ class SyncEngine {
                 try StorageManager.shared.addSyncLog(log)
             } catch {
                 print("[SyncEngine] ⚠️ 无法保存同步日志: \(error)")
+            }
+        }
+    }
+    
+    /// 原子性地保存文件夹快照
+    private func saveSnapshotAtomically(
+        syncID: String,
+        folderID: UUID,
+        metadata: [String: FileMetadata],
+        folderCount: Int,
+        totalSize: Int64
+    ) async {
+        guard let syncManager = syncManager else { return }
+        
+        // 获取文件大小信息（用于快照）
+        var fileSizes: [String: Int64] = [:]
+        if let currentFolder = syncManager.folders.first(where: { $0.id == folderID }) {
+            let fileManager = FileManager.default
+            for (path, _) in metadata {
+                let fileURL = currentFolder.localPath.appendingPathComponent(path)
+                if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                   let size = attrs[.size] as? Int64 {
+                    fileSizes[path] = size
+                }
+            }
+        }
+        
+        // 创建快照
+        let snapshot = FolderSnapshot.fromFileMetadata(
+            syncID: syncID,
+            folderID: folderID,
+            metadata: metadata,
+            fileSizes: fileSizes
+        )
+        
+        // 原子性地保存快照
+        Task.detached {
+            do {
+                try StorageManager.shared.saveSnapshot(snapshot)
+                print("[SyncEngine] ✅ 已原子保存文件夹快照: \(syncID)")
+            } catch {
+                print("[SyncEngine] ⚠️ 保存文件夹快照失败: \(error)")
             }
         }
     }

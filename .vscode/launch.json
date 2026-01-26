@@ -1,24 +1,26 @@
 {
     "configurations": [
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:FolderSync}",
             "name": "Debug FolderSync",
             "preLaunchTask": "swift: Build Debug FolderSync",
             "target": "FolderSync",
-            "configuration": "debug"
+            "configuration": "debug",
+            "program": "${workspaceFolder:FolderSync}/.build/debug/FolderSync"
         },
         {
-            "type": "swift",
+            "type": "lldb",
             "request": "launch",
             "args": [],
             "cwd": "${workspaceFolder:FolderSync}",
             "name": "Release FolderSync",
             "preLaunchTask": "swift: Build Release FolderSync",
             "target": "FolderSync",
-            "configuration": "release"
+            "configuration": "release",
+            "program": "${workspaceFolder:FolderSync}/.build/release/FolderSync"
         }
     ]
 }

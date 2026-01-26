@@ -63,9 +63,22 @@ public class SyncManager: ObservableObject {
         // Load from storage
         do {
             let loadedFolders = try StorageManager.shared.getAllFolders()
-            self.folders = loadedFolders
+            var normalized: [SyncFolder] = []
             if !loadedFolders.isEmpty {
-                for folder in loadedFolders {
+                for var folder in loadedFolders {
+                    // 启动时清理可能遗留的“同步中”状态，避免界面一直卡在同步中
+                    if folder.status == .syncing {
+                        folder.status = .synced
+                        folder.syncProgress = 0
+                        folder.lastSyncMessage = nil
+                        // 持久化修正，防止下次启动再次卡住
+                        do {
+                            try StorageManager.shared.saveFolder(folder)
+                        } catch {
+                            print("[SyncManager] ⚠️ 无法保存同步状态修正: \(error)")
+                        }
+                    }
+                    normalized.append(folder)
                     // 注册 syncID 到管理器
                     let registered = syncIDManager.registerSyncID(folder.syncID, folderID: folder.id)
                     if !registered {
@@ -74,6 +87,7 @@ public class SyncManager: ObservableObject {
                     print("[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))")
                 }
             }
+            self.folders = normalized
         } catch {
             print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
             print("[SyncManager] 错误详情: \(error.localizedDescription)")

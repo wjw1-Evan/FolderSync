@@ -199,6 +199,23 @@ class SyncEngine {
             } catch {
                 let errorString = String(describing: error)
                 print("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
+                
+                // 检查是否是超时或连接失败错误，如果是，将设备标记为离线
+                let isTimeoutOrConnectionError = errorString.contains("TimedOut") || 
+                                                errorString.contains("timeout") || 
+                                                errorString.contains("请求超时") ||
+                                                errorString.contains("connection") || 
+                                                errorString.contains("Connection") ||
+                                                errorString.contains("unreachable")
+                
+                if isTimeoutOrConnectionError {
+                    // 将设备标记为离线，避免重复尝试连接
+                    await MainActor.run {
+                        syncManager.peerManager.updateOnlineStatus(peerID, isOnline: false)
+                    }
+                    print("[SyncEngine] ⚠️ [performSync] 对等点连接失败，已标记为离线: \(peerID.prefix(12))...")
+                }
+                
                 syncManager.updateFolderStatus(currentFolder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
                 // 记录错误日志
                 let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "对等点连接失败: \(error.localizedDescription)")
@@ -209,9 +226,6 @@ class SyncEngine {
             if case .error = rootRes {
                 // Remote doesn't have this folder
                 syncManager.removeFolderPeer(syncID, peerID: peerID)
-                // 记录信息日志（远程没有此文件夹）
-                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "远程对等点没有此同步文件夹")
-                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             

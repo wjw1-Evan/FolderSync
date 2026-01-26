@@ -337,6 +337,13 @@ public class SyncManager: ObservableObject {
         let peerIDString = peer.b58String
         
         // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
+        
+        // 首先检查设备是否已经标记为离线，如果已离线，不再尝试连接
+        if !peerManager.isOnline(peerIDString) {
+            // 设备已经离线，不再尝试连接
+            return false
+        }
+        
         let isRegistered = peerManager.isRegistered(peerIDString)
         
         // 检查是否是新发现的（1分钟内）
@@ -404,10 +411,15 @@ public class SyncManager: ObservableObject {
                 }
             }
             
-            // 连接相关错误
+            // 连接相关错误（超时、连接失败等）
             if errorString.contains("TimedOut") || errorString.contains("timeout") ||
+               errorString.contains("请求超时") ||
                errorString.contains("connection") || errorString.contains("Connection") ||
                errorString.contains("unreachable") {
+                // 连接失败，将设备标记为离线
+                await MainActor.run {
+                    peerManager.updateOnlineStatus(peerIDString, isOnline: false)
+                }
                 return false
             }
             

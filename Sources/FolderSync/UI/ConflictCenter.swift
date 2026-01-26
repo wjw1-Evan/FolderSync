@@ -71,6 +71,14 @@ struct ConflictCenter: View {
             }
             .navigationTitle(LocalizedString.conflictCenter)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(LocalizedString.conflictCenter)
+                            .font(.headline)
+                    }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button(LocalizedString.close) { dismiss() }
                 }

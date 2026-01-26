@@ -7,6 +7,7 @@ public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
+    @Published var pendingTransferFileCount: Int = 0
     let p2pNode = P2PNode()
 
     // 使用统一的 Peer 管理器
@@ -632,6 +633,16 @@ public class SyncManager: ObservableObject {
         downloadSamples.removeAll { $0.0 < cutoff }
         let sum = downloadSamples.reduce(Int64(0)) { $0 + $1.1 }
         downloadSpeedBytesPerSec = Double(sum) / speedWindow
+    }
+
+    func addPendingTransfers(_ count: Int) {
+        guard count > 0 else { return }
+        pendingTransferFileCount += count
+    }
+
+    func completePendingTransfers(_ count: Int = 1) {
+        guard count > 0 else { return }
+        pendingTransferFileCount = max(0, pendingTransferFileCount - count)
     }
 
     func isIgnored(_ path: String, folder: SyncFolder) -> Bool {

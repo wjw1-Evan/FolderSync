@@ -7,7 +7,7 @@ extension String {
     var localized: String {
         String(localized: String.LocalizationValue(stringLiteral: self), bundle: .module)
     }
-    
+
     /// 获取带参数的本地化字符串
     func localized(_ arguments: CVarArg...) -> String {
         String(format: self.localized, arguments: arguments)
@@ -27,7 +27,7 @@ enum LocalizedString {
     static let refresh = "刷新".localized
     static let help = "帮助".localized
     static let quit = "退出".localized
-    
+
     // MARK: - 仪表盘
     static let dashboard = "FolderSync 仪表盘".localized
     static let syncFolders = "同步文件夹".localized
@@ -36,19 +36,20 @@ enum LocalizedString {
     static let addFolder = "添加文件夹".localized
     static let conflictCenter = "冲突中心".localized
     static let syncHistory = "同步历史".localized
-    
+
     // MARK: - 设备
     static let online = "在线".localized
     static let offline = "离线".localized
     static let direct = "直连".localized
     static let local = "本机".localized
     static let remoteDevice = "远程设备".localized
+    static let devicesList = "设备列表".localized
     static let me = "(我)".localized
     static let allDevices = "所有设备".localized
     static let onlineDevices = "在线同步设备".localized
     static let noOnlineDevices = "暂无在线设备".localized
     static let waitingForDevices = "等待发现其他设备...".localized
-    
+
     // MARK: - 文件夹
     static let files = "个文件".localized
     static let folders = "个文件夹".localized
@@ -58,7 +59,7 @@ enum LocalizedString {
     static let copySyncID = "复制同步 ID".localized
     static let excludeRules = "排除规则".localized
     static let removeFolder = "移除文件夹".localized
-    
+
     // MARK: - 添加文件夹
     static let addSyncFolder = "添加同步文件夹".localized
     static let localFolderPath = "1. 本地文件夹地址".localized
@@ -74,7 +75,7 @@ enum LocalizedString {
     static let addSync = "添加同步".localized
     static let idLabel = "ID:".localized
     static let copied = "已复制".localized
-    
+
     // MARK: - 冲突中心
     static let noConflicts = "暂无冲突".localized
     static let allFilesSynced = "所有文件已同步完成".localized
@@ -89,7 +90,7 @@ enum LocalizedString {
     static let syncIDLabel = "同步ID".localized
     static let showInFinder = "在 Finder 中显示".localized
     static let viewConflictFile = "查看冲突文件".localized
-    
+
     // MARK: - 同步历史
     static let searchSyncHistory = "搜索同步历史...".localized
     static let allFolders = "所有文件夹".localized
@@ -102,7 +103,7 @@ enum LocalizedString {
     static let filesLabel = "文件: ".localized
     static let andMoreFiles = "等 %d 个文件".localized
     static let countSuffix = "个".localized
-    
+
     // MARK: - 排除规则
     static let excludeRulesTitle = "排除规则".localized
     static let gitignoreStyleRules = "使用 .gitignore 风格的匹配规则".localized
@@ -116,11 +117,11 @@ enum LocalizedString {
     static let allFilesWillBeSynced = "所有文件都会被同步".localized
     static let deleteRule = "删除规则".localized
     static let 条 = "条".localized
-    
+
     // MARK: - 菜单
     static let showMainWindow = "显示主界面".localized
     static let launchAtLogin = "开机自动启动".localized
-    
+
     // MARK: - 模板分类
     static let logFiles = "日志文件".localized
     static let temporaryFiles = "临时文件".localized
@@ -129,13 +130,14 @@ enum LocalizedString {
     static let ideConfiguration = "IDE配置".localized
     static let versionControl = "版本控制".localized
     static let cacheDirectories = "缓存目录".localized
-    
+
     // MARK: - 确认对话框
     static let confirmRemoveFolder = "确认移除文件夹".localized
     static let confirmRemoveFolderMessage = "确定要移除同步文件夹 \"%@\" 吗？此操作将停止该文件夹的同步，但不会删除本地文件。".localized
     static let remove = "移除".localized
     static let counting = "统计中...".localized
-    
+    static let pendingTransfers = "待传输".localized
+
     // MARK: - 状态
     static func syncStatus(_ status: SyncStatus) -> String {
         switch status {
@@ -149,20 +151,20 @@ enum LocalizedString {
             return "已暂停".localized
         }
     }
-    
+
     // MARK: - 格式化函数
     static func devicesDiscovered(_ count: Int) -> String {
         String(format: "已发现 %d 台设备".localized, count)
     }
-    
+
     static func copySyncIDHelp(_ syncID: String) -> String {
         String(format: "复制同步ID: %@".localized, syncID)
     }
-    
+
     static func fromPeer(_ peerID: String) -> String {
         String(format: "来自 %@".localized, peerID)
     }
-    
+
     static func moreFiles(_ count: Int) -> String {
         String(format: andMoreFiles, count)
     }

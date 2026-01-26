@@ -93,6 +93,14 @@ struct SyncHistoryView: View {
             }
             .navigationTitle(LocalizedString.syncHistory)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundStyle(.blue)
+                        Text(LocalizedString.syncHistory)
+                            .font(.headline)
+                    }
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button(LocalizedString.close) { dismiss() }
                 }

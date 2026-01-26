@@ -427,6 +427,26 @@ class SyncEngine {
             var totalOps = 0
             var completedOps = 0
             var syncedFiles: [SyncLog.SyncedFileInfo] = []
+            var pendingTransfersRemaining = 0
+
+            func registerPendingTransfers(_ count: Int) {
+                guard count > 0 else { return }
+                pendingTransfersRemaining += count
+                syncManager.addPendingTransfers(count)
+            }
+
+            func markTransferCompleted() {
+                guard pendingTransfersRemaining > 0 else { return }
+                pendingTransfersRemaining -= 1
+                syncManager.completePendingTransfers()
+            }
+
+            func cleanupPendingTransfers() {
+                if pendingTransfersRemaining > 0 {
+                    syncManager.completePendingTransfers(pendingTransfersRemaining)
+                    pendingTransfersRemaining = 0
+                }
+            }
 
             // 定义下载和上传决策函数
             enum DownloadAction {
@@ -700,27 +720,41 @@ class SyncEngine {
                 !locallyDeleted.contains(path) && !deletedSet.contains(path)
             }
 
+            let transferOpsCount =
+                filesToDownload.count + conflictFiles.count
+                + uploadConflictFiles.count + filesToUpload.count
+            if transferOpsCount > 0 {
+                registerPendingTransfers(transferOpsCount)
+            }
+            defer { cleanupPendingTransfers() }
+
             await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
                 var activeDownloads = 0
 
                 for (path, remoteMeta) in filesToDownload {
                     if activeDownloads >= maxConcurrentTransfers {
-                        if let result = await group.next(), let (bytes, fileInfo) = result {
-                            totalDownloadBytes += bytes
-                            syncedFiles.append(fileInfo)
-                            completedOps += 1
-                            activeDownloads -= 1
+                        if let result = await group.next() {
+                            markTransferCompleted()
+                            if let (bytes, fileInfo) = result {
+                                totalDownloadBytes += bytes
+                                syncedFiles.append(fileInfo)
+                                completedOps += 1
 
-                            await MainActor.run {
-                                syncManager.addDownloadBytes(bytes)
+                                await MainActor.run {
+                                    syncManager.addDownloadBytes(bytes)
+                                }
+                                await MainActor.run {
+                                    syncManager.updateFolderStatus(
+                                        currentFolder.id, status: .syncing,
+                                        message: "下载完成: \(completedOps)/\(totalOps)",
+                                        progress: Double(completedOps)
+                                            / Double(max(totalOps, 1)))
+                                }
                             }
-                            await MainActor.run {
-                                syncManager.updateFolderStatus(
-                                    currentFolder.id, status: .syncing,
-                                    message: "下载完成: \(completedOps)/\(totalOps)",
-                                    progress: Double(completedOps) / Double(max(totalOps, 1)))
-                            }
+                        } else {
+                            markTransferCompleted()
                         }
+                        activeDownloads -= 1
                     }
 
                     activeDownloads += 1
@@ -777,6 +811,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
+                    markTransferCompleted()
                     if let (bytes, fileInfo) = result {
                         totalDownloadBytes += bytes
                         syncedFiles.append(fileInfo)
@@ -879,6 +914,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
+                    markTransferCompleted()
                     if let (bytes, fileInfo) = result {
                         totalDownloadBytes += bytes
                         syncedFiles.append(fileInfo)
@@ -983,6 +1019,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
+                    markTransferCompleted()
                     if let (bytes, fileInfo) = result {
                         totalDownloadBytes += bytes
                         syncedFiles.append(fileInfo)
@@ -1005,22 +1042,28 @@ class SyncEngine {
 
                 for (path, localMeta) in filesToUpload {
                     if activeUploads >= maxConcurrentTransfers {
-                        if let result = await group.next(), let (bytes, fileInfo) = result {
-                            totalUploadBytes += bytes
-                            syncedFiles.append(fileInfo)
-                            completedOps += 1
-                            activeUploads -= 1
+                        if let result = await group.next() {
+                            markTransferCompleted()
+                            if let (bytes, fileInfo) = result {
+                                totalUploadBytes += bytes
+                                syncedFiles.append(fileInfo)
+                                completedOps += 1
 
-                            await MainActor.run {
-                                syncManager.addUploadBytes(bytes)
+                                await MainActor.run {
+                                    syncManager.addUploadBytes(bytes)
+                                }
+                                await MainActor.run {
+                                    syncManager.updateFolderStatus(
+                                        currentFolder.id, status: .syncing,
+                                        message: "上传完成: \(completedOps)/\(totalOps)",
+                                        progress: Double(completedOps)
+                                            / Double(max(totalOps, 1)))
+                                }
                             }
-                            await MainActor.run {
-                                syncManager.updateFolderStatus(
-                                    currentFolder.id, status: .syncing,
-                                    message: "上传完成: \(completedOps)/\(totalOps)",
-                                    progress: Double(completedOps) / Double(max(totalOps, 1)))
-                            }
+                        } else {
+                            markTransferCompleted()
                         }
+                        activeUploads -= 1
                     }
 
                     activeUploads += 1
@@ -1089,6 +1132,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
+                    markTransferCompleted()
                     if let (bytes, fileInfo) = result {
                         totalUploadBytes += bytes
                         syncedFiles.append(fileInfo)

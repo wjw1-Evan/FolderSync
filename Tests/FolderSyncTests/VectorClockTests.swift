@@ -30,4 +30,12 @@ final class VectorClockTests: XCTestCase {
         XCTAssertEqual(v1.versions["peerB"], 5)
         XCTAssertEqual(v1.versions["peerC"], 2)
     }
+
+    func testVectorClockComparisonWithDisjointKeys() {
+        let v1 = VectorClock(versions: ["peerA": 1])
+        let v2 = VectorClock(versions: ["peerB": 2])
+
+        // Missing keys should be treated as 0, leading to concurrency
+        XCTAssertEqual(v1.compare(to: v2), .concurrent)
+    }
 }

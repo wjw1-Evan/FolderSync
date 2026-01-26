@@ -129,4 +129,16 @@ final class FastCDCTests: XCTestCase {
         XCTAssertEqual(chunks.first?.data, data)
         XCTAssertEqual(chunks.first?.offset, 0)
     }
+
+    func testEmptyFileProducesNoChunks() throws {
+        let fastCDC = FastCDC(min: 1024, avg: 2048, max: 4096)
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("empty.dat")
+
+        try Data().write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let chunks = try fastCDC.chunk(fileURL: fileURL)
+        XCTAssertTrue(chunks.isEmpty)
+    }
 }

@@ -32,4 +32,26 @@ final class MSTTests: XCTestCase {
         
         XCTAssertNotEqual(mst1.rootHash, mst2.rootHash)
     }
+
+    func testMSTEntriesAndDiffBehavior() {
+        let baseMST = MerkleSearchTree()
+        baseMST.insert(key: "file1", value: "hash_a")
+        baseMST.insert(key: "file2", value: "hash_b")
+
+        XCTAssertEqual(baseMST.getAllEntries(), ["file1": "hash_a", "file2": "hash_b"])
+
+        // When hashes match, diff should be empty
+        let identicalMST = MerkleSearchTree()
+        identicalMST.insert(key: "file1", value: "hash_a")
+        identicalMST.insert(key: "file2", value: "hash_b")
+        XCTAssertEqual(baseMST.diff(remoteHash: identicalMST.rootHash ?? "", remoteMST: identicalMST), [])
+
+        // When hashes differ, simplified diff returns local keys
+        let remoteMST = MerkleSearchTree()
+        remoteMST.insert(key: "file1", value: "hash_a")
+        remoteMST.insert(key: "file2", value: "hash_changed")
+        remoteMST.insert(key: "file3", value: "hash_new")
+        let diffKeys = baseMST.diff(remoteHash: remoteMST.rootHash ?? "", remoteMST: remoteMST)
+        XCTAssertEqual(Set(diffKeys), Set(["file1", "file2"]))
+    }
 }

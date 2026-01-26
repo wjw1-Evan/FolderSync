@@ -356,9 +356,9 @@ class SyncEngine {
 
             // 更新 deletedPaths（只包含真正的删除，不包括重命名）
             if !locallyDeleted.isEmpty {
-                var dp = syncManager.deletedPaths[syncID] ?? []
+                var dp = syncManager.deletedPaths(for: syncID)
                 dp.formUnion(locallyDeleted)
-                syncManager.deletedPaths[syncID] = dp
+                syncManager.updateDeletedPaths(dp, for: syncID)
             }
 
             let mode = currentFolder.mode
@@ -505,7 +505,7 @@ class SyncEngine {
             }
 
             // 合并已删除的文件集合：包括之前记录的删除和本次检测到的本地删除
-            var deletedSet = syncManager.deletedPaths[syncID] ?? []
+            var deletedSet = syncManager.deletedPaths(for: syncID)
             deletedSet.formUnion(locallyDeleted)  // 确保包含本次检测到的本地删除
 
             // 清理已确认删除的文件（远程也没有了）
@@ -517,9 +517,9 @@ class SyncEngine {
                 locallyDeleted.remove(p)
             }
             if deletedSet.isEmpty {
-                syncManager.deletedPaths.removeValue(forKey: syncID)
+                syncManager.removeDeletedPaths(for: syncID)
             } else {
-                syncManager.deletedPaths[syncID] = deletedSet
+                syncManager.updateDeletedPaths(deletedSet, for: syncID)
             }
 
             // 3. Download phase
@@ -680,9 +680,9 @@ class SyncEngine {
 
                     // 更新 deletedPaths，移除已成功删除的文件
                     if deletedSet.isEmpty {
-                        syncManager.deletedPaths.removeValue(forKey: syncID)
+                        syncManager.removeDeletedPaths(for: syncID)
                     } else {
-                        syncManager.deletedPaths[syncID] = deletedSet
+                        syncManager.updateDeletedPaths(deletedSet, for: syncID)
                     }
                 } else {
                     // 删除失败，记录错误但不阻止后续操作

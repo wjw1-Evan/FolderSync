@@ -29,7 +29,7 @@ public class SyncManager: ObservableObject {
     // 同步状态管理
     var lastKnownLocalPaths: [String: Set<String>] = [:]
     var lastKnownMetadata: [String: [String: FileMetadata]] = [:]  // syncID -> [path: metadata] 用于重命名检测
-    var deletedPaths: [String: Set<String>] = [:]
+    private var deletedRecords: [String: Set<String>] = [:]
     var syncInProgress: Set<String> = []  // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
     private var peerStatusCheckTask: Task<Void, Never>?
     private var peersSyncTask: Task<Void, Never>?  // 定期同步 peers 数组的任务
@@ -92,10 +92,13 @@ public class SyncManager: ObservableObject {
                 }
             }
             self.folders = normalized
+            // 加载持久化的删除记录（tombstones），防止重启后丢失删除信息导致文件被重新拉回
+            self.deletedRecords = (try? StorageManager.shared.getDeletedRecords()) ?? [:]
         } catch {
             print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
             print("[SyncManager] 错误详情: \(error.localizedDescription)")
             self.folders = []
+            self.deletedRecords = [:]
         }
 
         // 初始化设备统计（自身始终在线）
@@ -586,6 +589,7 @@ public class SyncManager: ObservableObject {
         stopMonitoring(folder)
         folders.removeAll { $0.id == folder.id }
         syncIDManager.unregisterSyncIDByFolderID(folder.id)
+        removeDeletedPaths(for: folder.syncID)
         // 防抖任务由 FolderMonitor 管理，停止监控时会自动取消
         try? StorageManager.shared.deleteFolder(folder.id)
     }
@@ -633,6 +637,33 @@ public class SyncManager: ObservableObject {
         downloadSamples.removeAll { $0.0 < cutoff }
         let sum = downloadSamples.reduce(Int64(0)) { $0 + $1.1 }
         downloadSpeedBytesPerSec = Double(sum) / speedWindow
+    }
+
+    // MARK: - 删除记录（Tombstones）持久化
+    func deletedPaths(for syncID: String) -> Set<String> {
+        return deletedRecords[syncID] ?? []
+    }
+
+    func updateDeletedPaths(_ paths: Set<String>, for syncID: String) {
+        if paths.isEmpty {
+            deletedRecords.removeValue(forKey: syncID)
+        } else {
+            deletedRecords[syncID] = paths
+        }
+        persistDeletedRecords()
+    }
+
+    func removeDeletedPaths(for syncID: String) {
+        deletedRecords.removeValue(forKey: syncID)
+        persistDeletedRecords()
+    }
+
+    private func persistDeletedRecords() {
+        do {
+            try StorageManager.shared.saveDeletedRecords(deletedRecords)
+        } catch {
+            print("[SyncManager] ⚠️ 无法保存删除记录: \(error.localizedDescription)")
+        }
     }
 
     func addPendingTransfers(_ count: Int) {

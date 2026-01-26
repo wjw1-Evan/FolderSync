@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ConflictFile: Identifiable, Codable {
+public struct ConflictFile: Identifiable, Codable, Hashable {
     public let id: UUID
     public let syncID: String
     public let relativePath: String

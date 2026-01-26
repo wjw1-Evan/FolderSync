@@ -201,7 +201,7 @@ public class LANDiscovery {
             
             if let error = error {
                 // 某些错误是正常的（如连接关闭），不需要记录
-                if case .posix(let code) = error as? NWError, code == .ECANCELED {
+                if case .posix(let code) = error, code == .ECANCELED {
                     // 正常取消，不需要日志
                 } else {
                     print("[LANDiscovery] ⚠️ 接收错误: \(error)")
@@ -305,7 +305,7 @@ public class LANDiscovery {
         
         // 验证地址有效性
         let validAddresses = listenAddresses.filter { addr in
-            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
+            if let (_, port) = AddressConverter.extractIPPort(from: addr) {
                 return port > 0
             }
             return false
@@ -408,7 +408,7 @@ public class LANDiscovery {
             return nil
         }
         
-        var addresses = (json["addresses"] as? [String]) ?? []
+        let addresses = (json["addresses"] as? [String]) ?? []
         
         // 验证解析结果
         if peerID.isEmpty {
@@ -418,7 +418,7 @@ public class LANDiscovery {
         
         // 过滤掉端口为0或无效的地址
         let validAddresses = addresses.filter { addr in
-            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
+            if let (_, port) = AddressConverter.extractIPPort(from: addr) {
                 if port > 0 {
                     return true
                 } else {

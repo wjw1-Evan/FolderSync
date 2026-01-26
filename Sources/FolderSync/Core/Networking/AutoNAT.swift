@@ -45,7 +45,28 @@ public class AutoNAT {
             
             let connection = NWConnection(to: endpoint, using: parameters)
             
-            var detected = false
+            final class DetectedState {
+                private let lock = NSLock()
+                private var value = false
+                
+                func set() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    let wasSet = value
+                    if !wasSet {
+                        value = true
+                    }
+                    return wasSet
+                }
+                
+                func get() -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    return value
+                }
+            }
+            
+            let detectedState = DetectedState()
             
             connection.stateUpdateHandler = { [weak self] state in
                 guard let self = self else { return }
@@ -56,11 +77,12 @@ public class AutoNAT {
                     self.isReachable = true
                     self.natType = .fullCone
                     connection.cancel()
-                    detected = true
+                    _ = detectedState.set()
                     
-                case .failed(let error):
+                case .failed:
                     // 连接失败，可能是对称 NAT 或其他类型
-                    if !detected {
+                    let wasDetected = detectedState.set()
+                    if !wasDetected {
                         self.natType = .symmetricNAT
                         self.isReachable = false
                     }
@@ -76,7 +98,7 @@ public class AutoNAT {
             // 等待检测完成（最多 5 秒）
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             
-            if detected {
+            if detectedState.get() {
                 break
             }
             

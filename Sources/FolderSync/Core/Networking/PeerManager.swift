@@ -252,7 +252,7 @@ public class PeerManager: ObservableObject {
     public func addOrUpdatePeer(_ peerID: PeerID, addresses: [Multiaddr] = []) -> PeerInfo {
         let peerIDString = peerID.b58String
         var shouldSave = false
-        let isNewPeer = peers[peerIDString] == nil
+        _ = peers[peerIDString] == nil
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
@@ -268,7 +268,7 @@ public class PeerManager: ObservableObject {
             peers[peerIDString] = existing
         } else {
             // 添加新 Peer
-            var newPeer = PeerInfo(peerID: peerID, addresses: addresses)
+            let newPeer = PeerInfo(peerID: peerID, addresses: addresses)
             peers[peerIDString] = newPeer
             // 新 peer 默认状态为离线（除非后续明确设置为在线）
             if deviceStatuses[peerIDString] == nil {

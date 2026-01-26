@@ -78,7 +78,7 @@ public class SyncIDManager: ObservableObject {
     /// 移除 syncID
     /// - Parameter syncID: 要移除的 syncID
     public func unregisterSyncID(_ syncID: String) {
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             if let info = self.syncIDMap[syncID] {
                 self.folderToSyncID.removeValue(forKey: info.folderID)
                 self.syncIDMap.removeValue(forKey: syncID)
@@ -89,7 +89,7 @@ public class SyncIDManager: ObservableObject {
     /// 通过 folderID 移除 syncID
     /// - Parameter folderID: 文件夹 ID
     public func unregisterSyncIDByFolderID(_ folderID: UUID) {
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             if let syncID = self.folderToSyncID[folderID] {
                 self.syncIDMap.removeValue(forKey: syncID)
                 self.folderToSyncID.removeValue(forKey: folderID)
@@ -149,7 +149,7 @@ public class SyncIDManager: ObservableObject {
     ///   - syncID: syncID
     ///   - peerID: peer ID
     public func addPeer(_ peerID: String, to syncID: String) {
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             if let info = self.syncIDMap[syncID] {
                 info.peerIDs.insert(peerID)
             }
@@ -161,7 +161,7 @@ public class SyncIDManager: ObservableObject {
     ///   - syncID: syncID
     ///   - peerID: peer ID
     public func removePeer(_ peerID: String, from syncID: String) {
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             if let info = self.syncIDMap[syncID] {
                 info.peerIDs.remove(peerID)
             }
@@ -200,7 +200,7 @@ public class SyncIDManager: ObservableObject {
     ///   - syncID: syncID
     ///   - date: 同步时间
     public func updateLastSyncedAt(_ syncID: String, date: Date = Date()) {
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             if let info = self.syncIDMap[syncID] {
                 info.lastSyncedAt = date
             }

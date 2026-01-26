@@ -57,7 +57,19 @@ public class CircuitRelay {
         let connection = NWConnection(to: endpoint, using: parameters)
         
         return try await withCheckedThrowingContinuation { continuation in
+            let hasCompletedLock = NSLock()
             var hasCompleted = false
+            
+            func checkAndResume(_ action: () -> Void) -> Bool {
+                hasCompletedLock.lock()
+                defer { hasCompletedLock.unlock() }
+                if !hasCompleted {
+                    hasCompleted = true
+                    action()
+                    return true
+                }
+                return false
+            }
             
             connection.stateUpdateHandler = { state in
                 switch state {
@@ -65,50 +77,40 @@ public class CircuitRelay {
                     // 发送中继请求：包含目标 PeerID 和消息
                     let relayRequest = RelayRequest(targetPeerID: targetPeerID, data: message)
                     if let requestData = try? JSONEncoder().encode(relayRequest) {
-                        connection.send(content: requestData, completion: .contentProcessed { error in
+                            connection.send(content: requestData, completion: .contentProcessed { error in
                             if let error = error {
-                                if !hasCompleted {
-                                    hasCompleted = true
-                                    continuation.resume(throwing: error)
+                                if checkAndResume({ continuation.resume(throwing: error) }) {
+                                    connection.cancel()
                                 }
-                                connection.cancel()
                                 return
                             }
                             
                             // 接收响应
                             connection.receive(minimumIncompleteLength: 1, maximumLength: 10 * 1024 * 1024) { data, _, isComplete, error in
                                 if let error = error {
-                                    if !hasCompleted {
-                                        hasCompleted = true
-                                        continuation.resume(throwing: error)
+                                    if checkAndResume({ continuation.resume(throwing: error) }) {
+                                        connection.cancel()
                                     }
-                                    connection.cancel()
                                     return
                                 }
                                 
                                 if let data = data, !data.isEmpty {
-                                    if !hasCompleted {
-                                        hasCompleted = true
-                                        continuation.resume(returning: data)
+                                    if checkAndResume({ continuation.resume(returning: data) }) {
+                                        connection.cancel()
                                     }
-                                    connection.cancel()
                                 } else if isComplete {
-                                    if !hasCompleted {
-                                        hasCompleted = true
-                                        continuation.resume(throwing: NSError(domain: "CircuitRelay", code: -1, userInfo: [NSLocalizedDescriptionKey: "连接已关闭"]))
+                                    if checkAndResume({ continuation.resume(throwing: NSError(domain: "CircuitRelay", code: -1, userInfo: [NSLocalizedDescriptionKey: "连接已关闭"])) }) {
+                                        connection.cancel()
                                     }
-                                    connection.cancel()
                                 }
                             }
                         })
                     }
                     
                 case .failed(let error):
-                    if !hasCompleted {
-                        hasCompleted = true
-                        continuation.resume(throwing: error)
+                    if checkAndResume({ continuation.resume(throwing: error) }) {
+                        connection.cancel()
                     }
-                    connection.cancel()
                     
                 default:
                     break
@@ -120,10 +122,8 @@ public class CircuitRelay {
             // 设置超时（30秒）
             Task {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
-                if !hasCompleted {
-                    hasCompleted = true
+                if checkAndResume({ continuation.resume(throwing: NSError(domain: "CircuitRelay", code: -1, userInfo: [NSLocalizedDescriptionKey: "中继请求超时"])) }) {
                     connection.cancel()
-                    continuation.resume(throwing: NSError(domain: "CircuitRelay", code: -1, userInfo: [NSLocalizedDescriptionKey: "中继请求超时"]))
                 }
             }
         }

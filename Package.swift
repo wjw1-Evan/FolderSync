@@ -18,7 +18,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto")
             ],
-            path: "Sources/FolderSync"
+            path: "Sources/FolderSync",
+            resources: [
+                .process("Resources")
+            ]
         ),
         .testTarget(
             name: "FolderSyncTests",

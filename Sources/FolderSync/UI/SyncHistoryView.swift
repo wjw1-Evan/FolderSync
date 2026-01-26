@@ -4,32 +4,111 @@ struct SyncHistoryView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var syncManager: SyncManager
     @State private var logs: [SyncLog] = []
+    @State private var filteredLogs: [SyncLog] = []
+    @State private var searchText: String = ""
+    @State private var selectedFolderID: UUID? = nil
+    @State private var showErrorsOnly: Bool = false
     
     var body: some View {
         NavigationStack {
-            List {
-                Section("同步历史") {
-                    if logs.isEmpty {
-                        Text("暂无同步记录")
+            VStack(spacing: 0) {
+                // 搜索和筛选栏
+                VStack(spacing: 8) {
+                    HStack {
+                        Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
-                            .italic()
-                    } else {
-                        ForEach(logs) { log in
-                            SyncLogRow(log: log, folderName: folderName(for: log.folderID))
+                        TextField(LocalizedString.searchSyncHistory, text: $searchText)
+                            .textFieldStyle(.plain)
+                    }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(6)
+                    
+                    HStack {
+                        // 文件夹筛选
+                        Menu {
+                            Button(LocalizedString.allFolders) {
+                                selectedFolderID = nil
+                            }
+                            Divider()
+                            ForEach(syncManager.folders) { folder in
+                                Button(folder.localPath.lastPathComponent) {
+                                    selectedFolderID = folder.id
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "folder")
+                                Text(selectedFolderID == nil ? LocalizedString.allFolders : folderName(for: selectedFolderID!))
+                            }
+                            .font(.caption)
+                        }
+                        
+                        Spacer()
+                        
+                        // 仅显示错误
+                        Toggle(LocalizedString.showErrorsOnly, isOn: $showErrorsOnly)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
+                .padding()
+                .background(Color(NSColor.controlBackgroundColor))
+                
+                Divider()
+                
+                // 日志列表
+                List {
+                    Section {
+                        if filteredLogs.isEmpty {
+                            VStack(spacing: 12) {
+                                Image(systemName: "clock.badge.xmark")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(.secondary.opacity(0.3))
+                                Text(logs.isEmpty ? LocalizedString.noSyncRecords : LocalizedString.noMatchingRecords)
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
+                        } else {
+                            ForEach(filteredLogs) { log in
+                                SyncLogRow(log: log, folderName: folderName(for: log.folderID))
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text(LocalizedString.syncHistory)
+                            Spacer()
+                            if !filteredLogs.isEmpty {
+                                Text("\(filteredLogs.count)\(LocalizedString.records)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
+                .listStyle(.inset)
             }
-            .listStyle(.inset)
-            .navigationTitle("同步历史")
+            .navigationTitle(LocalizedString.syncHistory)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(LocalizedString.close) { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        refresh()
+                    } label: {
+                        Label(LocalizedString.refresh, systemImage: "arrow.clockwise")
+                    }
                 }
             }
             .onAppear { refresh() }
+            .onChange(of: searchText) { _, _ in applyFilters() }
+            .onChange(of: selectedFolderID) { _, _ in applyFilters() }
+            .onChange(of: showErrorsOnly) { _, _ in applyFilters() }
         }
-        .frame(minWidth: 500, minHeight: 360)
+        .frame(minWidth: 600, minHeight: 500)
     }
     
     private func folderName(for folderID: UUID) -> String {
@@ -37,7 +116,35 @@ struct SyncHistoryView: View {
     }
     
     private func refresh() {
-        logs = (try? StorageManager.shared.getSyncLogs(limit: 50)) ?? []
+        logs = (try? StorageManager.shared.getSyncLogs(limit: 100)) ?? []
+        applyFilters()
+    }
+    
+    private func applyFilters() {
+        var result = logs
+        
+        // 文件夹筛选
+        if let folderID = selectedFolderID {
+            result = result.filter { $0.folderID == folderID }
+        }
+        
+        // 错误筛选
+        if showErrorsOnly {
+            result = result.filter { $0.errorMessage != nil }
+        }
+        
+        // 搜索筛选
+        if !searchText.isEmpty {
+            let searchLower = searchText.lowercased()
+            result = result.filter { log in
+                folderName(for: log.folderID).lowercased().contains(searchLower) ||
+                (log.peerID?.lowercased().contains(searchLower) ?? false) ||
+                (log.errorMessage?.lowercased().contains(searchLower) ?? false) ||
+                (log.syncedFiles?.contains { $0.fileName.lowercased().contains(searchLower) } ?? false)
+            }
+        }
+        
+        filteredLogs = result
     }
 }
 
@@ -64,7 +171,7 @@ private struct SyncLogRow: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
-                Text("\(log.filesCount) 个文件")
+                Text("\(log.filesCount)\(LocalizedString.files)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if log.bytesTransferred > 0 {
@@ -79,7 +186,7 @@ private struct SyncLogRow: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            Text(isExpanded ? "收起" : "展开")
+                            Text(isExpanded ? LocalizedString.collapse : LocalizedString.expand)
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -137,7 +244,7 @@ private struct SyncLogRow: View {
             } else if let files = log.syncedFiles, !files.isEmpty {
                 // 未展开时显示前几个文件名
                 HStack(spacing: 4) {
-                    Text("文件: ")
+                    Text(LocalizedString.filesLabel)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     ForEach(Array(files.prefix(3).enumerated()), id: \.offset) { index, file in
@@ -146,13 +253,13 @@ private struct SyncLogRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         if index < min(2, files.count - 1) {
-                            Text("、")
+                            Text("、".localized)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     if files.count > 3 {
-                        Text("等 \(files.count) 个文件")
+                        Text(LocalizedString.moreFiles(files.count))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

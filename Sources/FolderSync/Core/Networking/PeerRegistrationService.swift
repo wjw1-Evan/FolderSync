@@ -54,7 +54,7 @@ public class PeerRegistrationService: ObservableObject {
         // 检查地址
         guard !addresses.isEmpty else {
             print("[PeerRegistrationService] ⚠️ 地址列表为空，无法注册: \(peerIDString.prefix(12))...")
-            queue.async(flags: .barrier) {
+            Task { @MainActor in
                 self.registeringPeerIDs.remove(peerIDString)
             }
             registrationStates[peerIDString] = .failed("地址列表为空")
@@ -68,7 +68,7 @@ public class PeerRegistrationService: ObservableObject {
         registrationStates[peerIDString] = .registered
         
         // 从注册队列中移除
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             self.registeringPeerIDs.remove(peerIDString)
         }
         
@@ -104,7 +104,7 @@ public class PeerRegistrationService: ObservableObject {
             }
             
             // 标记为正在注册
-            queue.async(flags: .barrier) {
+            Task { @MainActor in
                 self.registeringPeerIDs.insert(peerIDString)
             }
             registrationStates[peerIDString] = .registering
@@ -113,7 +113,7 @@ public class PeerRegistrationService: ObservableObject {
             registrationStates[peerIDString] = .registered
             
             // 从注册队列中移除
-            queue.async(flags: .barrier) {
+            Task { @MainActor in
                 self.registeringPeerIDs.remove(peerIDString)
             }
             
@@ -141,7 +141,7 @@ public class PeerRegistrationService: ObservableObject {
             // 如果正在注册，清除状态允许重试
             registrationStates[peerIDString] = .notRegistered
             // 同时从注册队列中移除，允许重新注册
-            queue.async(flags: .barrier) {
+            Task { @MainActor in
                 self.registeringPeerIDs.remove(peerIDString)
             }
         }
@@ -165,7 +165,7 @@ public class PeerRegistrationService: ObservableObject {
     /// 清除注册状态（用于测试或重置）
     public func clearRegistrationState(_ peerIDString: String) {
         registrationStates.removeValue(forKey: peerIDString)
-        queue.async(flags: .barrier) {
+        Task { @MainActor in
             self.registeringPeerIDs.remove(peerIDString)
         }
     }

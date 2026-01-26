@@ -71,7 +71,7 @@ public class PersistentPeerStore {
     /// 将持久化的 peer 信息转换为 PeerInfo（需要 PeerID 对象）
     func convertToPeerInfo(_ persistent: PersistentPeerInfo) -> (peerID: PeerID, addresses: [Multiaddr], isRegistered: Bool)? {
         // 解析 PeerID
-        guard let peerID = try? PeerID(cid: persistent.peerIDString) else {
+        guard let peerID = PeerID(cid: persistent.peerIDString) else {
             print("[PersistentPeerStore] ⚠️ 无法解析 PeerID: \(persistent.peerIDString)")
             return nil
         }

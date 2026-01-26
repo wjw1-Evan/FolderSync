@@ -59,13 +59,24 @@ public class NativeTCPClient {
         let connection = NWConnection(to: endpoint, using: parameters)
         
         return try await withCheckedThrowingContinuation { continuation in
+            let hasCompletedLock = NSLock()
             var hasCompleted = false
+            
+            func checkAndResume(_ action: () -> Void) -> Bool {
+                hasCompletedLock.lock()
+                defer { hasCompletedLock.unlock() }
+                if !hasCompleted {
+                    hasCompleted = true
+                    action()
+                    return true
+                }
+                return false
+            }
             
             // 设置超时
             let timeoutTask = Task {
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if !hasCompleted {
-                    hasCompleted = true
+                if checkAndResume({
                     print("[NativeTCPClient] ⏱️ 连接超时: \(address) (超时时间: \(timeout)秒)")
                     connection.cancel()
                     continuation.resume(throwing: NSError(
@@ -73,10 +84,12 @@ public class NativeTCPClient {
                         code: -1,
                         userInfo: [NSLocalizedDescriptionKey: "请求超时（\(Int(timeout))秒）"]
                     ))
-                }
+                }) {}
             }
             
-            connection.stateUpdateHandler = { state in
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
+                
                 switch state {
                 case .ready:
                     print("[NativeTCPClient] ✅ 连接已就绪: \(address)")
@@ -89,20 +102,20 @@ public class NativeTCPClient {
                     connection.send(content: requestWithLength, completion: .contentProcessed { error in
                         if let error = error {
                             print("[NativeTCPClient] ❌ 发送请求失败: \(error)")
-                            if !hasCompleted {
-                                hasCompleted = true
+                            if checkAndResume({
                                 timeoutTask.cancel()
                                 continuation.resume(throwing: error)
+                            }) {
+                                connection.cancel()
                             }
-                            connection.cancel()
                             return
                         }
                         
                         print("[NativeTCPClient] 📤 请求已发送，等待响应...")
                         // 接收响应
-                        self.receiveResponse(from: connection) { result in
-                            if !hasCompleted {
-                                hasCompleted = true
+                        let weakSelf = self
+                        weakSelf.receiveResponse(from: connection) { result in
+                            if checkAndResume({
                                 timeoutTask.cancel()
                                 switch result {
                                 case .success(let data):
@@ -112,8 +125,9 @@ public class NativeTCPClient {
                                     print("[NativeTCPClient] ❌ 接收响应失败: \(error)")
                                     continuation.resume(throwing: error)
                                 }
+                            }) {
+                                connection.cancel()
                             }
-                            connection.cancel()
                         }
                     })
                     
@@ -129,24 +143,23 @@ public class NativeTCPClient {
                     
                 case .failed(let error):
                     print("[NativeTCPClient] ❌ 连接失败: \(address), 错误: \(error)")
-                    if !hasCompleted {
-                        hasCompleted = true
+                    if checkAndResume({
                         timeoutTask.cancel()
                         continuation.resume(throwing: error)
+                    }) {
+                        connection.cancel()
                     }
-                    connection.cancel()
                     
                 case .cancelled:
                     print("[NativeTCPClient] ⚠️ 连接已取消: \(address)")
-                    if !hasCompleted {
-                        hasCompleted = true
+                    if checkAndResume({
                         timeoutTask.cancel()
                         continuation.resume(throwing: NSError(
                             domain: "NativeTCPClient",
                             code: -1,
                             userInfo: [NSLocalizedDescriptionKey: "连接已取消"]
                         ))
-                    }
+                    }) {}
                     
                 default:
                     print("[NativeTCPClient] ℹ️ 连接状态: \(state), 地址: \(address)")

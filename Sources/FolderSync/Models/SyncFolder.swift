@@ -13,7 +13,7 @@ public enum SyncStatus: String, Codable {
     case paused
 }
 
-public struct SyncFolder: Identifiable, Codable {
+public struct SyncFolder: Identifiable, Codable, Equatable {
     public let id: UUID
     public let syncID: String // Global unique identifier for the sync group
     public var localPath: URL
@@ -86,5 +86,10 @@ public struct SyncFolder: Identifiable, Codable {
         try container.encodeIfPresent(fileCount, forKey: .fileCount)
         try container.encodeIfPresent(folderCount, forKey: .folderCount)
         try container.encode(excludePatterns, forKey: .excludePatterns)
+    }
+    
+    // Equatable 实现：基于 id 进行比较
+    public static func == (lhs: SyncFolder, rhs: SyncFolder) -> Bool {
+        return lhs.id == rhs.id
     }
 }

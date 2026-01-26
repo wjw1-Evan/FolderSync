@@ -135,7 +135,7 @@ public class P2PNode {
         // 减少日志输出
         
         // 解析 PeerID
-        guard let peerIDObj = try? PeerID(cid: peerID) else {
+        guard let peerIDObj = PeerID(cid: peerID) else {
             print("[P2PNode] ❌ 无法解析 PeerID: \(peerID.prefix(12))...")
             return
         }
@@ -157,7 +157,7 @@ public class P2PNode {
         }
         
         // 添加到 PeerManager
-        let peerInfo = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
+        _ = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
         
         // 更新最后可见时间（收到广播表示设备在线）
         // 注意：每次收到广播都应该更新 lastSeenTime，即使地址没有变化
@@ -278,7 +278,7 @@ public class P2PNode {
         try? await Task.sleep(nanoseconds: 500_000_000)
         
         // 从持久化存储预注册 peer
-        await MainActor.run {
+        _ = await MainActor.run {
             Task {
                 await self.preRegisterPersistedPeers()
             }

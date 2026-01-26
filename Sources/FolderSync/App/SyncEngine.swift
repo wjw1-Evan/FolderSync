@@ -122,8 +122,8 @@ class SyncEngine {
             return
         }
         
-        // fileTransfer 在异步任务中使用，不需要在 guard 中检查
-        guard let fileTransfer = fileTransfer else {
+        // fileTransfer 在异步任务中使用，只需要检查是否存在
+        guard fileTransfer != nil else {
             return
         }
         
@@ -252,6 +252,7 @@ class SyncEngine {
             
             let currentPaths = Set(localMetadata.keys)
             let lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
+            let lastKnownMeta = syncManager.lastKnownMetadata[syncID] ?? [:]
             
             // 检测文件重命名：通过比较哈希值匹配删除的文件和新文件
             var renamedFiles: [String: String] = [:] // oldPath -> newPath

@@ -40,7 +40,7 @@ class FolderStatistics {
             }
             
             guard let currentFolder = currentFolder else {
-                await MainActor.run {
+                _ = await MainActor.run { [weak self] in
                     self?.statisticsInProgress.remove(folderID)
                 }
                 return

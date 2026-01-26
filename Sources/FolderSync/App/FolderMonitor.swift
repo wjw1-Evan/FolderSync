@@ -47,7 +47,7 @@ class FolderMonitor {
             // 同步仍然使用防抖机制（避免频繁同步）
             // 检查文件是否正在被写入（文件大小是否稳定）
             Task { [weak self] in
-                guard let self = self, let syncManager = self.syncManager else { return }
+                guard let self = self, self.syncManager != nil else { return }
                 
                 // 检查文件是否存在且是文件（不是目录）
                 let fileManager = FileManager.default
@@ -153,7 +153,7 @@ class FolderMonitor {
     
     /// 防抖触发同步
     private func triggerSyncAfterDebounce(for folder: SyncFolder, syncID: String) {
-        guard let syncManager = syncManager else { return }
+        guard syncManager != nil else { return }
         
         // 取消之前的防抖任务
         debounceTasks[syncID]?.cancel()

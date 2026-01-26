@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import FolderSync
 
 @MainActor
@@ -15,8 +16,11 @@ final class SyncIDManagerTests: XCTestCase {
         let syncID = "SYNC1234"
 
         XCTAssertTrue(manager.registerSyncID(syncID, folderID: folderID))
-        XCTAssertFalse(manager.registerSyncID(syncID, folderID: UUID()), "duplicate syncID should be rejected")
-        XCTAssertFalse(manager.registerSyncID("ANOTHER", folderID: folderID), "folderID already bound should be rejected")
+        XCTAssertFalse(
+            manager.registerSyncID(syncID, folderID: UUID()), "duplicate syncID should be rejected")
+        XCTAssertFalse(
+            manager.registerSyncID("ANOTHER", folderID: folderID),
+            "folderID already bound should be rejected")
 
         XCTAssertEqual(manager.totalSyncIDCount, 1)
         XCTAssertEqual(manager.getSyncID(for: folderID), syncID)
@@ -57,7 +61,9 @@ final class SyncIDManagerTests: XCTestCase {
         waitForMainActorTasks()
         let lastSynced = manager.getSyncIDInfo(syncID)?.lastSyncedAt
         XCTAssertNotNil(lastSynced)
-        XCTAssertEqual(lastSynced?.timeIntervalSince1970 ?? 0, customDate.timeIntervalSince1970, accuracy: 0.01)
+        XCTAssertEqual(
+            lastSynced?.timeIntervalSince1970 ?? 0, customDate.timeIntervalSince1970, accuracy: 0.01
+        )
 
         manager.unregisterSyncIDByFolderID(folderID)
         waitForMainActorTasks()

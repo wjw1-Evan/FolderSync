@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import FolderSync
 
 final class AddressConverterTests: XCTestCase {
@@ -21,9 +22,9 @@ final class AddressConverterTests: XCTestCase {
 
     func testExtractFirstAddressPicksFirstValid() {
         let addresses = [
-            "/ip4/0.0.0.0/tcp/0", // invalid
-            "/ip4/172.16.0.5/tcp/7000", // valid and should be picked
-            "/ip4/192.168.1.10/tcp/0" // invalid
+            "/ip4/0.0.0.0/tcp/0",  // invalid
+            "/ip4/172.16.0.5/tcp/7000",  // valid and should be picked
+            "/ip4/192.168.1.10/tcp/0",  // invalid
         ]
 
         XCTAssertEqual(AddressConverter.extractFirstAddress(from: addresses), "172.16.0.5:7000")

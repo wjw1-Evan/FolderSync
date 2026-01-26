@@ -1,5 +1,5 @@
-import SwiftUI
 import Combine
+import SwiftUI
 
 struct SyncHistoryView: View {
     @Environment(\.dismiss) var dismiss
@@ -9,7 +9,7 @@ struct SyncHistoryView: View {
     @State private var searchText: String = ""
     @State private var selectedFolderID: UUID? = nil
     @State private var showErrorsOnly: Bool = false
-    
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -24,7 +24,7 @@ struct SyncHistoryView: View {
                     .padding(8)
                     .background(Color.secondary.opacity(0.1))
                     .cornerRadius(6)
-                    
+
                     HStack {
                         // 文件夹筛选
                         Menu {
@@ -40,13 +40,16 @@ struct SyncHistoryView: View {
                         } label: {
                             HStack {
                                 Image(systemName: "folder")
-                                Text(selectedFolderID == nil ? LocalizedString.allFolders : folderName(for: selectedFolderID!))
+                                Text(
+                                    selectedFolderID == nil
+                                        ? LocalizedString.allFolders
+                                        : folderName(for: selectedFolderID!))
                             }
                             .font(.caption)
                         }
-                        
+
                         Spacer()
-                        
+
                         // 仅显示错误
                         Toggle(LocalizedString.showErrorsOnly, isOn: $showErrorsOnly)
                             .toggleStyle(.switch)
@@ -55,9 +58,9 @@ struct SyncHistoryView: View {
                 }
                 .padding()
                 .background(Color(NSColor.controlBackgroundColor))
-                
+
                 Divider()
-                
+
                 // 日志列表
                 List {
                     Section {
@@ -66,9 +69,13 @@ struct SyncHistoryView: View {
                                 Image(systemName: "clock.badge.xmark")
                                     .font(.system(size: 48))
                                     .foregroundStyle(.secondary.opacity(0.3))
-                                Text(logs.isEmpty ? LocalizedString.noSyncRecords : LocalizedString.noMatchingRecords)
-                                    .font(.headline)
-                                    .foregroundStyle(.secondary)
+                                Text(
+                                    logs.isEmpty
+                                        ? LocalizedString.noSyncRecords
+                                        : LocalizedString.noMatchingRecords
+                                )
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 40)
@@ -122,41 +129,42 @@ struct SyncHistoryView: View {
         }
         .frame(minWidth: 600, minHeight: 500)
     }
-    
+
     private func folderName(for folderID: UUID) -> String {
         syncManager.folders.first { $0.id == folderID }?.localPath.lastPathComponent ?? "—"
     }
-    
+
     private func refresh() {
         // 强制重新加载，确保获取最新的同步记录
         logs = (try? StorageManager.shared.getSyncLogs(limit: 100, forceReload: true)) ?? []
         applyFilters()
     }
-    
+
     private func applyFilters() {
         var result = logs
-        
+
         // 文件夹筛选
         if let folderID = selectedFolderID {
             result = result.filter { $0.folderID == folderID }
         }
-        
+
         // 错误筛选
         if showErrorsOnly {
             result = result.filter { $0.errorMessage != nil }
         }
-        
+
         // 搜索筛选
         if !searchText.isEmpty {
             let searchLower = searchText.lowercased()
             result = result.filter { log in
-                folderName(for: log.folderID).lowercased().contains(searchLower) ||
-                (log.peerID?.lowercased().contains(searchLower) ?? false) ||
-                (log.errorMessage?.lowercased().contains(searchLower) ?? false) ||
-                (log.syncedFiles?.contains { $0.fileName.lowercased().contains(searchLower) } ?? false)
+                folderName(for: log.folderID).lowercased().contains(searchLower)
+                    || (log.peerID?.lowercased().contains(searchLower) ?? false)
+                    || (log.errorMessage?.lowercased().contains(searchLower) ?? false)
+                    || (log.syncedFiles?.contains { $0.fileName.lowercased().contains(searchLower) }
+                        ?? false)
             }
         }
-        
+
         filteredLogs = result
     }
 }
@@ -164,13 +172,16 @@ struct SyncHistoryView: View {
 private struct SyncLogRow: View {
     let log: SyncLog
     let folderName: String
-    @State private var isExpanded = true // 默认展开显示文件列表
-    
+    @State private var isExpanded = true  // 默认展开显示文件列表
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Image(systemName: log.errorMessage != nil ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                    .foregroundStyle(log.errorMessage != nil ? .red : .green)
+                Image(
+                    systemName: log.errorMessage != nil
+                        ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
+                )
+                .foregroundStyle(log.errorMessage != nil ? .red : .green)
                 Text(folderName)
                     .font(.subheadline)
                 if let pid = log.peerID {
@@ -212,7 +223,7 @@ private struct SyncLogRow: View {
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
-            
+
             // 展开显示文件列表（默认展开）
             if isExpanded, let files = log.syncedFiles, !files.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -283,13 +294,13 @@ private struct SyncLogRow: View {
         }
         .padding(.vertical, 4)
     }
-    
+
     private func byteCount(_ n: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: n)
     }
-    
+
     private func iconForOperation(_ op: SyncLog.SyncedFileInfo.FileOperation) -> String {
         switch op {
         case .upload: return "arrow.up.circle.fill"
@@ -298,7 +309,7 @@ private struct SyncLogRow: View {
         case .conflict: return "exclamationmark.triangle.fill"
         }
     }
-    
+
     private func colorForOperation(_ op: SyncLog.SyncedFileInfo.FileOperation) -> Color {
         switch op {
         case .upload: return .blue

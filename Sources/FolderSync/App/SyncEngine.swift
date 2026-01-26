@@ -251,8 +251,12 @@ class SyncEngine {
             let (localMST, localMetadata, _, _) = await folderStatistics.calculateFullState(for: currentFolder)
             
             let currentPaths = Set(localMetadata.keys)
-            let lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
+            var lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
             let lastKnownMeta = syncManager.lastKnownMetadata[syncID] ?? [:]
+            
+            // 如果是第一次同步（lastKnown 为空），初始化 lastKnown 为当前路径，不检测删除
+            // 这样可以避免第一次同步时误判删除
+            let isFirstSync = lastKnown.isEmpty
             
             // 检测文件重命名：通过比较哈希值匹配删除的文件和新文件
             var renamedFiles: [String: String] = [:] // oldPath -> newPath
@@ -260,44 +264,52 @@ class SyncEngine {
             let fileManager = FileManager.default
             
             // 第一步：找出所有"消失"的文件（可能在 lastKnown 中但不在 currentPaths 中）
+            // 注意：第一次同步时跳过删除检测
             var disappearedFiles: [String: FileMetadata] = [:] // path -> metadata (from last sync)
-            for path in lastKnown {
-                if !currentPaths.contains(path) {
-                    let fileURL = currentFolder.localPath.appendingPathComponent(path)
-                    if !fileManager.fileExists(atPath: fileURL.path) {
-                        // 文件确实不存在，可能是删除或重命名
-                        // 从上次同步的元数据中获取哈希值
-                        if let oldMeta = lastKnownMeta[path] {
-                            disappearedFiles[path] = oldMeta
-                        } else {
-                            // 无法获取旧元数据，先标记为删除
-                            locallyDeleted.insert(path)
+            if !isFirstSync {
+                for path in lastKnown {
+                    if !currentPaths.contains(path) {
+                        let fileURL = currentFolder.localPath.appendingPathComponent(path)
+                        if !fileManager.fileExists(atPath: fileURL.path) {
+                            // 文件确实不存在，可能是删除或重命名
+                            // 从上次同步的元数据中获取哈希值
+                            if let oldMeta = lastKnownMeta[path] {
+                                disappearedFiles[path] = oldMeta
+                            } else {
+                                // 无法获取旧元数据，先标记为删除
+                                locallyDeleted.insert(path)
+                            }
                         }
                     }
                 }
             }
             
             // 第二步：找出所有新文件（在 currentPaths 中但不在 lastKnown 中）
+            // 注意：第一次同步时，所有文件都是"新文件"，这是正常的
             var newFiles: [String: FileMetadata] = [:]
-            for path in currentPaths {
-                if !lastKnown.contains(path) {
-                    if let meta = localMetadata[path] {
-                        newFiles[path] = meta
+            if !isFirstSync {
+                for path in currentPaths {
+                    if !lastKnown.contains(path) {
+                        if let meta = localMetadata[path] {
+                            newFiles[path] = meta
+                        }
                     }
                 }
             }
             
-            // 第三步：通过哈希值匹配重命名
-            for (oldPath, oldMeta) in disappearedFiles {
-                // 查找具有相同哈希值的新文件
-                if let (newPath, _) = newFiles.first(where: { $0.value.hash == oldMeta.hash }) {
-                    // 找到匹配！这是重命名操作
-                    renamedFiles[oldPath] = newPath
-                    newFiles.removeValue(forKey: newPath) // 从新文件列表中移除，因为它是重命名
-                    print("[SyncEngine] 🔄 检测到文件重命名: \(oldPath) -> \(newPath)")
-                } else {
-                    // 没有找到匹配，这是真正的删除
-                    locallyDeleted.insert(oldPath)
+            // 第三步：通过哈希值匹配重命名（第一次同步时跳过）
+            if !isFirstSync {
+                for (oldPath, oldMeta) in disappearedFiles {
+                    // 查找具有相同哈希值的新文件
+                    if let (newPath, _) = newFiles.first(where: { $0.value.hash == oldMeta.hash }) {
+                        // 找到匹配！这是重命名操作
+                        renamedFiles[oldPath] = newPath
+                        newFiles.removeValue(forKey: newPath) // 从新文件列表中移除，因为它是重命名
+                        print("[SyncEngine] 🔄 检测到文件重命名: \(oldPath) -> \(newPath)")
+                    } else {
+                        // 没有找到匹配，这是真正的删除
+                        locallyDeleted.insert(oldPath)
+                    }
                 }
             }
             
@@ -424,8 +436,13 @@ class SyncEngine {
             deletedSet.formUnion(locallyDeleted) // 确保包含本次检测到的本地删除
             
             // 清理已确认删除的文件（远程也没有了）
+            // 注意：如果文件在远程不存在，说明删除已经完成，从 deletedSet 中移除
             let confirmed = deletedSet.filter { !remoteEntries.keys.contains($0) }
-            for p in confirmed { deletedSet.remove(p) }
+            for p in confirmed { 
+                deletedSet.remove(p)
+                // 同时从 locallyDeleted 中移除（如果存在），因为远程已经确认删除
+                locallyDeleted.remove(p)
+            }
             if deletedSet.isEmpty {
                 syncManager.deletedPaths.removeValue(forKey: syncID)
             } else {
@@ -441,8 +458,20 @@ class SyncEngine {
             if mode == .twoWay || mode == .downloadOnly {
                 for (path, remoteMeta) in remoteEntries {
                     // 重要：如果文件在本地被删除（locallyDeleted）或已标记删除（deletedSet），不应该下载
+                    // 同时检查文件是否在本地存在（如果不存在且不在 lastKnown 中，可能是第一次同步，应该下载）
                     if locallyDeleted.contains(path) || deletedSet.contains(path) {
                         continue
+                    }
+                    // 额外检查：如果文件在本地不存在，且不在 lastKnown 中（第一次同步），应该下载
+                    // 但如果文件在本地不存在，且在 lastKnown 中（已删除），不应该下载
+                    let fileURL = currentFolder.localPath.appendingPathComponent(path)
+                    if !fileManager.fileExists(atPath: fileURL.path) {
+                        // 文件不存在，检查是否在 lastKnown 中
+                        if lastKnown.contains(path) {
+                            // 文件在 lastKnown 中但不存在，说明被删除了，不应该下载
+                            continue
+                        }
+                        // 文件不在 lastKnown 中，可能是第一次同步，应该下载
                     }
                     if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
                         continue
@@ -536,6 +565,8 @@ class SyncEngine {
                     // 删除成功后，从 deletedSet 中移除这些文件，避免后续逻辑重复处理
                     for rel in toDelete {
                         deletedSet.remove(rel)
+                        // 同时从 locallyDeleted 中移除，因为删除已经完成
+                        locallyDeleted.remove(rel)
                         
                         let fileURL = currentFolder.localPath.appendingPathComponent(rel)
                         let fileName = (rel as NSString).lastPathComponent
@@ -571,6 +602,9 @@ class SyncEngine {
                     } else {
                         syncManager.deletedPaths[syncID] = deletedSet
                     }
+                } else {
+                    // 删除失败，记录错误但不阻止后续操作
+                    print("[SyncEngine] ⚠️ 删除操作失败，响应: \(delRes)")
                 }
             }
             
@@ -589,13 +623,19 @@ class SyncEngine {
             }
             
             // 5. Download changed files - 并行下载（删除操作已执行，不会下载已删除的文件）
+            // 重要：在下载之前，再次检查 deletedSet 和 locallyDeleted，确保已删除的文件不会被下载
             var totalDownloadBytes: Int64 = 0
             var totalUploadBytes: Int64 = 0
+            
+            // 过滤掉已删除的文件（删除操作执行后，这些文件应该已经从 deletedSet 中移除，但为了安全再次检查）
+            let filesToDownload = changedFiles.filter { path, _ in
+                !locallyDeleted.contains(path) && !deletedSet.contains(path)
+            }
             
             await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
                 var activeDownloads = 0
                 
-                for (path, remoteMeta) in changedFiles {
+                for (path, remoteMeta) in filesToDownload {
                     if activeDownloads >= maxConcurrentTransfers {
                         if let result = await group.next(), let (bytes, fileInfo) = result {
                             totalDownloadBytes += bytes

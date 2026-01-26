@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct SyncHistoryView: View {
     @Environment(\.dismiss) var dismiss
@@ -104,6 +105,9 @@ struct SyncHistoryView: View {
                 }
             }
             .onAppear { refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: .syncLogAdded)) { _ in
+                refresh()
+            }
             .onChange(of: searchText) { _, _ in applyFilters() }
             .onChange(of: selectedFolderID) { _, _ in applyFilters() }
             .onChange(of: showErrorsOnly) { _, _ in applyFilters() }
@@ -116,7 +120,8 @@ struct SyncHistoryView: View {
     }
     
     private func refresh() {
-        logs = (try? StorageManager.shared.getSyncLogs(limit: 100)) ?? []
+        // 强制重新加载，确保获取最新的同步记录
+        logs = (try? StorageManager.shared.getSyncLogs(limit: 100, forceReload: true)) ?? []
         applyFilters()
     }
     

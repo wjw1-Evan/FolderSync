@@ -25,6 +25,12 @@ class SyncEngine {
         let syncKey = "\(folder.syncID):\(peerID)"
         
         Task { @MainActor in
+            // 检查设备是否在线，离线设备不进行同步
+            if !syncManager.peerManager.isOnline(peerID) {
+                print("[SyncEngine] ⏭️ [syncWithPeer] 设备已离线，跳过同步: \(peerID.prefix(12))...")
+                return
+            }
+            
             // 检查是否正在同步
             if syncManager.syncInProgress.contains(syncKey) {
                 return
@@ -128,6 +134,7 @@ class SyncEngine {
         
         guard let currentFolder = currentFolder else {
             print("[SyncEngine] ⚠️ [performSync] 文件夹已不存在: \(folderID)")
+            // 文件夹不存在，无法记录日志
             return
         }
         
@@ -135,6 +142,9 @@ class SyncEngine {
             guard !peerID.isEmpty else {
                 print("[SyncEngine] ❌ [performSync] PeerID 无效")
                 syncManager.updateFolderStatus(currentFolder.id, status: .error, message: "PeerID 无效")
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "PeerID 无效")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -145,6 +155,9 @@ class SyncEngine {
             if peerAddresses.isEmpty {
                 print("[SyncEngine] ⚠️ [performSync] 警告: 对等点没有可用地址")
                 syncManager.updateFolderStatus(currentFolder.id, status: .error, message: "对等点无可用地址", progress: 0.0)
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "对等点无可用地址")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -187,12 +200,18 @@ class SyncEngine {
                 let errorString = String(describing: error)
                 print("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
                 syncManager.updateFolderStatus(currentFolder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "对等点连接失败: \(error.localizedDescription)")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
             if case .error = rootRes {
                 // Remote doesn't have this folder
                 syncManager.removeFolderPeer(syncID, peerID: peerID)
+                // 记录信息日志（远程没有此文件夹）
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "远程对等点没有此同步文件夹")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -204,6 +223,9 @@ class SyncEngine {
             
             guard case .mstRoot(_, let remoteHash) = rootRes else {
                 print("[SyncEngine] ❌ [performSync] rootRes 不是 mstRoot 类型")
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "获取远程 MST 根失败：响应类型错误")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -241,6 +263,10 @@ class SyncEngine {
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
                 syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
                 syncManager.updateDeviceCounts()
+                // 记录成功日志（即使没有文件操作）
+                let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: direction, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), syncedFiles: nil)
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -260,11 +286,17 @@ class SyncEngine {
             } catch {
                 print("[SyncEngine] ❌ [performSync] 获取远程文件列表失败: \(error)")
                 syncManager.updateFolderStatus(currentFolder.id, status: .error, message: "获取远程文件列表失败: \(error.localizedDescription)")
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "获取远程文件列表失败: \(error.localizedDescription)")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
             guard case .files(_, let remoteEntries) = filesRes else {
                 print("[SyncEngine] ❌ [performSync] filesRes 不是 files 类型")
+                // 记录错误日志
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), errorMessage: "获取远程文件列表失败：响应类型错误")
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
@@ -323,7 +355,11 @@ class SyncEngine {
                 return local.mtime > rem.mtime
             }
             
+            // 合并已删除的文件集合：包括之前记录的删除和本次检测到的本地删除
             var deletedSet = syncManager.deletedPaths[syncID] ?? []
+            deletedSet.formUnion(locallyDeleted) // 确保包含本次检测到的本地删除
+            
+            // 清理已确认删除的文件（远程也没有了）
             let confirmed = deletedSet.filter { !remoteEntries.keys.contains($0) }
             for p in confirmed { deletedSet.remove(p) }
             if deletedSet.isEmpty {
@@ -340,7 +376,8 @@ class SyncEngine {
             
             if mode == .twoWay || mode == .downloadOnly {
                 for (path, remoteMeta) in remoteEntries {
-                    if deletedSet.contains(path) {
+                    // 重要：如果文件在本地被删除（locallyDeleted）或已标记删除（deletedSet），不应该下载
+                    if locallyDeleted.contains(path) || deletedSet.contains(path) {
                         continue
                     }
                     if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
@@ -359,9 +396,10 @@ class SyncEngine {
             }
             totalOps += changedFiles.count + conflictFiles.count
             
-            // 4. Upload phase
+            // 4. Upload phase - 检测上传冲突
             var filesToUploadSet: Set<String> = []
             var filesToUpload: [(String, FileMetadata)] = []
+            var uploadConflictFiles: [(String, FileMetadata)] = [] // 上传时的冲突文件（需要先保存远程版本）
             
             if mode == .twoWay || mode == .uploadOnly {
                 for (path, localMeta) in localMetadata {
@@ -371,13 +409,29 @@ class SyncEngine {
                     if filesToUploadSet.contains(path) {
                         continue
                     }
+                    
+                    // 检查是否有并发冲突
+                    if let remoteMeta = remoteEntries[path],
+                       let lvc = localMeta.vectorClock,
+                       let rvc = remoteMeta.vectorClock,
+                       !lvc.versions.isEmpty || !rvc.versions.isEmpty {
+                        let cmp = lvc.compare(to: rvc)
+                        if case .concurrent = cmp {
+                            // 并发冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                            uploadConflictFiles.append((path, remoteMeta))
+                            filesToUploadSet.insert(path)
+                            filesToUpload.append((path, localMeta))
+                            continue
+                        }
+                    }
+                    
                     if shouldUpload(local: localMeta, remote: remoteEntries[path]) {
                         filesToUploadSet.insert(path)
                         filesToUpload.append((path, localMeta))
                     }
                 }
             }
-            totalOps += filesToUpload.count
+            totalOps += filesToUpload.count + uploadConflictFiles.count
             
             let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
             if !toDelete.isEmpty {
@@ -388,7 +442,7 @@ class SyncEngine {
                 syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "准备同步 \(totalOps) 个操作...", progress: 0.2)
             }
             
-            // 删除文件
+            // 重要：先执行删除操作，确保远程删除后再进行下载，避免下载已删除的文件
             if !toDelete.isEmpty {
                 syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "正在删除 \(toDelete.count) 个文件...", progress: Double(completedOps) / Double(max(totalOps, 1)))
                 
@@ -402,7 +456,10 @@ class SyncEngine {
                 )
                 
                 if case .deleteAck = delRes {
+                    // 删除成功后，从 deletedSet 中移除这些文件，避免后续逻辑重复处理
                     for rel in toDelete {
+                        deletedSet.remove(rel)
+                        
                         let fileURL = currentFolder.localPath.appendingPathComponent(rel)
                         let fileName = (rel as NSString).lastPathComponent
                         let pathDir = (rel as NSString).deletingLastPathComponent
@@ -430,6 +487,13 @@ class SyncEngine {
                         ))
                     }
                     completedOps += toDelete.count
+                    
+                    // 更新 deletedPaths，移除已成功删除的文件
+                    if deletedSet.isEmpty {
+                        syncManager.deletedPaths.removeValue(forKey: syncID)
+                    } else {
+                        syncManager.deletedPaths[syncID] = deletedSet
+                    }
                 }
             }
             
@@ -439,10 +503,14 @@ class SyncEngine {
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
                 syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
                 syncManager.updateDeviceCounts()
+                // 记录成功日志（即使没有文件操作）
+                let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
+                let log = SyncLog(syncID: syncID, folderID: folderID, peerID: peerID, direction: direction, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: Date(), syncedFiles: nil)
+                try? StorageManager.shared.addSyncLog(log)
                 return
             }
             
-            // 5. Download changed files - 并行下载
+            // 5. Download changed files - 并行下载（删除操作已执行，不会下载已删除的文件）
             var totalDownloadBytes: Int64 = 0
             var totalUploadBytes: Int64 = 0
             
@@ -590,6 +658,89 @@ class SyncEngine {
                             ))
                         } catch {
                             print("[SyncEngine] ❌ 下载冲突文件失败: \(path) - \(error.localizedDescription)")
+                            return nil
+                        }
+                    }
+                }
+                
+                for await result in group {
+                    if let (bytes, fileInfo) = result {
+                        totalDownloadBytes += bytes
+                        syncedFiles.append(fileInfo)
+                        completedOps += 1
+                        
+                        syncManager.addDownloadBytes(bytes)
+                        syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "冲突处理完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                    }
+                }
+            }
+            
+            // 5c. 处理上传冲突：先下载远程版本保存为冲突文件
+            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
+                for (path, remoteMeta) in uploadConflictFiles {
+                    let fileName = (path as NSString).lastPathComponent
+                    
+                    group.addTask { [weak self] in
+                        guard let self = self else { return nil }
+                        
+                        let syncManager = await MainActor.run { self.syncManager }
+                        guard let syncManager = syncManager else { return nil }
+                        
+                        // 获取最新的 folder 对象
+                        let latestFolder = await MainActor.run {
+                            return syncManager.folders.first(where: { $0.id == folderID })
+                        }
+                        guard let latestFolder = latestFolder else { return nil }
+                        
+                        do {
+                            // 下载远程版本保存为冲突文件
+                            let dataRes: SyncResponse = try await syncManager.sendSyncRequest(
+                                .getFileData(syncID: syncID, path: path),
+                                to: peer,
+                                peerID: peerID,
+                                timeout: 180.0,
+                                maxRetries: 3,
+                                folder: latestFolder
+                            )
+                            
+                            guard case .fileData(_, _, let data) = dataRes else {
+                                return nil
+                            }
+                            
+                            let pathDir = (path as NSString).deletingLastPathComponent
+                            let parent = pathDir.isEmpty ? latestFolder.localPath : latestFolder.localPath.appendingPathComponent(pathDir)
+                            let base = (fileName as NSString).deletingPathExtension
+                            let ext = (fileName as NSString).pathExtension
+                            let suffix = ext.isEmpty ? "" : ".\(ext)"
+                            let conflictName = "\(base).conflict.\(String(peerID.prefix(8))).\(Int(remoteMeta.mtime.timeIntervalSince1970))\(suffix)"
+                            let conflictURL = parent.appendingPathComponent(conflictName)
+                            let fileManager = FileManager.default
+                            
+                            if !fileManager.fileExists(atPath: parent.path) {
+                                try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                            }
+                            
+                            guard fileManager.isWritableFile(atPath: parent.path) else {
+                                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parent.path)"])
+                            }
+                            
+                            try data.write(to: conflictURL)
+                            
+                            let relConflict = pathDir.isEmpty ? conflictName : "\(pathDir)/\(conflictName)"
+                            let cf = ConflictFile(syncID: syncID, relativePath: path, conflictPath: relConflict, remotePeerID: peerID)
+                            try? StorageManager.shared.addConflict(cf)
+                            
+                            let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
+                            
+                            return (Int64(data.count), SyncLog.SyncedFileInfo(
+                                path: path,
+                                fileName: fileName,
+                                folderName: folderName,
+                                size: Int64(data.count),
+                                operation: .conflict
+                            ))
+                        } catch {
+                            print("[SyncEngine] ⚠️ 保存上传冲突文件失败: \(path) - \(error.localizedDescription)")
                             return nil
                         }
                     }

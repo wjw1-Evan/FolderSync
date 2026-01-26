@@ -293,8 +293,14 @@ public class SyncManager: ObservableObject {
                 // 最近收到过广播，认为在线
                 isOnline = true
             } else {
-                // 没有最近收到广播，发送请求检查
-                isOnline = await checkPeerOnline(peer: currentPeer.peerID)
+                // 没有最近收到广播，如果设备已经标记为离线，不再尝试连接检查
+                if !wasOnline {
+                    // 设备已经离线，不再尝试连接，直接返回离线状态
+                    isOnline = false
+                } else {
+                    // 设备之前在线但现在没有收到广播，发送请求检查
+                    isOnline = await checkPeerOnline(peer: currentPeer.peerID)
+                }
             }
             
             // 关键：广播是设备在线的直接证据，优先于检查结果
@@ -1066,9 +1072,10 @@ public class SyncManager: ObservableObject {
             // 需要在 MainActor 上访问 peerManager 和 registrationService
             let registeredPeers = await MainActor.run {
                 let allPeers = self.peerManager.allPeers
-                // 过滤出已注册的对等点
+                // 过滤出已注册且在线的对等点（离线设备不进行同步）
                 return allPeers.filter { peerInfo in
-                    self.p2pNode.registrationService.isRegistered(peerInfo.peerIDString)
+                    self.p2pNode.registrationService.isRegistered(peerInfo.peerIDString) &&
+                    self.peerManager.isOnline(peerInfo.peerIDString)
                 }
             }
             
@@ -1077,7 +1084,7 @@ public class SyncManager: ObservableObject {
                     self.updateFolderStatus(folder.id, status: .synced, message: "等待发现对等点...", progress: 0.0)
                 }
             } else {
-                // 多点同步：同时向所有已注册的对等点同步
+                // 多点同步：同时向所有已注册且在线的对等点同步
                 for peerInfo in registeredPeers {
                     syncWithPeer(peer: peerInfo.peerID, folder: folder)
                 }
@@ -1130,9 +1137,16 @@ public class SyncManager: ObservableObject {
             return false
         }
         
+        // 只检查最近收到过广播的对等点（30秒内），避免频繁连接
         for peerInfo in allPeers {
+            // 检查是否最近收到过广播
+            let recentlySeen = Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
+            guard recentlySeen else {
+                continue
+            }
+            
             do {
-                let response: SyncResponse = try await sendSyncRequest(.getMST(syncID: syncID), to: peerInfo.peerID, peerID: peerInfo.peerIDString, timeout: 30.0, maxRetries: 2, folder: nil)
+                let response: SyncResponse = try await sendSyncRequest(.getMST(syncID: syncID), to: peerInfo.peerID, peerID: peerInfo.peerIDString, timeout: 3.0, maxRetries: 1, folder: nil)
                 if case .mstRoot = response {
                     return true
                 }

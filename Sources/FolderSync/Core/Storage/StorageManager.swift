@@ -1,5 +1,9 @@
 import Foundation
 
+extension Notification.Name {
+    static let syncLogAdded = Notification.Name("syncLogAdded")
+}
+
 public class StorageManager {
     public static let shared = try! StorageManager()
     
@@ -297,10 +301,14 @@ public class StorageManager {
         }
         
         try saveSyncLogs(logs)
+        
+        // 发送通知，通知视图刷新
+        NotificationCenter.default.post(name: .syncLogAdded, object: nil)
     }
     
-    public func getSyncLogs(syncID: String? = nil, limit: Int = 100) throws -> [SyncLog] {
-        var logs = try loadSyncLogs()
+    public func getSyncLogs(syncID: String? = nil, limit: Int = 100, forceReload: Bool = false) throws -> [SyncLog] {
+        // 根据参数决定是否强制重新加载
+        var logs = try loadSyncLogs(forceReload: forceReload)
         
         if let sid = syncID {
             logs = logs.filter { $0.syncID == sid }
@@ -313,9 +321,9 @@ public class StorageManager {
         return Array(logs.prefix(limit))
     }
     
-    private func loadSyncLogs() throws -> [SyncLog] {
+    private func loadSyncLogs(forceReload: Bool = false) throws -> [SyncLog] {
         return cacheQueue.sync {
-            if let cached = syncLogsCache {
+            if !forceReload, let cached = syncLogsCache {
                 return cached
             }
             

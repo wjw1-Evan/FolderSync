@@ -130,6 +130,12 @@ enum LocalizedString {
     static let versionControl = "版本控制".localized
     static let cacheDirectories = "缓存目录".localized
     
+    // MARK: - 确认对话框
+    static let confirmRemoveFolder = "确认移除文件夹".localized
+    static let confirmRemoveFolderMessage = "确定要移除同步文件夹 \"%@\" 吗？此操作将停止该文件夹的同步，但不会删除本地文件。".localized
+    static let remove = "移除".localized
+    static let counting = "统计中...".localized
+    
     // MARK: - 状态
     static func syncStatus(_ status: SyncStatus) -> String {
         switch status {

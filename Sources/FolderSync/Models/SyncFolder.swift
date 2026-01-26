@@ -23,8 +23,9 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
     public var lastSyncMessage: String?
     public var lastSyncedAt: Date?
     public var peerCount: Int = 0
-    public var fileCount: Int? = 0
-    public var folderCount: Int? = 0
+    public var fileCount: Int? = nil // 文件数量，nil 表示尚未统计
+    public var folderCount: Int? = nil // 文件夹数量，nil 表示尚未统计
+    public var totalSize: Int64? = nil // 全部文件的总大小（字节），nil 表示尚未统计
     public var excludePatterns: [String]
     
     public init(id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay, status: SyncStatus = .synced, excludePatterns: [String] = []) {
@@ -33,13 +34,16 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
         self.localPath = localPath
         self.mode = mode
         self.status = status
+        self.fileCount = nil // 初始化为 nil，表示尚未统计
+        self.folderCount = nil
+        self.totalSize = nil
         self.excludePatterns = excludePatterns
     }
     
     // 自定义编码/解码以正确处理 URL
     enum CodingKeys: String, CodingKey {
         case id, syncID, localPath, mode, status, syncProgress
-        case lastSyncMessage, lastSyncedAt, peerCount, fileCount, folderCount, excludePatterns
+        case lastSyncMessage, lastSyncedAt, peerCount, fileCount, folderCount, totalSize, excludePatterns
     }
     
     public init(from decoder: Decoder) throws {
@@ -66,6 +70,7 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
         peerCount = try container.decodeIfPresent(Int.self, forKey: .peerCount) ?? 0
         fileCount = try container.decodeIfPresent(Int.self, forKey: .fileCount)
         folderCount = try container.decodeIfPresent(Int.self, forKey: .folderCount)
+        totalSize = try container.decodeIfPresent(Int64.self, forKey: .totalSize)
         excludePatterns = try container.decodeIfPresent([String].self, forKey: .excludePatterns) ?? []
     }
     
@@ -85,6 +90,7 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
         try container.encode(peerCount, forKey: .peerCount)
         try container.encodeIfPresent(fileCount, forKey: .fileCount)
         try container.encodeIfPresent(folderCount, forKey: .folderCount)
+        try container.encodeIfPresent(totalSize, forKey: .totalSize)
         try container.encode(excludePatterns, forKey: .excludePatterns)
     }
     

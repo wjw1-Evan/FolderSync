@@ -1734,6 +1734,74 @@
           }
         }
       }
+    },
+    "确认移除文件夹" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Confirm Remove Folder"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "确认移除文件夹"
+          }
+        }
+      }
+    },
+    "确定要移除同步文件夹 \"%@\" 吗？此操作将停止该文件夹的同步，但不会删除本地文件。" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Are you sure you want to remove the sync folder \"%@\"? This will stop syncing for this folder, but will not delete local files."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "确定要移除同步文件夹 \"%@\" 吗？此操作将停止该文件夹的同步，但不会删除本地文件。"
+          }
+        }
+      }
+    },
+    "移除" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remove"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除"
+          }
+        }
+      }
+    },
+    "统计中..." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Counting..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "统计中..."
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

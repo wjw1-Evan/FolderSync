@@ -7,7 +7,6 @@ struct MainDashboard: View {
     @State private var showingSyncHistory = false
     @State private var showingAllPeers = false
     @State private var conflictCount: Int = 0
-    @State private var isRefreshing = false
     
     var body: some View {
         NavigationStack {
@@ -92,18 +91,12 @@ struct MainDashboard: View {
                         .padding(.vertical, 4)
                     }
                 } header: { 
-                    HStack {
-                        Text(LocalizedString.status)
-                        Spacer()
-                        if isRefreshing {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        }
-                    }
+                    Text(LocalizedString.status)
                 }
                 Section(LocalizedString.syncFolders) {
                     ForEach(syncManager.folders) { folder in
-                        FolderRow(folder: folder)
+                        FolderRow(folderID: folder.id)
+                            .environmentObject(syncManager)
                     }
                     if syncManager.folders.isEmpty {
                         VStack(spacing: 12) {
@@ -207,6 +200,12 @@ struct MainDashboard: View {
         return formatter.string(fromByteCount: Int64(bytesPerSec))
     }
     
+    private func byteCount(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
     private func updateConflictCount() {
         Task { @MainActor in
             let conflicts = (try? StorageManager.shared.getAllConflicts(unresolvedOnly: true)) ?? []
@@ -215,165 +214,187 @@ struct MainDashboard: View {
     }
     
     private func refreshData() async {
-        isRefreshing = true
         updateConflictCount()
         // 可以在这里添加其他刷新逻辑
-        try? await Task.sleep(nanoseconds: 500_000_000) // 短暂延迟以显示刷新动画
-        isRefreshing = false
     }
 }
 
 struct FolderRow: View {
     @EnvironmentObject var syncManager: SyncManager
-    let folder: SyncFolder
+    let folderID: UUID
     @State private var showingPeerList = false
     @State private var showingExcludeRules = false
     @State private var isHovered = false
     @State private var showCopySuccess = false
+    @State private var showingRemoveConfirmation = false
+    
+    // 从 syncManager 中获取最新的 folder 对象
+    private var folder: SyncFolder? {
+        syncManager.folders.first(where: { $0.id == folderID })
+    }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                // 文件夹图标
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(.blue)
-                    .font(.title2)
-                    .frame(width: 32)
-                
-                // 文件夹信息
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(folder.localPath.lastPathComponent)
-                            .font(.headline)
-                            .lineLimit(1)
-                        Spacer()
-                        StatusBadge(status: folder.status)
-                    }
-                    
-                    // 路径和同步ID（同一行）
-                    HStack(spacing: 8) {
-                        // 路径（左侧，可截断）
-                        Text(folder.localPath.path)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        
-                        Spacer()
-                        
-                        // 同步ID（右侧）
-                        HStack(spacing: 4) {
-                            Text(LocalizedString.idLabel)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(folder.syncID)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.secondary.opacity(0.1))
-                                .cornerRadius(3)
-                            
-                            Button {
-                                let pasteboard = NSPasteboard.general
-                                pasteboard.clearContents()
-                                pasteboard.setString(folder.syncID, forType: .string)
-                                
-                                // 显示复制成功提示
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    showCopySuccess = true
-                                }
-                                
-                                // 2秒后隐藏提示
-                                Task {
-                                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        showCopySuccess = false
-                                    }
-                                }
-                            } label: {
-                                Group {
-                                    if showCopySuccess {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(.green)
-                                    } else {
-                                        Image(systemName: "doc.on.doc")
-                                            .foregroundStyle(.blue)
-                                    }
-                                }
-                                .font(.caption2)
-                                .transition(.scale.combined(with: .opacity))
-                            }
-                            .buttonStyle(.plain)
-                            .help(showCopySuccess ? LocalizedString.copied : LocalizedString.copySyncIDHelp(folder.syncID))
+        Group {
+            if let folder = folder {
+                ZStack(alignment: .leading) {
+                    // 进度条背景（在同步时显示，只在有明确的同步消息时显示，避免统计更新时的闪烁）
+                    // 注意：只在有同步消息时显示进度条，避免仅因为状态为 syncing 就显示
+                    if folder.status == .syncing, let message = folder.lastSyncMessage, !message.isEmpty {
+                        GeometryReader { geometry in
+                            let progress = max(folder.syncProgress, 0.0)
+                            let minWidth = geometry.size.width * 0.02 // 最小宽度 2%，表示正在同步
+                            let progressWidth = geometry.size.width * progress
+                            Rectangle()
+                                .fill(Color.blue.opacity(0.15))
+                                .frame(width: max(progressWidth, minWidth))
+                                // 只在 progress > 0 时使用动画，避免统计更新时的闪烁
+                                .animation(progress > 0 ? .linear(duration: 0.2) : nil, value: folder.syncProgress)
                         }
                     }
                     
-                    // 统计信息
-                    HStack(spacing: 12) {
-                        Label("\(folder.fileCount ?? 0)\(LocalizedString.files)", systemImage: "doc")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        
-                        if let folderCount = folder.folderCount, folderCount > 0 {
-                            Label("\(folderCount)\(LocalizedString.folders)", systemImage: "folder")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        
-                        if folder.peerCount > 0 {
-                            Button {
-                                showingPeerList = true
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "laptopcomputer.and.iphone")
-                                    Text("\(folder.peerCount)\(LocalizedString.devices)")
-                                }
-                                .font(.caption2)
+                    // 文件夹内容
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 12) {
+                            // 文件夹图标
+                            Image(systemName: "folder.fill")
                                 .foregroundStyle(.blue)
-                            }
-                            .buttonStyle(.plain)
-                            .popover(isPresented: $showingPeerList) {
-                                PeerListView(syncID: folder.syncID)
+                                .font(.title2)
+                                .frame(width: 32)
+                            
+                            // 文件夹信息
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(folder.localPath.lastPathComponent)
+                                        .font(.headline)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    StatusBadge(status: folder.status)
+                                }
+                                
+                                // 路径和同步ID（同一行）
+                                HStack(spacing: 8) {
+                                    // 路径（左侧，可截断）
+                                    Text(folder.localPath.path)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    
+                                    Spacer()
+                                    
+                                    // 同步ID（右侧）
+                                    HStack(spacing: 4) {
+                                        Text(LocalizedString.idLabel)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text(folder.syncID)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundStyle(.primary)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color.secondary.opacity(0.1))
+                                            .cornerRadius(3)
+                                        
+                                        Button {
+                                            let pasteboard = NSPasteboard.general
+                                            pasteboard.clearContents()
+                                            pasteboard.setString(folder.syncID, forType: .string)
+                                            
+                                            // 显示复制成功提示
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                showCopySuccess = true
+                                            }
+                                            
+                                            // 2秒后隐藏提示
+                                            Task {
+                                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    showCopySuccess = false
+                                                }
+                                            }
+                                        } label: {
+                                            Group {
+                                                if showCopySuccess {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .foregroundStyle(.green)
+                                                } else {
+                                                    Image(systemName: "doc.on.doc")
+                                                        .foregroundStyle(.blue)
+                                                }
+                                            }
+                                            .font(.caption2)
+                                            .transition(.scale.combined(with: .opacity))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help(showCopySuccess ? LocalizedString.copied : LocalizedString.copySyncIDHelp(folder.syncID))
+                                    }
+                                }
+                                
+                                // 统计信息
+                                HStack(spacing: 12) {
+                                    // 文件数量（如果已统计则显示，否则显示占位符）
+                                    if let fileCount = folder.fileCount {
+                                        Label("\(fileCount)\(LocalizedString.files)", systemImage: "doc")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Label(LocalizedString.counting, systemImage: "doc")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary.opacity(0.6))
+                                    }
+                                    
+                                    // 文件夹数量（如果已统计且大于0则显示）
+                                    if let folderCount = folder.folderCount, folderCount > 0 {
+                                        Label("\(folderCount)\(LocalizedString.folders)", systemImage: "folder")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    
+                                    // 总大小（如果已统计且大于0则显示）
+                                    if let totalSize = folder.totalSize, totalSize > 0 {
+                                        Label(formatByteCount(totalSize), systemImage: "internaldrive")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    
+                                    // 设备数量
+                                    if folder.peerCount > 0 {
+                                        Button {
+                                            showingPeerList = true
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "laptopcomputer.and.iphone")
+                                                Text("\(folder.peerCount)\(LocalizedString.devices)")
+                                            }
+                                            .font(.caption2)
+                                            .foregroundStyle(.blue)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .popover(isPresented: $showingPeerList) {
+                                            PeerListView(syncID: folder.syncID)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
-            
-            // 同步进度或错误信息
-            if folder.status == .syncing {
-                VStack(alignment: .leading, spacing: 6) {
-                    ProgressView(value: folder.syncProgress)
-                        .progressViewStyle(.linear)
-                        .tint(.blue)
-                    
-                    if let message = folder.lastSyncMessage {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.caption2)
-                            Text(message)
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(.blue)
-                    }
-                }
-                .padding(.leading, 44)
-                .padding(.top, 2)
-            } else if let message = folder.lastSyncMessage, folder.status == .error {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                    Text(message)
-                        .font(.caption2)
-                }
-                .foregroundStyle(.red)
-                .padding(.leading, 44)
+            } else {
+                // folder 不存在时的占位视图
+                EmptyView()
             }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 4)
-        .background(isHovered ? Color.secondary.opacity(0.05) : Color.clear)
+        .background(
+            Group {
+                if isHovered {
+                    Color.secondary.opacity(0.05)
+                } else {
+                    Color.clear
+                }
+            }
+        )
         .cornerRadius(8)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.2)) {
@@ -381,53 +402,79 @@ struct FolderRow: View {
             }
         }
         .contextMenu {
-            Button {
-                NSWorkspace.shared.open(folder.localPath)
-            } label: {
-                Label(LocalizedString.openInFinder, systemImage: "folder")
-            }
-            
-            Divider()
-            
-            Button {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(folder.syncID, forType: .string)
-                
-                // 显示复制成功提示
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showCopySuccess = true
+            if let folder = folder {
+                Button {
+                    NSWorkspace.shared.open(folder.localPath)
+                } label: {
+                    Label(LocalizedString.openInFinder, systemImage: "folder")
                 }
                 
-                // 2秒后隐藏提示
-                Task {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                Divider()
+                
+                Button {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(folder.syncID, forType: .string)
+                    
+                    // 显示复制成功提示
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        showCopySuccess = false
+                        showCopySuccess = true
                     }
+                    
+                    // 2秒后隐藏提示
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showCopySuccess = false
+                        }
+                    }
+                } label: {
+                    Label(LocalizedString.copySyncID, systemImage: "doc.on.doc")
                 }
-            } label: {
-                Label(LocalizedString.copySyncID, systemImage: "doc.on.doc")
-            }
-            
-            Button {
-                showingExcludeRules = true
-            } label: {
-                Label(LocalizedString.excludeRules, systemImage: "line.3.horizontal.decrease.circle")
-            }
-            
-            Divider()
-            
-            Button(role: .destructive) {
-                syncManager.removeFolder(folder)
-            } label: {
-                Label(LocalizedString.removeFolder, systemImage: "trash")
+                
+                Button {
+                    showingExcludeRules = true
+                } label: {
+                    Label(LocalizedString.excludeRules, systemImage: "line.3.horizontal.decrease.circle")
+                }
+                
+                Divider()
+                
+                Button(role: .destructive) {
+                    showingRemoveConfirmation = true
+                } label: {
+                    Label(LocalizedString.removeFolder, systemImage: "trash")
+                }
             }
         }
         .sheet(isPresented: $showingExcludeRules) {
-            ExcludeRulesView(folder: folder)
-                .environmentObject(syncManager)
+            if let folder = folder {
+                ExcludeRulesView(folder: folder)
+                    .environmentObject(syncManager)
+            }
         }
+        .confirmationDialog(
+            LocalizedString.confirmRemoveFolder,
+            isPresented: $showingRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            if let folder = folder {
+                Button(LocalizedString.remove, role: .destructive) {
+                    syncManager.removeFolder(folder)
+                }
+                Button(LocalizedString.cancel, role: .cancel) {}
+            }
+        } message: {
+            if let folder = folder {
+                Text(String(format: LocalizedString.confirmRemoveFolderMessage, folder.localPath.lastPathComponent))
+            }
+        }
+    }
+    
+    private func formatByteCount(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -462,7 +509,6 @@ struct AddFolderView: View {
     @State private var syncID: String = ""
     @State private var errorMessage: String?
     @State private var isDragging = false
-    @State private var isValidating = false
     
     var body: some View {
         VStack(spacing: 20) {
@@ -620,15 +666,10 @@ struct AddFolderView: View {
                 Button {
                     addFolder()
                 } label: {
-                    if isValidating {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                            .padding(.trailing, 4)
-                    }
                     Text(LocalizedString.addSync)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedPath == nil || syncID.isEmpty || isValidating)
+                .disabled(selectedPath == nil || syncID.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
         }
@@ -706,20 +747,16 @@ struct AddFolderView: View {
     private func addFolder() {
         guard let path = selectedPath, !syncID.isEmpty else { return }
         
-        isValidating = true
-        
         // 再次验证
         validateAndSetPath(path)
         validateSyncID(syncID)
         
         guard errorMessage == nil else {
-            isValidating = false
             return
         }
         
         let newFolder = SyncFolder(syncID: syncID, localPath: path, mode: .twoWay)
         syncManager.addFolder(newFolder)
-        isValidating = false
         dismiss()
     }
     

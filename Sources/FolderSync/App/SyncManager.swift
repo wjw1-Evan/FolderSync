@@ -20,35 +20,38 @@ public class SyncManager: ObservableObject {
     // 兼容性：提供 peers 属性（从 peerManager 获取）
     @Published var peers: [PeerID] = []
     
-    private var monitors: [UUID: FSEventsMonitor] = [:]
+    // 速度统计
     private var uploadSamples: [(Date, Int64)] = []
     private var downloadSamples: [(Date, Int64)] = []
     private let speedWindow: TimeInterval = 3
-    private var lastKnownLocalPaths: [String: Set<String>] = [:]
-    private var deletedPaths: [String: Set<String>] = [:]
-    private var syncInProgress: Set<String> = [] // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
+    
+    // 同步状态管理
+    var lastKnownLocalPaths: [String: Set<String>] = [:]
+    var deletedPaths: [String: Set<String>] = [:]
+    var syncInProgress: Set<String> = [] // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
     private var peerStatusCheckTask: Task<Void, Never>?
     private var peersSyncTask: Task<Void, Never>? // 定期同步 peers 数组的任务
     private var peerDiscoveryTask: Task<Void, Never>? // 对等点发现处理任务
+    
     // 同步完成后的冷却时间：记录每个 syncID 的最后同步完成时间，在冷却期内忽略文件变化检测
-    private var syncCooldown: [String: Date] = [:] // syncID -> 最后同步完成时间
-    private let syncCooldownDuration: TimeInterval = 5.0 // 同步完成后5秒内忽略文件变化检测
+    var syncCooldown: [String: Date] = [:] // syncID -> 最后同步完成时间
+    var syncCooldownDuration: TimeInterval = 5.0 // 同步完成后5秒内忽略文件变化检测
     
     // 按 peer-folder 对记录的同步冷却时间，用于避免频繁同步
-    private var peerSyncCooldown: [String: Date] = [:] // "peerID:syncID" -> 最后同步完成时间
-    private let peerSyncCooldownDuration: TimeInterval = 30.0 // 同步完成后30秒内不重复同步
-    
-    // 文件监控防抖：syncID -> 防抖任务
-    private var debounceTasks: [String: Task<Void, Never>] = [:]
-    private let debounceDelay: TimeInterval = 2.0 // 2 秒防抖延迟
-    // 文件写入稳定性检测：记录文件路径和上次检查的大小
-    private var fileStabilityCheck: [String: (size: Int64, lastCheck: Date)] = [:]
-    private let fileStabilityDelay: TimeInterval = 3.0 // 文件大小稳定3秒后才认为写入完成
+    var peerSyncCooldown: [String: Date] = [:] // "peerID:syncID" -> 最后同步完成时间
+    var peerSyncCooldownDuration: TimeInterval = 30.0 // 同步完成后30秒内不重复同步
     
     // 设备统计（用于触发UI更新）
     @Published private(set) var onlineDeviceCountValue: Int = 1 // 包括自身，默认为1
     @Published private(set) var offlineDeviceCountValue: Int = 0
     @Published private(set) var allDevicesValue: [DeviceInfo] = [] // 设备列表（用于触发UI更新）
+    
+    // 模块化组件
+    private var folderMonitor: FolderMonitor!
+    private var folderStatistics: FolderStatistics!
+    private var p2pHandlers: P2PHandlers!
+    private var fileTransfer: FileTransfer!
+    private var syncEngine: SyncEngine!
     
     public init() {
         // 运行环境检测
@@ -78,6 +81,13 @@ public class SyncManager: ObservableObject {
         
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts() // 这会同时更新 allDevicesValue
+        
+        // 初始化模块化组件
+        folderMonitor = FolderMonitor(syncManager: self)
+        folderStatistics = FolderStatistics(syncManager: self, folderMonitor: folderMonitor)
+        p2pHandlers = P2PHandlers(syncManager: self, folderStatistics: folderStatistics)
+        fileTransfer = FileTransfer(syncManager: self)
+        syncEngine = SyncEngine(syncManager: self, fileTransfer: fileTransfer, folderStatistics: folderStatistics)
         
         // 监听 peerManager 的变化，同步更新 peers 数组和设备列表（用于兼容性和自动刷新）
         peersSyncTask = Task { @MainActor in
@@ -137,28 +147,18 @@ public class SyncManager: ObservableObject {
                     // 对于已存在的对等点，只有在最近没有同步过的情况下才触发同步
                     // 避免频繁触发不必要的同步
                     Task { @MainActor in
-                        // 使用 ensurePeerRegistered 确保注册完成
-                        let registrationResult = await self.ensurePeerRegistered(peer: peer, peerID: peerIDString)
-                        
-                        if registrationResult.success {
-                            // 对于新对等点，立即同步所有文件夹
-                            // 对于已存在的对等点，只同步不在冷却期内的文件夹
-                            if wasNew {
-                                // 向所有文件夹同步（多点同步）
-                                for folder in self.folders {
-                                    self.syncWithPeer(peer: peer, folder: folder)
-                                }
-                            } else {
-                                // 只同步不在冷却期内的文件夹
-                                for folder in self.folders {
-                                    if self.shouldSyncFolderWithPeer(peerID: peerIDString, folder: folder) {
-                                        self.syncWithPeer(peer: peer, folder: folder)
-                                    }
-                                }
+                        // syncWithPeer 内部会处理对等点注册，这里直接调用即可
+                        if wasNew {
+                            // 向所有文件夹同步（多点同步）
+                            for folder in self.folders {
+                                self.syncWithPeer(peer: peer, folder: folder)
                             }
                         } else {
-                            if wasNew {
-                                print("[SyncManager] ⚠️ 新对等点注册失败，跳过同步: \(peerIDString.prefix(12))...")
+                            // 只同步不在冷却期内的文件夹
+                            for folder in self.folders {
+                                if self.shouldSyncFolderWithPeer(peerID: peerIDString, folder: folder) {
+                                    self.syncWithPeer(peer: peer, folder: folder)
+                                }
                             }
                         }
                     }
@@ -184,14 +184,16 @@ public class SyncManager: ObservableObject {
             }
             
             // Register P2P handlers
-            setupP2PHandlers()
+            p2pHandlers.setupP2PHandlers()
             
             // Start monitoring and announcing all folders
             await MainActor.run {
                 for folder in folders {
                     startMonitoring(folder)
-                    // 启动后自动统计文件数量
-                    refreshFileCount(for: folder)
+                    // 启动后自动统计文件数量（使用最新的 folder 对象）
+                    if let latestFolder = folders.first(where: { $0.id == folder.id }) {
+                        refreshFileCount(for: latestFolder)
+                    }
                 }
             }
             
@@ -242,11 +244,10 @@ public class SyncManager: ObservableObject {
         peerStatusCheckTask?.cancel()
         peersSyncTask?.cancel()
         peerDiscoveryTask?.cancel()
-        // 取消所有防抖任务
-        for task in debounceTasks.values {
-            task.cancel()
+        // 取消所有监控任务
+        Task { @MainActor [folderMonitor] in
+            folderMonitor?.cancelAll()
         }
-        debounceTasks.removeAll()
     }
     
     /// 检查所有对等点的在线状态
@@ -419,27 +420,9 @@ public class SyncManager: ObservableObject {
         }
     }
     
-    /// 刷新文件夹的文件数量和文件夹数量统计（不触发同步）
-    private func refreshFileCount(for folder: SyncFolder) {
-        Task {
-            print("[SyncManager] 📊 正在统计文件夹: \(folder.localPath.path)")
-            let (_, metadata, folderCount) = await calculateFullState(for: folder)
-            await MainActor.run {
-                if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
-                    self.folders[index].fileCount = metadata.count
-                    self.folders[index].folderCount = folderCount
-                    print("[SyncManager] ✅ 统计完成: \(metadata.count) 个文件, \(folderCount) 个文件夹")
-                    // 持久化保存统计信息更新
-                    do {
-                        try StorageManager.shared.saveFolder(self.folders[index])
-                    } catch {
-                        print("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
-                    }
-                } else {
-                    print("[SyncManager] ⚠️ 警告: 无法找到文件夹索引，统计结果未更新")
-                }
-            }
-        }
+    /// 刷新文件夹的文件数量和文件夹数量统计（不触发同步，立即执行）
+    func refreshFileCount(for folder: SyncFolder) {
+        folderStatistics.refreshFileCount(for: folder)
     }
     
     func addFolder(_ folder: SyncFolder) {
@@ -546,162 +529,41 @@ public class SyncManager: ObservableObject {
         stopMonitoring(folder)
         folders.removeAll { $0.id == folder.id }
         syncIDManager.unregisterSyncIDByFolderID(folder.id)
-        // 取消防抖任务
-        debounceTasks[folder.syncID]?.cancel()
-        debounceTasks.removeValue(forKey: folder.syncID)
+        // 防抖任务由 FolderMonitor 管理，停止监控时会自动取消
         try? StorageManager.shared.deleteFolder(folder.id)
     }
     
     func updateFolder(_ folder: SyncFolder) {
         guard let idx = folders.firstIndex(where: { $0.id == folder.id }) else { return }
-        folders[idx] = folder
-        try? StorageManager.shared.saveFolder(folder)
+        // 重要：保留现有的统计值，避免覆盖为 nil
+        var updatedFolder = folder
+        let existingFolder = folders[idx]
+        // 如果新 folder 的统计值为 nil，保留旧值
+        if updatedFolder.fileCount == nil {
+            updatedFolder.fileCount = existingFolder.fileCount
+        }
+        if updatedFolder.folderCount == nil {
+            updatedFolder.folderCount = existingFolder.folderCount
+        }
+        if updatedFolder.totalSize == nil {
+            updatedFolder.totalSize = existingFolder.totalSize
+        }
+        folders[idx] = updatedFolder
+        try? StorageManager.shared.saveFolder(updatedFolder)
     }
     
     private func startMonitoring(_ folder: SyncFolder) {
-        // Announce this folder on the network
-        Task {
-            try? await p2pNode.announce(service: "folder-sync-\(folder.syncID)")
-        }
-        
-        let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path in
-            // 检查是否在同步冷却期内（刚完成同步，忽略文件变化）
-            if let lastSyncTime = self?.syncCooldown[folder.syncID],
-               Date().timeIntervalSince(lastSyncTime) < (self?.syncCooldownDuration ?? 5.0) {
-                return
-            }
-            
-            // 检查文件是否正在被写入（文件大小是否稳定）
-            Task { [weak self] in
-                guard let self = self else { return }
-                
-                // 检查文件是否存在且是文件（不是目录）
-                let fileManager = FileManager.default
-                var isDirectory: ObjCBool = false
-                guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
-                      !isDirectory.boolValue else {
-                    // 是目录或文件不存在，直接触发同步
-                    self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
-                    return
-                }
-                
-                // 检查文件是否正在写入
-            let isStable = await self.checkFileStability(filePath: path)
-            if isStable {
-                // 文件已稳定，触发同步
-                self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
-            } else {
-                // 文件正在写入，等待稳定后再触发同步
-                await self.waitForFileStability(filePath: path, folder: folder, syncID: folder.syncID)
-            }
-            }
-        }
-        monitor.start()
-        monitors[folder.id] = monitor
+        folderMonitor.startMonitoring(folder)
     }
     
     private func stopMonitoring(_ folder: SyncFolder) {
-        monitors[folder.id]?.stop()
-        monitors.removeValue(forKey: folder.id)
+        folderMonitor.stopMonitoring(folder)
     }
     
-    /// 检查文件是否稳定（文件大小在短时间内没有变化）
-    private func checkFileStability(filePath: String) async -> Bool {
-        let fileManager = FileManager.default
-        
-        guard let attributes = try? fileManager.attributesOfItem(atPath: filePath),
-              let fileSize = attributes[.size] as? Int64 else {
-            // 无法获取文件大小，认为不稳定
-            return false
-        }
-        
-        let now = Date()
-        let fileKey = filePath
-        
-        // 检查是否有之前的记录
-        if let previous = fileStabilityCheck[fileKey] {
-            // 如果文件大小没有变化，且距离上次检查已超过稳定时间
-            if previous.size == fileSize {
-                let timeSinceLastCheck = now.timeIntervalSince(previous.lastCheck)
-                if timeSinceLastCheck >= fileStabilityDelay {
-                    // 文件大小稳定，清除记录
-                    fileStabilityCheck.removeValue(forKey: fileKey)
-                    return true
-                }
-            } else {
-                // 文件大小变化了，更新记录
-                fileStabilityCheck[fileKey] = (size: fileSize, lastCheck: now)
-                return false
-            }
-        } else {
-            // 首次检查，记录当前大小
-            fileStabilityCheck[fileKey] = (size: fileSize, lastCheck: now)
-            return false
-        }
-        
-        return false
-    }
-    
-    /// 等待文件写入完成（文件大小稳定）
-    private func waitForFileStability(filePath: String, folder: SyncFolder, syncID: String) async {
-        let maxWaitTime: TimeInterval = 60.0 // 最多等待60秒
-        let checkInterval: TimeInterval = 1.0 // 每秒检查一次
-        let startTime = Date()
-        
-        while Date().timeIntervalSince(startTime) < maxWaitTime {
-            // 等待一段时间后检查
-            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
-            
-            let isStable = await checkFileStability(filePath: filePath)
-            if isStable {
-                triggerSyncAfterDebounce(for: folder, syncID: syncID)
-                return
-            }
-        }
-        
-        // 超时后仍然触发同步（可能文件很大，需要更长时间）
-        triggerSyncAfterDebounce(for: folder, syncID: syncID)
-    }
-    
-    /// 防抖触发同步
-    private func triggerSyncAfterDebounce(for folder: SyncFolder, syncID: String) {
-        // 取消之前的防抖任务
-        debounceTasks[syncID]?.cancel()
-        
-        // 创建新的防抖任务
-        let debounceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
-            
-            guard !Task.isCancelled else { return }
-            
-            // 检查是否有同步正在进行
-            let hasSyncInProgress = await MainActor.run {
-                guard let self = self else { return false }
-                let allPeers = self.peerManager.allPeers
-                for peerInfo in allPeers {
-                    let syncKey = "\(syncID):\(peerInfo.peerIDString)"
-                    if self.syncInProgress.contains(syncKey) {
-                        return true
-                    }
-                }
-                return false
-            }
-            
-            if hasSyncInProgress {
-                print("[SyncManager] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
-                return
-            }
-            
-            print("[SyncManager] 🔄 防抖延迟结束，开始同步: \(syncID)")
-            self?.triggerSync(for: folder)
-        }
-        
-        debounceTasks[syncID] = debounceTask
-    }
     
     private let ignorePatterns = [".DS_Store", ".git/", "node_modules/", ".build/", ".swiftpm/"]
     
-    private func addUploadBytes(_ n: Int64) {
+    func addUploadBytes(_ n: Int64) {
         uploadSamples.append((Date(), n))
         let cutoff = Date().addingTimeInterval(-speedWindow)
         uploadSamples.removeAll { $0.0 < cutoff }
@@ -709,7 +571,7 @@ public class SyncManager: ObservableObject {
         uploadSpeedBytesPerSec = Double(sum) / speedWindow
     }
     
-    private func addDownloadBytes(_ n: Int64) {
+    func addDownloadBytes(_ n: Int64) {
         downloadSamples.append((Date(), n))
         let cutoff = Date().addingTimeInterval(-speedWindow)
         downloadSamples.removeAll { $0.0 < cutoff }
@@ -717,7 +579,7 @@ public class SyncManager: ObservableObject {
         downloadSpeedBytesPerSec = Double(sum) / speedWindow
     }
     
-    private func isIgnored(_ path: String, folder: SyncFolder) -> Bool {
+    func isIgnored(_ path: String, folder: SyncFolder) -> Bool {
         let all = ignorePatterns + folder.excludePatterns
         for pattern in all {
             if Self.matchesIgnore(pattern: pattern, path: path) { return true }
@@ -759,7 +621,7 @@ public class SyncManager: ObservableObject {
         case .getMST(let syncID):
             let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
             if let folder = folder {
-                let (mst, _, _) = await self.calculateFullState(for: folder)
+                let (mst, _, _, _) = await self.calculateFullState(for: folder)
                 return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
             }
             return .error("Folder not found")
@@ -767,7 +629,7 @@ public class SyncManager: ObservableObject {
         case .getFiles(let syncID):
             let folder = await MainActor.run { self.folders.first(where: { $0.syncID == syncID }) }
             if let folder = folder {
-                let (_, metadata, _) = await self.calculateFullState(for: folder)
+                let (_, metadata, _, _) = await self.calculateFullState(for: folder)
                 return .files(syncID: syncID, entries: metadata)
             }
             return .error("Folder not found")
@@ -786,10 +648,11 @@ public class SyncManager: ObservableObject {
                     if let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
                        let mtime = resourceValues.contentModificationDate {
                         let timeSinceModification = Date().timeIntervalSince(mtime)
-                        if timeSinceModification < fileStabilityDelay {
+                        let stabilityDelay: TimeInterval = 3.0 // 文件大小稳定3秒后才认为写入完成
+                        if timeSinceModification < stabilityDelay {
                             // 文件可能是0字节且刚被修改，可能还在写入，等待一下
                             print("[SyncManager] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
-                            try? await Task.sleep(nanoseconds: UInt64(fileStabilityDelay * 1_000_000_000))
+                            try? await Task.sleep(nanoseconds: UInt64(stabilityDelay * 1_000_000_000))
                             
                             // 再次检查文件大小
                             if let newAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
@@ -1032,96 +895,11 @@ public class SyncManager: ObservableObject {
     }
     
     private func syncWithPeer(peer: PeerID, folder: SyncFolder) {
-        let peerID = peer.b58String
-        let syncKey = "\(folder.syncID):\(peerID)"
-        
-        Task { @MainActor in
-            // 检查是否正在同步
-            if self.syncInProgress.contains(syncKey) {
-                return
-            }
-            
-            // 确保对等点已注册（带重试机制）
-            let registrationResult = await ensurePeerRegistered(peer: peer, peerID: peerID)
-            
-            guard registrationResult.success else {
-                print("[SyncManager] ❌ [syncWithPeer] 对等点注册失败，跳过同步: \(peerID.prefix(12))...")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: "对等点注册失败", progress: 0.0)
-                }
-                // 单个对等点注册失败时不执行同步
-                return
-            }
-            
-            // 标记为正在同步
-            self.syncInProgress.insert(syncKey)
-            
-            // 使用 defer 确保在函数返回时移除同步标记
-            defer {
-                self.syncInProgress.remove(syncKey)
-            }
-            
-            // 执行同步（此时对等点已确保注册成功）
-            await self.performSync(peer: peer, folder: folder, peerID: peerID)
-        }
-    }
-    
-    /// 确保对等点已注册（带重试机制）
-    /// - Returns: (success: Bool, isNewlyRegistered: Bool) - 是否成功，是否新注册
-    @MainActor
-    private func ensurePeerRegistered(peer: PeerID, peerID: String) async -> (success: Bool, isNewlyRegistered: Bool) {
-        // 检查是否已注册
-        if p2pNode.registrationService.isRegistered(peerID) {
-            return (true, false)
-        }
-        
-        print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点未注册，尝试注册: \(peerID.prefix(12))...")
-        
-        // 获取对等点地址
-        let peerAddresses = p2pNode.peerManager.getAddresses(for: peerID)
-        
-        if peerAddresses.isEmpty {
-            print("[SyncManager] ❌ [ensurePeerRegistered] 对等点无可用地址: \(peerID.prefix(12))...")
-            return (false, false)
-        }
-        
-        // 尝试注册
-        let registered = p2pNode.registrationService.registerPeer(peerID: peer, addresses: peerAddresses)
-        
-        if !registered {
-            print("[SyncManager] ❌ [ensurePeerRegistered] 对等点注册失败: \(peerID.prefix(12))...")
-            return (false, false)
-        }
-        
-        print("[SyncManager] ✅ [ensurePeerRegistered] 对等点注册成功，等待注册完成: \(peerID.prefix(12))...")
-        
-        // 等待注册完成（使用重试机制，最多等待 2 秒）
-        let maxWaitTime: TimeInterval = 2.0
-        let checkInterval: TimeInterval = 0.2
-        let maxRetries = Int(maxWaitTime / checkInterval)
-        
-        for attempt in 1...maxRetries {
-            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
-            
-            if p2pNode.registrationService.isRegistered(peerID) {
-                print("[SyncManager] ✅ [ensurePeerRegistered] 对等点注册确认成功: \(peerID.prefix(12))... (尝试 \(attempt)/\(maxRetries))")
-                return (true, true)
-            }
-        }
-        
-        // 即使等待超时，如果注册状态显示正在注册中，也认为成功（可能是异步延迟）
-        let registrationState = p2pNode.registrationService.getRegistrationState(peerID)
-        if case .registering = registrationState {
-            print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点正在注册中，继续尝试: \(peerID.prefix(12))...")
-            return (true, true)
-        }
-        
-        print("[SyncManager] ⚠️ [ensurePeerRegistered] 对等点注册等待超时，但继续尝试: \(peerID.prefix(12))...")
-        return (true, true) // 即使超时也继续，让同步过程处理
+        syncEngine.syncWithPeer(peer: peer, folder: folder)
     }
     
     /// 统一的请求函数 - 使用原生 TCP
-    private func sendSyncRequest(
+    func sendSyncRequest(
         _ message: SyncRequest,
         to peer: PeerID,
         peerID: String,
@@ -1170,721 +948,15 @@ public class SyncManager: ObservableObject {
         }
     }
     
-    private func performSync(peer: PeerID, folder: SyncFolder, peerID: String) async {
-        let startedAt = Date()
-        
-        do {
-            guard !peerID.isEmpty else {
-                print("[SyncManager] ❌ [performSync] PeerID 无效")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: "PeerID 无效")
-                }
-                return
-            }
-            
-            // 注意：注册检查已在 syncWithPeer 中完成，这里不再重复检查
-            // 如果到达这里，说明对等点已经注册成功
-            
-            await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .syncing, message: "正在连接到 \(peerID.prefix(12))...", progress: 0.0)
-            }
-            
-            // 获取远程 MST 根
-            // 首先获取对等点的地址
-            let peerAddresses = await MainActor.run {
-                return p2pNode.peerManager.getAddresses(for: peer.b58String)
-            }
-            if peerAddresses.isEmpty {
-                print("[SyncManager] ⚠️ [performSync] 警告: 对等点没有可用地址")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: "对等点无可用地址", progress: 0.0)
-                }
-                return
-            }
-            // 尝试使用原生网络服务（优先）
-            let rootRes: SyncResponse
-            do {
-                // 从地址中提取第一个可用的 IP:Port 地址
-                let addressStrings = peerAddresses.map { $0.description }
-                
-                guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
-                    let errorMsg = "无法从地址中提取 IP:Port（地址数: \(addressStrings.count)）"
-                    print("[SyncManager] ❌ [performSync] \(errorMsg)")
-                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
-                }
-                
-                // 验证提取的地址
-                let addressComponents = address.split(separator: ":")
-                guard addressComponents.count == 2,
-                      let extractedIP = String(addressComponents[0]).removingPercentEncoding,
-                      let extractedPort = UInt16(String(addressComponents[1])),
-                      extractedPort > 0,
-                      extractedPort <= 65535 else {
-                    print("[SyncManager] ❌ [performSync] 地址格式验证失败: \(address)")
-                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
-                }
-                
-                // 验证IP地址格式
-                if extractedIP.isEmpty || extractedIP == "0.0.0.0" {
-                    print("[SyncManager] ❌ [performSync] IP地址无效: '\(extractedIP)'")
-                    throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "IP地址无效: \(extractedIP)"])
-                }
-                
-                // 使用原生网络服务发送请求
-                // 缩短超时时间，加快失败检测
-                rootRes = try await p2pNode.nativeNetwork.sendRequest(
-                    .getMST(syncID: folder.syncID),
-                    to: address,
-                    timeout: 10.0, // 从90秒缩短到10秒，加快失败检测
-                    maxRetries: 2  // 从5次减少到2次，避免长时间等待
-                ) as SyncResponse
-            } catch {
-                let errorString = String(describing: error)
-                print("[SyncManager] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
-                
-                // 注意：对等点应该已经注册（由 syncWithPeer 保证）
-                // 如果连接失败，可能是网络问题或对等点暂时不可用
-                // 不需要重新注册，因为注册状态应该仍然有效
-                
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
-                }
-                return
-            }
-            
-            if case .error = rootRes {
-                // Remote doesn't have this folder
-                // 这是正常的 - 对等点可能还没有这个 syncID（新创建的同步组）
-                // 或者对等点确实没有此同步组
-                // 这种情况不应该标记为错误，因为不是连接失败，而是对等点没有此同步组
-                // 不标记为错误，静默返回（这不是错误，而是对等点没有此同步组）
-                await MainActor.run {
-                    self.removeFolderPeer(folder.syncID, peerID: peerID)
-                }
-                return
-            }
-            
-            // Peer confirmed to have this folder
-            await MainActor.run {
-                self.addFolderPeer(folder.syncID, peerID: peerID)
-                self.syncIDManager.updateLastSyncedAt(folder.syncID)
-                // 确认对等点在线（能够响应请求）
-                self.peerManager.updateOnlineStatus(peerID, isOnline: true)
-                self.updateDeviceCounts()
-            }
-            
-            guard case .mstRoot(_, let remoteHash) = rootRes else {
-                print("[SyncManager] ❌ [performSync] rootRes 不是 mstRoot 类型")
-                return
-            }
-            
-            let (localMST, localMetadata, _) = await calculateFullState(for: folder)
-            
-            let currentPaths = Set(localMetadata.keys)
-            let lastKnown = lastKnownLocalPaths[folder.syncID] ?? []
-            
-            // 更严格的删除检测：只有当文件确实不存在于文件系统中时，才认为是删除
-            // 避免因为文件被跳过（正在写入）而被误判为删除
-            var locallyDeleted: Set<String> = []
-            let fileManager = FileManager.default
-            for path in lastKnown {
-                // 如果文件不在当前路径中，检查文件是否真的不存在
-                if !currentPaths.contains(path) {
-                    let fileURL = folder.localPath.appendingPathComponent(path)
-                    // 只有当文件确实不存在于文件系统中时，才认为是删除
-                    if !fileManager.fileExists(atPath: fileURL.path) {
-                        locallyDeleted.insert(path)
-                    }
-                    // 文件存在但不在 currentPaths 中，可能是被跳过了（正在写入）
-                    // 不将其标记为删除，保留在 lastKnown 中
-                }
-            }
-            
-            // 更新 deletedPaths，但只添加真正删除的文件
-            if !locallyDeleted.isEmpty {
-                var dp = deletedPaths[folder.syncID] ?? []
-                dp.formUnion(locallyDeleted)
-                deletedPaths[folder.syncID] = dp
-            }
-            
-            let mode = folder.mode
-            
-            if localMST.rootHash == remoteHash && locallyDeleted.isEmpty {
-                // 本地和远程已经同步，无需操作，也不创建同步日志
-                lastKnownLocalPaths[folder.syncID] = currentPaths
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .synced, message: "Up to date", progress: 1.0)
-                    self.syncIDManager.updateLastSyncedAt(folder.syncID)
-                    // 确认对等点在线
-                    self.peerManager.updateOnlineStatus(peerID, isOnline: true)
-                    self.updateDeviceCounts()
-                }
-                return
-            }
-            
-            // 2. Roots differ, get remote file list
-            await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .syncing, message: "正在获取远程文件列表...", progress: 0.1)
-            }
-            
-            let filesRes: SyncResponse
-            do {
-                filesRes = try await sendSyncRequest(
-                    .getFiles(syncID: folder.syncID),
-                    to: peer,
-                    peerID: peerID,
-                    timeout: 90.0,
-                    maxRetries: 3,
-                    folder: folder
-                )
-            } catch {
-                print("[SyncManager] ❌ [performSync] 获取远程文件列表失败: \(error)")
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .error, message: "获取远程文件列表失败: \(error.localizedDescription)")
-                }
-                return
-            }
-            
-            guard case .files(_, let remoteEntries) = filesRes else {
-                print("[SyncManager] ❌ [performSync] filesRes 不是 files 类型")
-                return
-            }
-            let myPeerID = p2pNode.peerID ?? ""
-            var totalOps = 0
-            var completedOps = 0
-            var syncedFiles: [SyncLog.SyncedFileInfo] = [] // 记录同步的文件信息
-            
-            enum DownloadAction {
-                case skip
-                case overwrite
-                case conflict
-            }
-            func downloadAction(remote: FileMetadata, local: FileMetadata?) -> DownloadAction {
-                guard let loc = local else { 
-                    return .overwrite 
-                }
-                // 优先检查 hash，如果相同则跳过
-                if loc.hash == remote.hash { 
-                    return .skip 
-                }
-                // 使用 Vector Clock 比较
-                if let rvc = remote.vectorClock, let lvc = loc.vectorClock, !rvc.versions.isEmpty || !lvc.versions.isEmpty {
-                    let cmp = lvc.compare(to: rvc)
-                    switch cmp {
-                    case .antecedent: 
-                        return .overwrite
-                    case .successor, .equal: 
-                        return .skip
-                    case .concurrent: 
-                        print("[SyncManager] ⚠️ [downloadAction] VC 并发冲突，保存为冲突文件")
-                        return .conflict
-                    }
-                }
-                // 没有 Vector Clock，使用修改时间判断
-                return remote.mtime > loc.mtime ? .overwrite : .skip
-            }
-            
-            nonisolated func shouldUpload(local: FileMetadata, remote: FileMetadata?) -> Bool {
-                guard let rem = remote else { return true }
-                // 如果 hash 相同，说明文件内容相同，不需要上传
-                if local.hash == rem.hash {
-                    return false
-                }
-                // 使用 Vector Clock 比较
-                if let lvc = local.vectorClock, let rvc = rem.vectorClock, !lvc.versions.isEmpty || !rvc.versions.isEmpty {
-                    let cmp = lvc.compare(to: rvc)
-                    switch cmp {
-                    case .successor:
-                        return true
-                    case .antecedent, .equal:
-                        return false
-                    case .concurrent:
-                        // 并发冲突：两个版本都有修改，需要用户决定
-                        // 为了保持一致性，使用修改时间判断，但应该标记为冲突
-                        // 这里先使用 mtime 判断，后续可以改进为真正的冲突处理
-                        let shouldUpload = local.mtime > rem.mtime
-                        print("[SyncManager] ⚠️ [shouldUpload] VC 并发冲突，使用 mtime 判断: 本地=\(local.mtime), 远程=\(rem.mtime), 结果=\(shouldUpload)")
-                        print("[SyncManager]   ⚠️ 注意：这是并发修改，可能需要手动解决冲突")
-                        return shouldUpload
-                    }
-                }
-                // 没有 Vector Clock，使用修改时间判断
-                return local.mtime > rem.mtime
-            }
-            
-            var deletedSet = deletedPaths[folder.syncID] ?? []
-            let confirmed = deletedSet.filter { !remoteEntries.keys.contains($0) }
-            for p in confirmed { deletedSet.remove(p) }
-            if deletedSet.isEmpty {
-                deletedPaths.removeValue(forKey: folder.syncID)
-            } else {
-                deletedPaths[folder.syncID] = deletedSet
-            }
-            
-            // 3. Download phase (skip if uploadOnly); skip paths we've deleted
-            // 使用 Set 来跟踪已决定下载的文件，避免重复
-            var changedFilesSet: Set<String> = []
-            var conflictFilesSet: Set<String> = []
-            var changedFiles: [(String, FileMetadata)] = []
-            var conflictFiles: [(String, FileMetadata)] = []
-            if mode == .twoWay || mode == .downloadOnly {
-                for (path, remoteMeta) in remoteEntries {
-                    // 跳过已标记为删除的文件
-                    if deletedSet.contains(path) { 
-                        continue 
-                    }
-                    // 检查是否已经决定下载（避免重复）
-                    if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
-                        print("[SyncManager] ⚠️ [performSync] 文件已在待下载列表中，跳过重复: \(path)")
-                        continue
-                    }
-                    switch downloadAction(remote: remoteMeta, local: localMetadata[path]) {
-                    case .skip: break
-                    case .overwrite: 
-                        changedFilesSet.insert(path)
-                        changedFiles.append((path, remoteMeta))
-                    case .conflict: 
-                        conflictFilesSet.insert(path)
-                        conflictFiles.append((path, remoteMeta))
-                    }
-                }
-            }
-            totalOps += changedFiles.count + conflictFiles.count
-            
-            // 4. Upload phase: find files to upload (skip if downloadOnly)
-            // 使用 Set 来跟踪已决定上传的文件，避免重复
-            var filesToUploadSet: Set<String> = []
-            var filesToUpload: [(String, FileMetadata)] = []
-            if mode == .twoWay || mode == .uploadOnly {
-                for (path, localMeta) in localMetadata {
-                    // 跳过已标记为删除的文件
-                    if locallyDeleted.contains(path) {
-                        continue
-                    }
-                    // 检查是否已经决定上传（避免重复）
-                    if filesToUploadSet.contains(path) {
-                        print("[SyncManager] ⚠️ [performSync] 文件已在待上传列表中，跳过重复: \(path)")
-                        continue
-                    }
-                    if shouldUpload(local: localMeta, remote: remoteEntries[path]) {
-                        filesToUploadSet.insert(path)
-                        filesToUpload.append((path, localMeta))
-                    }
-                }
-            }
-            totalOps += filesToUpload.count
-            
-            let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
-            if !toDelete.isEmpty {
-                totalOps += toDelete.count
-            }
-            
-            // 更新总操作数并显示准备信息
-            await MainActor.run {
-                if totalOps > 0 {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "准备同步 \(totalOps) 个操作...", progress: 0.2)
-                }
-            }
-            
-            // 删除文件
-            if !toDelete.isEmpty {
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .syncing, message: "正在删除 \(toDelete.count) 个文件...", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                }
-                
-                let delRes: SyncResponse = try await sendSyncRequest(
-                    .deleteFiles(syncID: folder.syncID, paths: Array(toDelete)),
-                    to: peer,
-                    peerID: peerID,
-                    timeout: 90.0,
-                    maxRetries: 3,
-                    folder: folder
-                )
-                if case .deleteAck = delRes {
-                    let fileManager = FileManager.default
-                    
-                    for rel in toDelete {
-                        let fileURL = folder.localPath.appendingPathComponent(rel)
-                        let fileName = (rel as NSString).lastPathComponent
-                        let pathDir = (rel as NSString).deletingLastPathComponent
-                        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-                        
-                        // 获取文件大小（如果文件还存在）
-                        var fileSize: Int64 = 0
-                        if fileManager.fileExists(atPath: fileURL.path),
-                           let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                           let size = attributes[.size] as? Int64 {
-                            fileSize = size
-                        }
-                        
-                        // 如果文件还存在，直接删除
-                        if fileManager.fileExists(atPath: fileURL.path) {
-                            try? fileManager.removeItem(at: fileURL)
-                        }
-                        
-                        // 删除 Vector Clock
-                        try? StorageManager.shared.deleteVectorClock(syncID: folder.syncID, path: rel)
-                        
-                        // 记录删除的文件信息
-                        syncedFiles.append(SyncLog.SyncedFileInfo(
-                            path: rel,
-                            fileName: fileName,
-                            folderName: folderName,
-                            size: fileSize,
-                            operation: .delete
-                        ))
-                    }
-                    completedOps += toDelete.count
-                }
-            }
-            
-            if totalOps == 0 {
-                // 没有文件需要同步，不创建同步日志
-                lastKnownLocalPaths[folder.syncID] = currentPaths
-                await MainActor.run {
-                    self.updateFolderStatus(folder.id, status: .synced, message: "Up to date", progress: 1.0)
-                    self.syncIDManager.updateLastSyncedAt(folder.syncID)
-                    // 确认对等点在线
-                    self.peerManager.updateOnlineStatus(peerID, isOnline: true)
-                    self.updateDeviceCounts()
-                }
-                return
-            }
-            
-            // 5. Download changed files (overwrite) - 并行下载
-            var totalDownloadBytes: Int64 = 0
-            var totalUploadBytes: Int64 = 0
-            
-            // 并行下载文件
-            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
-                var activeDownloads = 0
-                
-                for (path, remoteMeta) in changedFiles {
-                    // 控制并发数
-                    if activeDownloads >= maxConcurrentTransfers {
-                        if let result = await group.next(), let (bytes, fileInfo) = result {
-                            totalDownloadBytes += bytes
-                            syncedFiles.append(fileInfo)
-                            completedOps += 1
-                            activeDownloads -= 1
-                            
-                            await MainActor.run {
-                                self.addDownloadBytes(bytes)
-                                self.updateFolderStatus(folder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                            }
-                        }
-                    }
-                    
-                    activeDownloads += 1
-                    
-                    group.addTask { [weak self] in
-                        guard let self = self else { return nil }
-                        
-                        do {
-                            // 检查本地文件是否存在，如果存在则获取大小来判断
-                            let localURL = folder.localPath.appendingPathComponent(path)
-                            let fileManager = FileManager.default
-                            var fileSize: Int64 = 0
-                            
-                            if fileManager.fileExists(atPath: localURL.path),
-                               let attributes = try? fileManager.attributesOfItem(atPath: localURL.path),
-                               let size = attributes[.size] as? Int64 {
-                                fileSize = size
-                            }
-                            
-                            // 对于大文件（>1MB），尝试使用块级增量同步
-                            // 如果本地文件不存在或很小，也尝试块级同步（可能远程是大文件）
-                            if fileSize >= self.chunkSyncThreshold {
-                                return try await self.downloadFileWithChunks(
-                                    path: path,
-                                    remoteMeta: remoteMeta,
-                                    folder: folder,
-                                    peer: peer,
-                                    peerID: peerID,
-                                    localMetadata: localMetadata
-                                )
-                            } else {
-                                // 小文件使用全量下载
-                                return try await self.downloadFileFull(
-                                    path: path,
-                                    remoteMeta: remoteMeta,
-                                    folder: folder,
-                                    peer: peer,
-                                    peerID: peerID,
-                                    localMetadata: localMetadata
-                                )
-                            }
-                        } catch {
-                            print("[SyncManager] ❌ 下载文件失败: \(path) - \(error.localizedDescription)")
-                            return nil
-                        }
-                    }
-                }
-                
-                // 处理剩余任务
-                for await result in group {
-                    if let (bytes, fileInfo) = result {
-                        totalDownloadBytes += bytes
-                        syncedFiles.append(fileInfo)
-                        completedOps += 1
-                        
-                        await MainActor.run {
-                            self.addDownloadBytes(bytes)
-                            self.updateFolderStatus(folder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                        }
-                    }
-                }
-            }
-            
-            // 5b. Download conflict files (save to .conflict path, keep local) - 并行下载
-            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
-                for (path, remoteMeta) in conflictFiles {
-                    let fileName = (path as NSString).lastPathComponent
-                    
-                    group.addTask { [weak self] in
-                        guard let self = self else { return nil }
-                        
-                        do {
-                            let dataRes: SyncResponse = try await self.sendSyncRequest(
-                                .getFileData(syncID: folder.syncID, path: path),
-                                to: peer,
-                                peerID: peerID,
-                                timeout: 180.0,
-                                maxRetries: 3,
-                                folder: folder
-                            )
-                            
-                            guard case .fileData(_, _, let data) = dataRes else {
-                                return nil
-                            }
-                            
-                            let pathDir = (path as NSString).deletingLastPathComponent
-                            let parent = pathDir.isEmpty ? folder.localPath : folder.localPath.appendingPathComponent(pathDir)
-                            let base = (fileName as NSString).deletingPathExtension
-                            let ext = (fileName as NSString).pathExtension
-                            let suffix = ext.isEmpty ? "" : ".\(ext)"
-                            let conflictName = "\(base).conflict.\(String(peerID.prefix(8))).\(Int(remoteMeta.mtime.timeIntervalSince1970))\(suffix)"
-                            let conflictURL = parent.appendingPathComponent(conflictName)
-                            let fileManager = FileManager.default
-                            
-                            // 检查并创建父目录
-                            if !fileManager.fileExists(atPath: parent.path) {
-                                try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-                            }
-                            
-                            // 检查写入权限
-                            guard fileManager.isWritableFile(atPath: parent.path) else {
-                                throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parent.path)"])
-                            }
-                            
-                            try data.write(to: conflictURL)
-                            
-                            let relConflict = pathDir.isEmpty ? conflictName : "\(pathDir)/\(conflictName)"
-                            let cf = ConflictFile(syncID: folder.syncID, relativePath: path, conflictPath: relConflict, remotePeerID: peerID)
-                            try? StorageManager.shared.addConflict(cf)
-                            
-                            let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-                            
-                            return (Int64(data.count), SyncLog.SyncedFileInfo(
-                                path: path,
-                                fileName: fileName,
-                                folderName: folderName,
-                                size: Int64(data.count),
-                                operation: .conflict
-                            ))
-                        } catch {
-                            print("[SyncManager] ❌ 下载冲突文件失败: \(path) - \(error.localizedDescription)")
-                            return nil
-                        }
-                    }
-                }
-                
-                // 处理所有冲突文件下载结果
-                for await result in group {
-                    if let (bytes, fileInfo) = result {
-                        totalDownloadBytes += bytes
-                        syncedFiles.append(fileInfo)
-                        completedOps += 1
-                        
-                        await MainActor.run {
-                            self.addDownloadBytes(bytes)
-                            self.updateFolderStatus(folder.id, status: .syncing, message: "冲突处理完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                        }
-                    }
-                }
-            }
-            
-            // 6. Upload files to remote - 并行上传
-            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
-                var activeUploads = 0
-                
-                for (path, localMeta) in filesToUpload {
-                    // 控制并发数
-                    if activeUploads >= maxConcurrentTransfers {
-                        if let result = await group.next(), let (bytes, fileInfo) = result {
-                            totalUploadBytes += bytes
-                            syncedFiles.append(fileInfo)
-                            completedOps += 1
-                            activeUploads -= 1
-                            
-                            await MainActor.run {
-                                self.addUploadBytes(bytes)
-                                self.updateFolderStatus(folder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                            }
-                        }
-                    }
-                    
-                    activeUploads += 1
-                    
-                    group.addTask { [weak self] in
-                        guard let self = self else { return nil }
-                        
-                        do {
-                            let fileURL = folder.localPath.appendingPathComponent(path)
-                            let fileManager = FileManager.default
-                            
-                            // 检查文件是否存在和可读
-                            guard fileManager.fileExists(atPath: fileURL.path) else {
-                                print("[SyncManager] ⚠️ 文件不存在（跳过上传）: \(fileURL.path)")
-                                return nil
-                            }
-                            
-                            guard fileManager.isReadableFile(atPath: fileURL.path) else {
-                                print("[SyncManager] ⚠️ 文件无读取权限（跳过上传）: \(fileURL.path)")
-                                return nil
-                            }
-                            
-                            // 获取文件大小
-                            let fileAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
-                            let fileSize = (fileAttributes[.size] as? Int64) ?? 0
-                            
-                            // 对于大文件，使用块级增量同步
-                            if fileSize >= self.chunkSyncThreshold {
-                                return try await self.uploadFileWithChunks(
-                                    path: path,
-                                    localMeta: localMeta,
-                                    folder: folder,
-                                    peer: peer,
-                                    peerID: peerID,
-                                    myPeerID: myPeerID,
-                                    remoteEntries: remoteEntries,
-                                    shouldUpload: shouldUpload
-                                )
-                            } else {
-                                // 小文件使用全量上传
-                                return try await self.uploadFileFull(
-                                    path: path,
-                                    localMeta: localMeta,
-                                    folder: folder,
-                                    peer: peer,
-                                    peerID: peerID,
-                                    myPeerID: myPeerID,
-                                    remoteEntries: remoteEntries,
-                                    shouldUpload: shouldUpload
-                                )
-                            }
-                        } catch {
-                            // 如果是跳过错误（文件已同步），不记录为错误
-                            if (error as NSError).code == -2 {
-                                return nil
-                            }
-                            print("[SyncManager] ❌ 上传文件失败: \(path) - \(error.localizedDescription)")
-                            return nil
-                        }
-                    }
-                }
-                
-                // 处理剩余任务
-                for await result in group {
-                    if let (bytes, fileInfo) = result {
-                        totalUploadBytes += bytes
-                        syncedFiles.append(fileInfo)
-                        completedOps += 1
-                        
-                        await MainActor.run {
-                            self.addUploadBytes(bytes)
-                            self.updateFolderStatus(folder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
-                        }
-                    }
-                }
-            }
-            
-            // 同步完成后，重新计算本地状态，确保 lastKnownLocalPaths 准确
-            // 这很重要，因为同步过程中可能有文件被跳过（正在写入）
-            let (_, finalMetadata, _) = await calculateFullState(for: folder)
-            let finalPaths = Set(finalMetadata.keys)
-            lastKnownLocalPaths[folder.syncID] = finalPaths
-            
-            let totalBytes = totalDownloadBytes + totalUploadBytes
-            
-            await MainActor.run {
-                self.updateFolderStatus(folder.id, status: .synced, message: "同步完成", progress: 1.0)
-                self.syncIDManager.updateLastSyncedAt(folder.syncID)
-                // 同步成功，更新对等点在线状态
-                self.peerManager.updateOnlineStatus(peerID, isOnline: true)
-                self.updateDeviceCounts()
-                // 设置同步冷却时间，防止立即触发新的同步
-                self.syncCooldown[folder.syncID] = Date()
-                // 设置按 peer-folder 对的同步冷却时间
-                let cooldownKey = "\(peerID):\(folder.syncID)"
-                self.peerSyncCooldown[cooldownKey] = Date()
-            }
-            let direction: SyncLog.Direction = mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)
-            let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: direction, bytesTransferred: totalBytes, filesCount: totalOps, startedAt: startedAt, completedAt: Date(), syncedFiles: syncedFiles.isEmpty ? nil : syncedFiles)
-            try? StorageManager.shared.addSyncLog(log)
-        } catch {
-            let duration = Date().timeIntervalSince(startedAt)
-            print("[SyncManager] ❌ [performSync] 同步失败!")
-            print("[SyncManager]   文件夹: \(folder.syncID)")
-            print("[SyncManager]   对等点: \(peerID.prefix(12))...")
-            print("[SyncManager]   耗时: \(String(format: "%.2f", duration)) 秒")
-            print("[SyncManager]   错误类型: \(type(of: error))")
-            print("[SyncManager]   错误描述: \(error)")
-            if let nsError = error as NSError? {
-                print("[SyncManager]   NSError code: \(nsError.code)")
-                print("[SyncManager]   NSError domain: \(nsError.domain)")
-                if !nsError.userInfo.isEmpty {
-                    print("[SyncManager]   NSError userInfo: \(nsError.userInfo)")
-                }
-            }
-            
-            await MainActor.run {
-                self.removeFolderPeer(folder.syncID, peerID: peerID)
-                let errorMessage = error.localizedDescription.isEmpty ? "同步失败: \(error)" : error.localizedDescription
-                self.updateFolderStatus(folder.id, status: .error, message: errorMessage)
-                
-                // 检查是否是连接错误，如果是则更新设备状态
-                let errorString = String(describing: error)
-                let isConnectionError = errorString.contains("peerNotFound") ||
-                                       errorString.contains("TimedOut") ||
-                                       errorString.contains("timeout") ||
-                                       errorString.contains("connection") ||
-                                       errorString.contains("Connection") ||
-                                       errorString.contains("unreachable") ||
-                                       errorString.contains("refused")
-                
-                if isConnectionError {
-                    // 连接错误，但不立即标记为离线，等待定期检查确认
-                    print("[SyncManager] ⚠️ 同步失败（连接错误），等待定期检查确认设备状态: \(peerID.prefix(12))...")
-                }
-            }
-            let log = SyncLog(syncID: folder.syncID, folderID: folder.id, peerID: peerID, direction: .bidirectional, bytesTransferred: 0, filesCount: 0, startedAt: startedAt, completedAt: nil, errorMessage: error.localizedDescription)
-            do {
-                try StorageManager.shared.addSyncLog(log)
-            } catch {
-                print("[SyncManager] ⚠️ 无法保存同步日志: \(error)")
-            }
-        }
-    }
     
     @MainActor
-    private func addFolderPeer(_ syncID: String, peerID: String) {
+    func addFolderPeer(_ syncID: String, peerID: String) {
         syncIDManager.addPeer(peerID, to: syncID)
         updatePeerCount(for: syncID)
     }
     
     @MainActor
-    private func removeFolderPeer(_ syncID: String, peerID: String) {
+    func removeFolderPeer(_ syncID: String, peerID: String) {
         syncIDManager.removePeer(peerID, from: syncID)
         updatePeerCount(for: syncID)
     }
@@ -1898,28 +970,41 @@ public class SyncManager: ObservableObject {
                 peerManager.isOnline(peerID)
             }.count
             
-            folders[index].peerCount = onlinePeerCount
+            // 创建新的文件夹对象以触发 @Published 更新
+            var updatedFolder = folders[index]
+            updatedFolder.peerCount = onlinePeerCount
+            folders[index] = updatedFolder
             // 持久化保存更新
             do {
-                try StorageManager.shared.saveFolder(folders[index])
+                try StorageManager.shared.saveFolder(updatedFolder)
             } catch {
                 print("[SyncManager] ⚠️ 无法保存文件夹 peerCount 更新: \(error)")
             }
         }
     }
     
-    private func updateFolderStatus(_ id: UUID, status: SyncStatus, message: String? = nil, progress: Double = 0.0) {
+    func updateFolderStatus(_ id: UUID, status: SyncStatus, message: String? = nil, progress: Double = 0.0) {
         if let index = folders.firstIndex(where: { $0.id == id }) {
-            folders[index].status = status
-            folders[index].lastSyncMessage = message
-            folders[index].syncProgress = progress
+            // 创建新的文件夹对象以触发 @Published 更新
+            var updatedFolder = folders[index]
+            updatedFolder.status = status
+            updatedFolder.lastSyncMessage = message
+            updatedFolder.syncProgress = progress
             if status == .synced {
-                folders[index].lastSyncedAt = Date()
+                updatedFolder.lastSyncedAt = Date()
             }
+            folders[index] = updatedFolder
             
             // 持久化保存状态更新，确保重启后能恢复
+            // 注意：保存时使用最新的 folder 对象，确保包含所有最新值（包括统计值）
             do {
-                try StorageManager.shared.saveFolder(folders[index])
+                // 再次获取最新的 folder 对象，确保保存的是最新状态（包括统计值）
+                if let latestFolder = folders.first(where: { $0.id == id }) {
+                    try StorageManager.shared.saveFolder(latestFolder)
+                } else {
+                    // 如果找不到，使用 updatedFolder（虽然不太可能发生）
+                    try StorageManager.shared.saveFolder(updatedFolder)
+                }
             } catch {
                 print("[SyncManager] ⚠️ 无法保存文件夹状态更新: \(error)")
                 print("[SyncManager] 错误详情: \(error.localizedDescription)")
@@ -1941,19 +1026,36 @@ public class SyncManager: ObservableObject {
             return
         }
         
+        // 先更新状态，但不影响统计值（保留现有统计值）
         updateFolderStatus(folder.id, status: .syncing, message: "Scanning local files...")
         
         Task {
             // 1. Calculate the current state
-            let (_, metadata, folderCount) = await calculateFullState(for: folder)
+            // 注意：这里计算状态是为了同步，统计更新应该通过 refreshFileCount 进行
+            // 但为了同步需要，我们也需要更新统计值
+            // 注意：这里更新统计值是为了同步开始时显示最新状态
+            // SyncEngine 同步完成后也会更新统计值，但那是同步后的最终状态
+            let (_, metadata, folderCount, totalSize) = await calculateFullState(for: folder)
             
             await MainActor.run {
                 if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
-                    self.folders[index].fileCount = metadata.count
-                    self.folders[index].folderCount = folderCount
+                    // 创建新的文件夹对象以触发 @Published 更新
+                    // 重要：原子性更新，一次性设置所有统计值，避免中间状态
+                    var updatedFolder = self.folders[index]
+                    
+                    // 直接使用新计算的值（即使为0也是有效值）
+                    // 原子性更新：一次性设置所有统计值，避免 UI 看到中间状态
+                    updatedFolder.fileCount = metadata.count
+                    updatedFolder.folderCount = folderCount
+                    updatedFolder.totalSize = totalSize
+                    
+                    // 一次性替换，确保 UI 看到的是完整的新值
+                    self.folders[index] = updatedFolder
+                    // 手动触发 objectWillChange 以确保 UI 更新
+                    self.objectWillChange.send()
                     // 持久化保存统计信息更新
                     do {
-                        try StorageManager.shared.saveFolder(self.folders[index])
+                        try StorageManager.shared.saveFolder(updatedFolder)
                     } catch {
                         print("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
                     }
@@ -1985,8 +1087,6 @@ public class SyncManager: ObservableObject {
     
     private let indexingBatchSize = 50
     private let maxConcurrentFileProcessing = 4 // 最大并发文件处理数
-    private let chunkSyncThreshold: Int64 = 1 * 1024 * 1024 // 1MB，超过此大小的文件使用块级增量同步
-    private let maxConcurrentTransfers = 3 // 最大并发传输数（上传/下载）
     
     /// 流式计算文件哈希（避免一次性加载大文件到内存）
     nonisolated private func computeFileHash(fileURL: URL) throws -> String {
@@ -2006,509 +1106,9 @@ public class SyncManager: ObservableObject {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
     
-    /// 全量下载文件
-    private func downloadFileFull(
-        path: String,
-        remoteMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        localMetadata: [String: FileMetadata]
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let fileName = (path as NSString).lastPathComponent
-        let dataRes: SyncResponse = try await sendSyncRequest(
-            .getFileData(syncID: folder.syncID, path: path),
-            to: peer,
-            peerID: peerID,
-            timeout: 180.0,
-            maxRetries: 3,
-            folder: folder
-        )
-        
-        guard case .fileData(_, _, let data) = dataRes else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载响应格式错误"])
-        }
-        
-        let localURL = folder.localPath.appendingPathComponent(path)
-        let parentDir = localURL.deletingLastPathComponent()
-        let fileManager = FileManager.default
-        
-        // 检查并创建父目录
-        if !fileManager.fileExists(atPath: parentDir.path) {
-            try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        }
-        
-        // 检查写入权限
-        guard fileManager.isWritableFile(atPath: parentDir.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parentDir.path)"])
-        }
-        
-        try data.write(to: localURL)
-        
-        // 合并 Vector Clock
-        var vc = remoteMeta.vectorClock ?? VectorClock()
-        if let localVC = localMetadata[path]?.vectorClock {
-            vc.merge(with: localVC)
-        }
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
-        
-        let pathDir = (path as NSString).deletingLastPathComponent
-        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-        
-        return (Int64(data.count), SyncLog.SyncedFileInfo(
-            path: path,
-            fileName: fileName,
-            folderName: folderName,
-            size: Int64(data.count),
-            operation: .download
-        ))
-    }
     
-    /// 使用块级增量同步下载文件
-    private func downloadFileWithChunks(
-        path: String,
-        remoteMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        localMetadata: [String: FileMetadata]
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let fileName = (path as NSString).lastPathComponent
-        
-        // 1. 获取远程文件的块列表
-        let chunksRes: SyncResponse = try await sendSyncRequest(
-            .getFileChunks(syncID: folder.syncID, path: path),
-            to: peer,
-            peerID: peerID,
-            timeout: 90.0,
-            maxRetries: 3,
-            folder: folder
-        )
-        
-        guard case .fileChunks(_, _, let remoteChunkHashes) = chunksRes else {
-            // 如果块级同步失败，回退到全量下载
-            print("[SyncManager] ⚠️ 块级同步失败，回退到全量下载: \(path)")
-            return try await downloadFileFull(path: path, remoteMeta: remoteMeta, folder: folder, peer: peer, peerID: peerID, localMetadata: localMetadata)
-        }
-        
-        // 2. 检查本地已有的块
-        let hasBlocks = StorageManager.shared.hasBlocks(hashes: remoteChunkHashes)
-        let missingHashes = remoteChunkHashes.filter { !(hasBlocks[$0] ?? false) }
-        
-        // 3. 下载缺失的块（并行下载）
-        var downloadedBytes: Int64 = 0
-        if !missingHashes.isEmpty {
-            await withTaskGroup(of: (String, Data)?.self) { group in
-                for chunkHash in missingHashes {
-                    group.addTask { [weak self] in
-                        guard let self = self else { return nil }
-                        do {
-                            let chunkRes: SyncResponse = try await self.sendSyncRequest(
-                                .getChunkData(syncID: folder.syncID, chunkHash: chunkHash),
-                                to: peer,
-                                peerID: peerID,
-                                timeout: 90.0,
-                                maxRetries: 3,
-                                folder: folder
-                            )
-                            
-                            guard case .chunkData(_, _, let data) = chunkRes else {
-                                return nil
-                            }
-                            
-                            // 保存块
-                            try StorageManager.shared.saveBlock(hash: chunkHash, data: data)
-                            return (chunkHash, data)
-                        } catch {
-                            print("[SyncManager] ⚠️ 下载块失败: \(chunkHash.prefix(8))... - \(error.localizedDescription)")
-                            return nil
-                        }
-                    }
-                }
-                
-                for await result in group {
-                    if let (_, data) = result {
-                        downloadedBytes += Int64(data.count)
-                    }
-                }
-            }
-        }
-        
-        // 4. 从块重建文件
-        let localURL = folder.localPath.appendingPathComponent(path)
-        let parentDir = localURL.deletingLastPathComponent()
-        let fileManager = FileManager.default
-        
-        if !fileManager.fileExists(atPath: parentDir.path) {
-            try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        }
-        
-        guard fileManager.isWritableFile(atPath: parentDir.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parentDir.path)"])
-        }
-        
-        // 从块重建文件
-        var fileData = Data()
-        for chunkHash in remoteChunkHashes {
-            guard let chunkData = try StorageManager.shared.getBlock(hash: chunkHash) else {
-                throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "块不存在: \(chunkHash)"])
-            }
-            fileData.append(chunkData)
-        }
-        
-        try fileData.write(to: localURL, options: [.atomic])
-        
-        // 合并 Vector Clock
-        var vc = remoteMeta.vectorClock ?? VectorClock()
-        if let localVC = localMetadata[path]?.vectorClock {
-            vc.merge(with: localVC)
-        }
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
-        
-        let pathDir = (path as NSString).deletingLastPathComponent
-        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-        
-        return (Int64(fileData.count), SyncLog.SyncedFileInfo(
-            path: path,
-            fileName: fileName,
-            folderName: folderName,
-            size: Int64(fileData.count),
-            operation: .download
-        ))
-    }
-    
-    /// 全量上传文件
-    private func uploadFileFull(
-        path: String,
-        localMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        myPeerID: String,
-        remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?) -> Bool
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let fileName = (path as NSString).lastPathComponent
-        let fileURL = folder.localPath.appendingPathComponent(path)
-        let fileManager = FileManager.default
-        
-        // 检查文件是否存在和可读
-        guard fileManager.fileExists(atPath: fileURL.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件不存在: \(path)"])
-        }
-        
-        guard fileManager.isReadableFile(atPath: fileURL.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
-        }
-        
-        // 再次检查是否需要上传（可能在准备上传时文件已被同步）
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta) {
-            throw NSError(domain: "SyncManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
-        }
-        
-        let data = try Data(contentsOf: fileURL)
-        
-        // 更新 Vector Clock
-        var vc = localMeta.vectorClock ?? VectorClock()
-        vc.increment(for: myPeerID)
-        
-        // 发送文件数据
-        let putRes: SyncResponse = try await sendSyncRequest(
-            .putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc),
-            to: peer,
-            peerID: peerID,
-            timeout: 180.0,
-            maxRetries: 3,
-            folder: folder
-        )
-        
-        guard case .putAck = putRes else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "上传响应格式错误"])
-        }
-        
-        // 保存 Vector Clock
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
-        
-        let pathDir = (path as NSString).deletingLastPathComponent
-        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-        
-        return (Int64(data.count), SyncLog.SyncedFileInfo(
-            path: path,
-            fileName: fileName,
-            folderName: folderName,
-            size: Int64(data.count),
-            operation: .upload
-        ))
-    }
-    
-    /// 使用块级增量同步上传文件
-    private func uploadFileWithChunks(
-        path: String,
-        localMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        myPeerID: String,
-        remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?) -> Bool
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let fileName = (path as NSString).lastPathComponent
-        let fileURL = folder.localPath.appendingPathComponent(path)
-        let fileManager = FileManager.default
-        
-        // 检查文件是否存在和可读
-        guard fileManager.fileExists(atPath: fileURL.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件不存在: \(path)"])
-        }
-        
-        guard fileManager.isReadableFile(atPath: fileURL.path) else {
-            throw NSError(domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
-        }
-        
-        // 再次检查是否需要上传
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta) {
-            throw NSError(domain: "SyncManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
-        }
-        
-        // 1. 使用 FastCDC 切分文件为块
-        let cdc = FastCDC(min: 4096, avg: 16384, max: 65536)
-        let chunks = try cdc.chunk(fileURL: fileURL)
-        let chunkHashes = chunks.map { $0.hash }
-        
-        // 2. 保存块到本地存储（用于后续去重）
-        for chunk in chunks {
-            if !StorageManager.shared.hasBlock(hash: chunk.hash) {
-                try StorageManager.shared.saveBlock(hash: chunk.hash, data: chunk.data)
-            }
-        }
-        
-        // 3. 更新 Vector Clock
-        var vc = localMeta.vectorClock ?? VectorClock()
-        vc.increment(for: myPeerID)
-        
-        // 4. 上传块列表
-        let chunksRes: SyncResponse = try await sendSyncRequest(
-            .putFileChunks(syncID: folder.syncID, path: path, chunkHashes: chunkHashes, vectorClock: vc),
-            to: peer,
-            peerID: peerID,
-            timeout: 90.0,
-            maxRetries: 3,
-            folder: folder
-        )
-        
-        var uploadedBytes: Int64 = 0
-        
-        // 检查响应类型
-        switch chunksRes {
-        case .fileChunksAck:
-            // 所有块都存在，文件已重建完成，没有实际传输字节
-            uploadedBytes = 0
-            
-        case .error(let errorMsg) where errorMsg.hasPrefix("缺失块:"):
-            // 远程缺失某些块，需要上传这些块
-            let missingHashesStr = errorMsg.replacingOccurrences(of: "缺失块: ", with: "")
-            let missingHashes = missingHashesStr.split(separator: ",").map { String($0) }
-            
-            // 并行上传缺失的块
-            await withTaskGroup(of: (String, Int64)?.self) { group in
-                for chunkHash in missingHashes {
-                    group.addTask {
-                        guard let chunk = chunks.first(where: { $0.hash == chunkHash }) else {
-                            return nil
-                        }
-                        
-                        do {
-                            let putChunkRes: SyncResponse = try await self.sendSyncRequest(
-                                .putChunkData(syncID: folder.syncID, chunkHash: chunkHash, data: chunk.data),
-                                to: peer,
-                                peerID: peerID,
-                                timeout: 180.0,
-                                maxRetries: 3,
-                                folder: folder
-                            )
-                            
-                            if case .chunkAck = putChunkRes {
-                                return (chunkHash, Int64(chunk.data.count))
-                            }
-                        } catch {
-                            print("[SyncManager] ⚠️ 上传块失败: \(chunkHash) - \(error.localizedDescription)")
-                        }
-                        return nil
-                    }
-                }
-                
-                for await result in group {
-                    if let (_, bytes) = result {
-                        uploadedBytes += bytes
-                    }
-                }
-            }
-            
-            // 上传完缺失的块后，再次发送 putFileChunks 确认
-            let confirmRes: SyncResponse = try await sendSyncRequest(
-                .putFileChunks(syncID: folder.syncID, path: path, chunkHashes: chunkHashes, vectorClock: vc),
-                to: peer,
-                peerID: peerID,
-                timeout: 90.0,
-                maxRetries: 3,
-                folder: folder
-            )
-            
-            guard case .fileChunksAck = confirmRes else {
-                // 确认失败，回退到全量上传
-                print("[SyncManager] ⚠️ 块级同步确认失败，回退到全量上传: \(path)")
-                return try await uploadFileFull(
-                    path: path,
-                    localMeta: localMeta,
-                    folder: folder,
-                    peer: peer,
-                    peerID: peerID,
-                    myPeerID: myPeerID,
-                    remoteEntries: remoteEntries,
-                    shouldUpload: shouldUpload
-                )
-            }
-            
-            // uploadedBytes 已经在上面计算了实际传输的缺失块的大小，不需要重新计算
-            
-        default:
-            // 其他错误，回退到全量上传
-            print("[SyncManager] ⚠️ 块级同步失败，回退到全量上传: \(path)")
-            return try await uploadFileFull(
-                path: path,
-                localMeta: localMeta,
-                folder: folder,
-                peer: peer,
-                peerID: peerID,
-                myPeerID: myPeerID,
-                remoteEntries: remoteEntries,
-                shouldUpload: shouldUpload
-            )
-        }
-        
-        // 保存 Vector Clock
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
-        
-        let pathDir = (path as NSString).deletingLastPathComponent
-        let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
-        
-        return (uploadedBytes, SyncLog.SyncedFileInfo(
-            path: path,
-            fileName: fileName,
-            folderName: folderName,
-            size: Int64(chunks.reduce(0) { $0 + $1.data.count }),
-            operation: .upload
-        ))
-    }
-    
-    private func calculateFullState(for folder: SyncFolder) async -> (MerkleSearchTree, [String: FileMetadata], folderCount: Int) {
-        let url = folder.localPath
-        let syncID = folder.syncID
-        let mst = MerkleSearchTree()
-        var metadata: [String: FileMetadata] = [:]
-        var folderCount = 0
-        let fileManager = FileManager.default
-        
-        // 先收集所有文件路径（避免在枚举过程中处理）
-        var filePaths: [(URL, String)] = []
-        let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .contentModificationDateKey]
-        let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
-        
-        // 第一阶段：收集文件路径
-        while let fileURL = enumerator?.nextObject() as? URL {
-            do {
-                guard fileManager.isReadableFile(atPath: fileURL.path) else {
-                    continue
-                }
-                
-                let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
-                var relativePath = fileURL.path.replacingOccurrences(of: url.path, with: "")
-                if relativePath.hasPrefix("/") { relativePath.removeFirst() }
-                
-                if isIgnored(relativePath, folder: folder) { continue }
-                
-                if resourceValues.isDirectory == true {
-                    if !relativePath.isEmpty {
-                        folderCount += 1
-                    }
-                } else {
-                    // 检查文件是否正在写入
-                    let fileKey = fileURL.path
-                    if let stability = fileStabilityCheck[fileKey] {
-                        let timeSinceLastCheck = Date().timeIntervalSince(stability.lastCheck)
-                        if timeSinceLastCheck < fileStabilityDelay {
-                            continue
-                        }
-                    }
-                    
-                    // 检查0字节文件
-                    if let fileAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                       let fileSize = fileAttributes[.size] as? Int64,
-                       fileSize == 0,
-                       let mtime = resourceValues.contentModificationDate {
-                        let timeSinceModification = Date().timeIntervalSince(mtime)
-                        if timeSinceModification < fileStabilityDelay {
-                            continue
-                        }
-                    }
-                    
-                    filePaths.append((fileURL, relativePath))
-                }
-            } catch {
-                continue
-            }
-        }
-        
-        // 第二阶段：并行处理文件（使用任务组）
-        await withTaskGroup(of: (String, FileMetadata)?.self) { group in
-            var activeTasks = 0
-            var processedCount = 0
-            
-            for (fileURL, relativePath) in filePaths {
-                // 控制并发数
-                if activeTasks >= maxConcurrentFileProcessing {
-                    // 等待一个任务完成
-                    if let result = await group.next(), let (path, meta) = result {
-                        metadata[path] = meta
-                        mst.insert(key: path, value: meta.hash)
-                        activeTasks -= 1
-                        processedCount += 1
-                        if processedCount % indexingBatchSize == 0 {
-                            await Task.yield()
-                        }
-                    }
-                }
-                
-                activeTasks += 1
-                group.addTask { [weak self] in
-                    guard let self = self else { return nil }
-                    
-                    do {
-                        let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
-                        let mtime = resourceValues.contentModificationDate ?? Date()
-                        let vc = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
-                        
-                        // 使用流式哈希计算（避免大文件一次性加载到内存）
-                        let hash = try self.computeFileHash(fileURL: fileURL)
-                        
-                        return (relativePath, FileMetadata(hash: hash, mtime: mtime, vectorClock: vc))
-                    } catch {
-                        print("[SyncManager] ⚠️ 无法处理文件（跳过）: \(fileURL.path) - \(error.localizedDescription)")
-                        return nil
-                    }
-                }
-            }
-            
-            // 处理剩余任务
-            for await result in group {
-                if let (path, meta) = result {
-                    metadata[path] = meta
-                    mst.insert(key: path, value: meta.hash)
-                }
-            }
-        }
-        
-        return (mst, metadata, folderCount)
+    func calculateFullState(for folder: SyncFolder) async -> (MerkleSearchTree, [String: FileMetadata], folderCount: Int, totalSize: Int64) {
+        return await folderStatistics.calculateFullState(for: folder)
     }
     
     /// 检查 syncID 是否存在于网络上的其他设备
@@ -2561,7 +1161,7 @@ public class SyncManager: ObservableObject {
     
     /// 更新设备统计（内部方法）
     /// 注意：统计逻辑与 allDevices 保持一致，只统计 .online 和 .offline 状态的设备
-    private func updateDeviceCounts() {
+    func updateDeviceCounts() {
         // 先更新设备列表
         updateAllDevices()
         

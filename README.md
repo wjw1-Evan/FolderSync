@@ -28,12 +28,14 @@
 - 开发语言：Swift 5.9+，利用Swift Concurrency（async/await）、Combine框架实现异步任务与事件驱动，适配macOS 14+系统版本。
 - 开发工具：Xcode 15+，使用SwiftUI构建GUI。
 - 依赖管理：Swift Package Manager (SPM)。
+- **外部依赖**：
+    - `swift-crypto` (4.0.0+)：用于加密和哈希计算（Ed25519 密钥对、SHA256 哈希等）
 
 ## 2. 核心技术模块
 
 - **P2P通信 (原生 TCP + TLS)**：使用 macOS 原生 Network 框架实现 TCP 客户端/服务器通信，通过 UDP 广播实现局域网自动发现。设备间通过原生 TCP 连接直接通信，支持可选的 TLS 加密，无需依赖第三方 P2P 框架。
 - **系统集成 (ServiceManagement)**：利用 `ServiceManagement` 框架（`SMAppService`）实现用户可控的“开机自动启动”功能。
-- **文件监控 (FSEvents)**：利用 macOS 原生 FSEvents API 实现高效的目录递归监控，捕获文件创建、修改、删除、重命名等事件。采用防抖机制（2 秒延迟）避免频繁同步。
+- **文件监控 (FSEvents)**：利用 macOS 原生 FSEvents API 实现高效的目录递归监控，捕获文件创建、修改、删除、重命名等事件。采用防抖机制（2 秒延迟）避免频繁同步。实现文件写入稳定性检测，文件大小稳定 3 秒后才认为写入完成，避免同步不完整的文件。
 - **增量同步 (CDC & Merkle Search Trees)**：
     - **内容定义切分 (CDC)**：使用 FastCDC 算法将文件切分为变长数据块，提高数据去重率并解决“插入/删除字节导致偏移失效”的问题。
     - **状态同步 (MST)**：使用 **Merkle Search Trees (MST)** 维护集群状态，通过对比树哈希在 $O(\log n)$ 时间内快速定位差异文件。
@@ -41,9 +43,10 @@
 - **设备身份与安全**：
     - **设备身份**：每个设备在首次启动时生成随机 Ed25519 密钥对，PeerID 作为全球唯一标识。
     - **密钥存储**：密钥对存储在本地文件中，使用密码加密保护。密码存储在本地文件中，避免每次启动时要求用户输入系统密码。
-    - **对等点管理**：实现智能对等点注册机制，确保发现的设备能够正确注册并建立连接。
+    - **对等点管理**：实现智能对等点注册机制（PeerRegistrationService），确保发现的设备能够正确注册并建立连接。支持对等点注册重试和持久化存储。
 - **存储机制**：使用 JSON 文件存储文件夹配置、文件索引、Vector Clocks、设备状态、同步日志，避免 SQLite 的 I/O 错误问题。
 - **块存储**：实现了块级别的去重存储系统，相同内容的块只存储一次，大幅节省存储空间。块按哈希值组织存储，支持快速查找和访问。
+- **文件统计**：实现文件夹统计功能，包括文件数量、文件夹数量和总大小统计。使用流式哈希计算（64KB 缓冲区）避免大文件一次性加载到内存。支持并行处理文件（最大 4 个并发），批量处理（每 50 个文件 yield 一次）避免阻塞主线程。
 - **NAT 穿透与中继**：实现了 AutoNAT 检测和 Circuit Relay 中继服务，支持在 NAT 环境下的设备发现和通信，当直连失败时可通过中继服务器进行通信。
 
 # 三、系统架构设计
@@ -52,9 +55,23 @@
 
 采用 **单进程应用架构**，各层通过直接调用和 Swift Concurrency 进行通信：
 
-1. **表现层 (SwiftUI Client)**：提供设备管理、同步文件夹配置、状态实时监控、冲突解决、同步历史等界面。支持菜单栏常驻、单实例运行。
-2. **业务逻辑层 (Sync Engine)**：负责文件索引管理、因果追踪、冲突策略执行、同步任务调度、设备状态监控。通过 `@MainActor` 和 `ObservableObject` 与 UI 层进行状态同步。实现多点同步（同时向多个设备同步）、防抖机制、文件/文件夹数量统计等功能。
+1. **表现层 (SwiftUI Client)**：提供设备管理、同步文件夹配置、状态实时监控、冲突解决、同步历史等界面。支持菜单栏常驻、单实例运行。主要组件包括：
+   - `MainDashboard`：主仪表盘，显示同步状态、速度、设备数量
+   - `ConflictCenter`：冲突解决中心，管理冲突文件
+   - `SyncHistoryView`：同步历史视图，查看详细同步记录
+   - `ExcludeRulesView`：排除规则配置界面
+   - `AllPeersListView`：所有设备列表视图
+
+2. **业务逻辑层 (模块化设计)**：采用模块化架构，各模块职责清晰：
+   - **SyncManager**：核心同步管理器，负责文件夹管理、同步协调、状态管理。通过 `@MainActor` 和 `ObservableObject` 与 UI 层进行状态同步。
+   - **SyncEngine**：同步引擎，负责对等点注册、同步协调和文件同步执行。实现同步冷却期机制（避免频繁同步）、对等点注册重试等。
+   - **FileTransfer**：文件传输管理器，负责文件的上传和下载操作。支持全量下载和块级增量同步，自动选择最优传输方式（超过 1MB 的文件使用块级同步）。
+   - **FolderStatistics**：文件夹统计管理器，负责文件数量、文件夹数量和总大小的统计计算。使用流式哈希计算避免大文件一次性加载到内存。
+   - **FolderMonitor**：文件夹监控管理器，负责文件系统事件监控、文件稳定性检测和同步触发防抖。实现文件写入稳定性检测（文件大小稳定 3 秒后才认为写入完成）。
+   - **P2PHandlers**：P2P 消息处理器，负责处理来自对等点的同步请求和响应。
+
 3. **网络层 (原生 TCP/TLS + LAN Discovery + NAT 穿透)**：使用原生 TCP 客户端/服务器实现设备间通信，支持可选的 TLS 加密。通过 UDP 广播实现局域网自动发现。包括对等点发现、连接管理、地址转换、对等点注册服务、NAT 穿透检测和中继服务等。通过异步回调与业务逻辑层通信。
+
 4. **存储层 (JSON 文件存储)**：使用 JSON 文件存储文件夹配置、文件索引、Vector Clocks、设备状态与同步日志，避免 SQLite 的 I/O 错误问题。
 
 ## 2. 核心模块详解
@@ -77,10 +94,10 @@
 - **TLS 加密**：网络层支持可选的 TLS 加密，可通过参数启用，确保数据传输安全。
 
 ### （2）内容定义块管理 (Block Management)
-- **FastCDC 算法**：已实现 FastCDC 算法用于文件内容定义切分，支持变长块（4KB-64KB），提高数据去重率并解决"插入/删除字节导致偏移失效"的问题。
-- **块级别同步**：已实现块级别的增量同步，支持块级别的去重存储和增量传输。相同内容的块只存储一次，大幅减少网络传输量和存储空间。
-- **块存储管理**：实现了块存储系统，支持块的保存、获取、存在性检查等操作，按块哈希组织存储结构。
-- **文件级别同步**：同时保留文件级别的同步作为后备方案，根据场景自动选择最优同步方式。
+- **FastCDC 算法**：已实现 FastCDC 算法用于文件内容定义切分，支持变长块（4KB-64KB），提高数据去重率并解决"插入/删除字节导致偏移失效"的问题。使用 Gear 哈希算法进行内容定义切分。
+- **块级别同步**：已实现块级别的增量同步，支持块级别的去重存储和增量传输。相同内容的块只存储一次，大幅减少网络传输量和存储空间。超过 1MB 的文件自动使用块级增量同步，小于 1MB 的文件使用全量传输。
+- **块存储管理**：实现了块存储系统，支持块的保存、获取、存在性检查等操作，按块哈希组织存储结构。支持并行下载缺失的块，提高传输效率。
+- **文件级别同步**：同时保留文件级别的同步作为后备方案，当块级同步失败时自动回退到全量下载。
 
 ### （3）差分同步 (MST-based Diff)
 - **增量列表同步**：相比全量发送文件列表，MST 仅在分支哈希不一致时递归向下探测，极大程度节省元数据交换带宽。
@@ -89,7 +106,7 @@
 - **设备身份验证**：基于 Ed25519 密钥对的 PeerID 作为设备唯一身份标识，设备间通过 PeerID 进行身份识别。
 - **本地存储安全性**：私钥存储在本地文件中，使用密码加密保护。密码存储在本地文件中，避免每次启动时要求用户输入系统密码。
 - **端到端加密**：网络层支持 TLS 加密，可通过参数启用。所有数据传输均可选择加密传输，确保数据安全。
-- **环境检测**：应用启动时自动检测运行环境，包括文件系统权限、网络状态等，确保应用正常运行。
+- **环境检测**：应用启动时自动检测运行环境（EnvironmentChecker），包括文件系统权限、网络状态等，确保应用正常运行。检测结果会在控制台输出详细报告。
 
 # 四、GUI 界面设计
 
@@ -138,13 +155,38 @@ class P2PNode {
 
 ### （2）CDC 块切分逻辑
 ```swift
-func processFileContent(url: URL) throws -> [BlockID] {
-    let rawData = try Data(contentsOf: url)
-    let chunks = FastCDC.chunk(data: rawData, min: 4KB, avg: 16KB, max: 64KB)
-    return chunks.map { chunk in
-        let id = SHA256.hash(data: chunk)
-        Storage.shared.storeBlock(id: id, content: chunk)
-        return id
+// FastCDC 算法实现
+public class FastCDC {
+    private let minSize: Int = 4096  // 4KB
+    private let avgSize: Int = 16384 // 16KB
+    private let maxSize: Int = 65536 // 64KB
+    
+    public func chunk(fileURL: URL) throws -> [Chunk] {
+        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        var chunks: [Chunk] = []
+        var fingerprint: UInt64 = 0
+        var chunkStart = 0
+        
+        // 使用 Gear 哈希算法进行内容定义切分
+        for (index, byte) in data.enumerated() {
+            fingerprint = (fingerprint << 1) &+ FastCDC.gearTable[Int(byte)]
+            let currentLength = index - chunkStart + 1
+            
+            // 根据当前长度和指纹决定是否切分
+            if currentLength >= minSize {
+                let mask = currentLength < avgSize ? 0x3F : 0x1F
+                if (fingerprint & mask) == 0 || currentLength >= maxSize {
+                    // 切分块
+                    let chunkData = data[chunkStart..<index+1]
+                    let hash = SHA256.hash(data: chunkData)
+                    chunks.append(Chunk(hash: hash, data: chunkData, offset: chunkStart))
+                    chunkStart = index + 1
+                    fingerprint = 0
+                }
+            }
+        }
+        
+        return chunks
     }
 }
 ```
@@ -265,8 +307,9 @@ struct SyncFolder: Identifiable, Codable {
     var lastSyncMessage: String? // 最后同步消息
     var lastSyncedAt: Date? // 最后同步时间
     var peerCount: Int = 0 // 参与同步的对等端数量
-    var fileCount: Int? = 0 // 文件数量
-    var folderCount: Int? = 0 // 文件夹数量
+    var fileCount: Int? = nil // 文件数量，nil 表示尚未统计
+    var folderCount: Int? = nil // 文件夹数量，nil 表示尚未统计
+    var totalSize: Int64? = nil // 全部文件的总大小（字节），nil 表示尚未统计
     var excludePatterns: [String] // 排除规则（.gitignore 风格）
 }
 
@@ -276,18 +319,27 @@ class SyncManager: ObservableObject {
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
     @Published var peers: [PeerID] = []
-    @Published var onlineDeviceCount: Int = 1 // 包括自身
-    @Published var offlineDeviceCount: Int = 0
+    @Published var onlineDeviceCountValue: Int = 1 // 包括自身
+    @Published var offlineDeviceCountValue: Int = 0
+    @Published var allDevicesValue: [DeviceInfo] = [] // 设备列表
     
     let p2pNode = P2PNode()
     let syncIDManager = SyncIDManager()
     
-    // 文件监控防抖：syncID -> 防抖任务
-    private var debounceTasks: [String: Task<Void, Never>] = [:]
-    private let debounceDelay: TimeInterval = 2.0 // 2 秒防抖延迟
+    // 模块化组件
+    private var folderMonitor: FolderMonitor!
+    private var folderStatistics: FolderStatistics!
+    private var p2pHandlers: P2PHandlers!
+    private var fileTransfer: FileTransfer!
+    private var syncEngine: SyncEngine!
+    
+    // 同步冷却期：避免频繁同步
+    var syncCooldown: [String: Date] = [:] // syncID -> 最后同步完成时间
+    var syncCooldownDuration: TimeInterval = 5.0 // 同步完成后5秒内忽略文件变化检测
+    var peerSyncCooldown: [String: Date] = [:] // "peerID:syncID" -> 最后同步完成时间
+    var peerSyncCooldownDuration: TimeInterval = 30.0 // 同步完成后30秒内不重复同步
     
     func addFolder(_ folder: SyncFolder) {
-        // 验证文件夹权限和 syncID 格式
         // 注册 syncID 到管理器
         syncIDManager.registerSyncID(folder.syncID, folderID: folder.id)
         
@@ -312,7 +364,7 @@ class SyncManager: ObservableObject {
         }
         
         for peerInfo in registeredPeers {
-            syncWithPeer(peer: peerInfo.peerID, folder: folder)
+            syncEngine.syncWithPeer(peer: peerInfo.peerID, folder: folder)
         }
     }
 }
@@ -324,7 +376,7 @@ class SyncManager: ObservableObject {
 - **网络波动**：局域网连接可能不稳定。*应对：实现请求重试机制（默认最多 3 次），使用超时控制（文件传输 180 秒，元数据 90 秒），定期检查设备在线状态。*
 - **沙盒权限**：macOS App Sandbox。*应对：使用 Security-Scoped Bookmarks 保持文件夹访问权限（未来实现）。当前版本需要用户授予文件夹访问权限。*
 - **对等点注册时序**：LAN 发现的对等点可能无法立即注册。*应对：实现智能注册机制（PeerRegistrationService），延迟同步（2.5 秒）确保对等点已完全注册，支持注册重试。*
-- **频繁文件变化**：文件监控可能触发大量同步请求。*应对：实现防抖机制（2 秒延迟），避免同步进行中时重复触发。*
+- **频繁文件变化**：文件监控可能触发大量同步请求。*应对：实现防抖机制（2 秒延迟）、文件写入稳定性检测（文件大小稳定 3 秒后才触发同步）、同步冷却期机制（同步完成后 5 秒内忽略文件变化，对等点-文件夹对 30 秒内不重复同步），避免同步进行中时重复触发。*
 - **单实例运行**：防止多个应用实例同时运行导致冲突。*应对：应用启动时检查是否已有实例运行，如有则激活现有实例并退出。*
 
 # 七、当前实现状态
@@ -347,7 +399,9 @@ class SyncManager: ObservableObject {
 - ✅ 排除规则配置（`.gitignore` 风格）
 - ✅ 同步历史记录（详细记录每次同步操作）
 - ✅ 冲突解决界面（Conflict Center）
-- ✅ 文件/文件夹数量自动统计
+- ✅ 文件/文件夹数量自动统计（包括总大小统计）
+- ✅ 文件写入稳定性检测（文件大小稳定 3 秒后才触发同步）
+- ✅ 同步冷却期机制（避免频繁同步）
 - ✅ 设备在线/离线状态监控（定期检查，每 20 秒）
 - ✅ 同步速度统计（上传/下载速度实时显示）
 - ✅ NAT 穿透检测（AutoNAT）
@@ -368,21 +422,24 @@ class SyncManager: ObservableObject {
 - ✅ TLS 加密支持（网络层支持可选的 TLS 加密）
 
 ### UI 功能
-- ✅ 主仪表盘（显示同步状态、速度、设备数量）
+- ✅ 主仪表盘（显示同步状态、速度、设备数量、支持下拉刷新）
 - ✅ 添加文件夹界面（支持随机生成 syncID）
-- ✅ 设备列表视图（显示所有设备及在线状态）
-- ✅ 冲突中心（管理冲突文件）
-- ✅ 同步历史视图（查看同步记录）
-- ✅ 排除规则配置界面
+- ✅ 文件夹列表（显示文件数量、文件夹数量、总大小、同步状态等）
+- ✅ 设备列表视图（显示所有设备及在线状态，包括本地设备）
+- ✅ 冲突中心（管理冲突文件，支持查看详情和解决冲突）
+- ✅ 同步历史视图（查看同步记录，支持筛选和搜索）
+- ✅ 排除规则配置界面（支持 `.gitignore` 风格规则）
 
 ## 高级功能
 
 ### 块级别增量同步 ✅
-- **FastCDC 算法**：已实现文件内容定义切分，支持变长块（4KB-64KB），提高数据去重率
-- **块存储管理**：实现了块级别的去重存储系统，相同内容的块只存储一次，大幅节省存储空间
-- **增量传输**：支持块级别的增量同步，只传输缺失的块，大幅减少网络传输量，特别适合大文件和频繁修改的场景
+- **FastCDC 算法**：已实现文件内容定义切分，支持变长块（4KB-64KB），使用 Gear 哈希算法进行内容定义切分，提高数据去重率
+- **块存储管理**：实现了块级别的去重存储系统，相同内容的块只存储一次，大幅节省存储空间。块按哈希值组织存储，支持快速查找和访问
+- **增量传输**：支持块级别的增量同步，只传输缺失的块，大幅减少网络传输量，特别适合大文件和频繁修改的场景。超过 1MB 的文件自动使用块级增量同步，小于 1MB 的文件使用全量传输
+- **并行下载**：支持并行下载缺失的块，提高传输效率
 - **协议支持**：扩展了 SyncRequest/SyncResponse 支持块级别请求和响应（`getFileChunks`, `getChunkData`, `putFileChunks`, `putChunkData`）
 - **文件重建**：支持从块列表重建完整文件，确保数据完整性
+- **自动回退**：当块级同步失败时，自动回退到全量下载，确保同步可靠性
 
 ### NAT 穿透与中继 ✅
 - **AutoNAT 检测**：自动检测 NAT 类型（公网 IP、对称 NAT、全锥形 NAT 等）和公网可达性
@@ -414,20 +471,26 @@ class SyncManager: ObservableObject {
 4. **用户体验优化**：
    - 完全自动的设备发现和连接，无需手动配对
    - 支持多点同步，同时向多个设备同步
-   - 自动统计文件/文件夹数量
+   - 自动统计文件/文件夹数量和总大小（使用流式哈希避免大文件内存占用）
    - 实时显示同步速度和设备在线状态
    - 文件式密钥存储，避免每次启动输入系统密码
    - 单实例应用，防止多实例冲突
-   - 防抖机制，避免频繁同步
+   - 防抖机制和文件写入稳定性检测，避免频繁同步
+   - 同步冷却期机制，避免重复同步
+   - 模块化架构，代码结构清晰，易于维护和扩展
 
 5. **同步机制优化**：
-   - 延迟同步确保对等点已完全注册
-   - 请求重试机制（最多 3-5 次）
+   - 延迟同步确保对等点已完全注册（2.5 秒延迟）
+   - 对等点注册重试机制（最多等待 2 秒，检查间隔 0.2 秒）
+   - 请求重试机制（最多 3 次）
    - 超时控制（文件传输 180 秒，元数据 90 秒）
    - 定期设备状态检查（每 20 秒）
    - 同步进度实时更新
-   - 块级别增量同步，大幅减少网络传输量
+   - 块级别增量同步（超过 1MB 的文件自动使用），大幅减少网络传输量
    - 块去重存储，节省存储空间
+   - 文件写入稳定性检测，避免同步不完整的文件
+   - 同步冷却期机制（文件夹级别 5 秒，对等点-文件夹对 30 秒）
+   - 最大并发传输数控制（3 个并发传输）
 
 6. **冲突处理**：使用 Vector Clocks 检测并发修改，自动保留冲突文件的多版本，用户可通过冲突中心手动解决。
 

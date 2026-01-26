@@ -118,8 +118,12 @@ class SyncEngine {
     /// 执行同步操作
     private func performSync(peer: PeerID, folder: SyncFolder, peerID: String) async {
         guard let syncManager = syncManager,
-              let fileTransfer = fileTransfer,
               let folderStatistics = folderStatistics else {
+            return
+        }
+        
+        // fileTransfer 在异步任务中使用，不需要在 guard 中检查
+        guard let fileTransfer = fileTransfer else {
             return
         }
         
@@ -249,19 +253,63 @@ class SyncEngine {
             let currentPaths = Set(localMetadata.keys)
             let lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
             
-            // 更严格的删除检测
+            // 检测文件重命名：通过比较哈希值匹配删除的文件和新文件
+            var renamedFiles: [String: String] = [:] // oldPath -> newPath
             var locallyDeleted: Set<String> = []
             let fileManager = FileManager.default
+            
+            // 第一步：找出所有"消失"的文件（可能在 lastKnown 中但不在 currentPaths 中）
+            var disappearedFiles: [String: FileMetadata] = [:] // path -> metadata (from last sync)
             for path in lastKnown {
                 if !currentPaths.contains(path) {
                     let fileURL = currentFolder.localPath.appendingPathComponent(path)
                     if !fileManager.fileExists(atPath: fileURL.path) {
-                        locallyDeleted.insert(path)
+                        // 文件确实不存在，可能是删除或重命名
+                        // 从上次同步的元数据中获取哈希值
+                        if let oldMeta = lastKnownMeta[path] {
+                            disappearedFiles[path] = oldMeta
+                        } else {
+                            // 无法获取旧元数据，先标记为删除
+                            locallyDeleted.insert(path)
+                        }
                     }
                 }
             }
             
-            // 更新 deletedPaths
+            // 第二步：找出所有新文件（在 currentPaths 中但不在 lastKnown 中）
+            var newFiles: [String: FileMetadata] = [:]
+            for path in currentPaths {
+                if !lastKnown.contains(path) {
+                    if let meta = localMetadata[path] {
+                        newFiles[path] = meta
+                    }
+                }
+            }
+            
+            // 第三步：通过哈希值匹配重命名
+            for (oldPath, oldMeta) in disappearedFiles {
+                // 查找具有相同哈希值的新文件
+                if let (newPath, _) = newFiles.first(where: { $0.value.hash == oldMeta.hash }) {
+                    // 找到匹配！这是重命名操作
+                    renamedFiles[oldPath] = newPath
+                    newFiles.removeValue(forKey: newPath) // 从新文件列表中移除，因为它是重命名
+                    print("[SyncEngine] 🔄 检测到文件重命名: \(oldPath) -> \(newPath)")
+                } else {
+                    // 没有找到匹配，这是真正的删除
+                    locallyDeleted.insert(oldPath)
+                }
+            }
+            
+            // 处理重命名：更新 Vector Clock 路径映射
+            for (oldPath, newPath) in renamedFiles {
+                // 迁移 Vector Clock
+                if let oldVC = StorageManager.shared.getVectorClock(syncID: syncID, path: oldPath) {
+                    try? StorageManager.shared.setVectorClock(syncID: syncID, path: newPath, oldVC)
+                    try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: oldPath)
+                }
+            }
+            
+            // 更新 deletedPaths（只包含真正的删除，不包括重命名）
             if !locallyDeleted.isEmpty {
                 var dp = syncManager.deletedPaths[syncID] ?? []
                 dp.formUnion(locallyDeleted)
@@ -273,6 +321,7 @@ class SyncEngine {
             if localMST.rootHash == remoteHash && locallyDeleted.isEmpty {
                 // 本地和远程已经同步
                 syncManager.lastKnownLocalPaths[syncID] = currentPaths
+                syncManager.lastKnownMetadata[syncID] = localMetadata // 保存当前元数据用于下次重命名检测
                 syncManager.updateFolderStatus(currentFolder.id, status: .synced, message: "Up to date", progress: 1.0)
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
                 syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
@@ -417,7 +466,13 @@ class SyncEngine {
             
             if mode == .twoWay || mode == .uploadOnly {
                 for (path, localMeta) in localMetadata {
+                    // 跳过已删除的文件
                     if locallyDeleted.contains(path) {
+                        continue
+                    }
+                    // 跳过重命名的旧路径（旧路径会在删除阶段处理，新路径会正常上传）
+                    if renamedFiles.keys.contains(path) {
+                        // 这是重命名的旧路径，跳过（新路径会正常上传）
                         continue
                     }
                     if filesToUploadSet.contains(path) {
@@ -447,7 +502,14 @@ class SyncEngine {
             }
             totalOps += filesToUpload.count + uploadConflictFiles.count
             
-            let toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
+            // 处理删除和重命名：重命名需要先在远程删除旧路径，然后上传新路径
+            var toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
+            // 重命名操作：需要在远程删除旧路径
+            if mode == .twoWay || mode == .uploadOnly {
+                for oldPath in renamedFiles.keys {
+                    toDelete.insert(oldPath)
+                }
+            }
             if !toDelete.isEmpty {
                 totalOps += toDelete.count
             }
@@ -513,6 +575,7 @@ class SyncEngine {
             
             if totalOps == 0 {
                 syncManager.lastKnownLocalPaths[syncID] = currentPaths
+                syncManager.lastKnownMetadata[syncID] = localMetadata // 保存当前元数据用于下次重命名检测
                 syncManager.updateFolderStatus(currentFolder.id, status: .synced, message: "Up to date", progress: 1.0)
                 syncManager.syncIDManager.updateLastSyncedAt(syncID)
                 syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
@@ -539,8 +602,12 @@ class SyncEngine {
                             completedOps += 1
                             activeDownloads -= 1
                             
-                            syncManager.addDownloadBytes(bytes)
-                            syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                            await MainActor.run {
+                                syncManager.addDownloadBytes(bytes)
+                            }
+                            await MainActor.run {
+                                syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                            }
                         }
                     }
                     
@@ -601,7 +668,9 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
                         
-                        syncManager.addDownloadBytes(bytes)
+                        await MainActor.run {
+                            syncManager.addDownloadBytes(bytes)
+                        }
                         syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "下载完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
                     }
                 }
@@ -683,7 +752,9 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
                         
-                        syncManager.addDownloadBytes(bytes)
+                        await MainActor.run {
+                            syncManager.addDownloadBytes(bytes)
+                        }
                         syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "冲突处理完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
                     }
                 }
@@ -766,7 +837,9 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
                         
-                        syncManager.addDownloadBytes(bytes)
+                        await MainActor.run {
+                            syncManager.addDownloadBytes(bytes)
+                        }
                         syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "冲突处理完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
                     }
                 }
@@ -784,8 +857,12 @@ class SyncEngine {
                             completedOps += 1
                             activeUploads -= 1
                             
-                            syncManager.addUploadBytes(bytes)
-                            syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                            await MainActor.run {
+                                syncManager.addUploadBytes(bytes)
+                            }
+                            await MainActor.run {
+                                syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
+                            }
                         }
                     }
                     
@@ -859,7 +936,9 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
                         
-                        syncManager.addUploadBytes(bytes)
+                        await MainActor.run {
+                            syncManager.addUploadBytes(bytes)
+                        }
                         syncManager.updateFolderStatus(currentFolder.id, status: .syncing, message: "上传完成: \(completedOps)/\(totalOps)", progress: Double(completedOps) / Double(max(totalOps, 1)))
                     }
                 }
@@ -870,6 +949,7 @@ class SyncEngine {
             let (_, finalMetadata, finalFolderCount, finalTotalSize) = await folderStatistics.calculateFullState(for: currentFolder)
             let finalPaths = Set(finalMetadata.keys)
             syncManager.lastKnownLocalPaths[syncID] = finalPaths
+            syncManager.lastKnownMetadata[syncID] = finalMetadata // 保存当前元数据用于下次重命名检测
             
             // 更新统计值（同步后文件可能已变化）
             // 注意：SyncEngine 是 @MainActor，但这里需要确保在 MainActor 上下文中更新

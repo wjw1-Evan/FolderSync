@@ -195,9 +195,14 @@ struct MainDashboard: View {
     }
     
     private func byteRate(_ bytesPerSec: Double) -> String {
+        guard bytesPerSec > 0 else {
+            return "0 KB/s"
+        }
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(bytesPerSec))
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        let formatted = formatter.string(fromByteCount: Int64(bytesPerSec))
+        return "\(formatted)/s"
     }
     
     private func byteCount(_ bytes: Int64) -> String {

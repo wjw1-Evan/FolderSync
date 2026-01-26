@@ -27,6 +27,7 @@ public class SyncManager: ObservableObject {
     
     // 同步状态管理
     var lastKnownLocalPaths: [String: Set<String>] = [:]
+    var lastKnownMetadata: [String: [String: FileMetadata]] = [:] // syncID -> [path: metadata] 用于重命名检测
     var deletedPaths: [String: Set<String>] = [:]
     var syncInProgress: Set<String> = [] // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
     private var peerStatusCheckTask: Task<Void, Never>?

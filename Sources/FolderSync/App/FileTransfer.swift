@@ -39,7 +39,15 @@ class FileTransfer {
         )
         
         guard case .fileData(_, _, let data) = dataRes else {
-            throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载响应格式错误"])
+            // 记录详细的错误信息以便调试
+            let errorMsg: String
+            if case .error(let errorString) = dataRes {
+                errorMsg = "下载响应错误: \(errorString)"
+            } else {
+                errorMsg = "下载响应格式错误: 期望 fileData，实际收到 \(String(describing: dataRes))"
+            }
+            print("[FileTransfer] ❌ \(errorMsg) - 文件: \(path)")
+            throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
         }
         
         let localURL = folder.localPath.appendingPathComponent(path)
@@ -105,7 +113,11 @@ class FileTransfer {
         
         guard case .fileChunks(_, _, let remoteChunkHashes) = chunksRes else {
             // 如果块级同步失败，回退到全量下载
-            print("[FileTransfer] ⚠️ 块级同步失败，回退到全量下载: \(path)")
+            if case .error(let errorString) = chunksRes {
+                print("[FileTransfer] ⚠️ 块级同步失败（错误响应），回退到全量下载: \(path) - \(errorString)")
+            } else {
+                print("[FileTransfer] ⚠️ 块级同步失败（响应格式错误），回退到全量下载: \(path) - 收到: \(String(describing: chunksRes))")
+            }
             return try await downloadFileFull(path: path, remoteMeta: remoteMeta, folder: folder, peer: peer, peerID: peerID, localMetadata: localMetadata)
         }
         
@@ -134,6 +146,11 @@ class FileTransfer {
                             )
                             
                             guard case .chunkData(_, _, let data) = chunkRes else {
+                                if case .error(let errorString) = chunkRes {
+                                    print("[FileTransfer] ⚠️ 获取块数据失败: \(chunkHash) - \(errorString)")
+                                } else {
+                                    print("[FileTransfer] ⚠️ 获取块数据响应格式错误: \(chunkHash) - 收到: \(String(describing: chunkRes))")
+                                }
                                 return nil
                             }
                             
@@ -249,7 +266,15 @@ class FileTransfer {
         )
         
         guard case .putAck = putRes else {
-            throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "上传响应格式错误"])
+            // 记录详细的错误信息以便调试
+            let errorMsg: String
+            if case .error(let errorString) = putRes {
+                errorMsg = "上传响应错误: \(errorString)"
+            } else {
+                errorMsg = "上传响应格式错误: 期望 putAck，实际收到 \(String(describing: putRes))"
+            }
+            print("[FileTransfer] ❌ \(errorMsg) - 文件: \(path)")
+            throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
         }
         
         // 保存 Vector Clock
@@ -395,7 +420,11 @@ class FileTransfer {
             
             guard case .fileChunksAck = confirmRes else {
                 // 确认失败，回退到全量上传
-                print("[FileTransfer] ⚠️ 块级同步确认失败，回退到全量上传: \(path)")
+                if case .error(let errorString) = confirmRes {
+                    print("[FileTransfer] ⚠️ 块级同步确认失败（错误响应），回退到全量上传: \(path) - \(errorString)")
+                } else {
+                    print("[FileTransfer] ⚠️ 块级同步确认失败（响应格式错误），回退到全量上传: \(path) - 收到: \(String(describing: confirmRes))")
+                }
                 return try await uploadFileFull(
                     path: path,
                     localMeta: localMeta,

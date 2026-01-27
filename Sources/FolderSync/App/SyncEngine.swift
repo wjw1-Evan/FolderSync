@@ -949,8 +949,9 @@ class SyncEngine {
                     }
                     
                     // 重要：先检查删除记录，防止已删除的文件被上传
-                    // 如果文件在 deletedSet 中，或者远程有删除记录，不应该上传
-                    if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                    // 如果文件在 deletedSet 中，不应该上传
+                    // 注意：如果文件在 remoteDeletedPaths 中，让 SyncDecisionEngine 处理，保持与下载阶段的一致性
+                    if deletedSet.contains(path) {
                         print("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
                         continue
                     }

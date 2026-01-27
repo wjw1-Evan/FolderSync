@@ -625,12 +625,88 @@ class SyncEngine {
                     let remoteState = remoteStates[deletedPath]
                     let remoteDeletionRecord = remoteState?.deletionRecord
                     
-                    // 使用原子性删除操作（如果本地有文件）
+                    // 重要：如果本地文件存在，需要比较 Vector Clock，而不是直接删除
+                    // 如果文件是在删除之后重新创建的（VC 更新），应该保留文件
                     let fileURL = currentFolder.localPath.appendingPathComponent(deletedPath)
                     if fileManager.fileExists(atPath: fileURL.path) {
-                        print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录）: \(deletedPath)")
-                        await MainActor.run {
-                            syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                        // 检查文件是否是新文件（在 currentPaths 中但不在 lastKnown 中）
+                        // 如果是新文件，说明是在删除之后重新创建的，应该保留
+                        let isNewFile = currentPaths.contains(deletedPath) && !lastKnown.contains(deletedPath)
+                        
+                        // 获取本地文件的元数据（包括 Vector Clock）
+                        if let localMeta = localMetadata[deletedPath],
+                           let remoteDel = remoteDeletionRecord {
+                            // 如果文件是新文件，或者文件的 VC 更新，保留文件
+                            if isNewFile {
+                                // 新文件：保留文件并清除删除记录
+                                print("[SyncEngine] ✅ 保留新文件（文件在删除之后重新创建）: \(deletedPath)")
+                                // 为新文件创建 Vector Clock（如果还没有）
+                                if localMeta.vectorClock == nil {
+                                    var newVC = VectorClock()
+                                    newVC.increment(for: myPeerID)
+                                    VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: newVC)
+                                }
+                                // 清除本地删除记录（如果存在）
+                                let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+                                if let localState = stateStore.getState(for: deletedPath),
+                                   case .deleted = localState {
+                                    stateStore.removeState(path: deletedPath)
+                                    deletedSet.remove(deletedPath)
+                                }
+                            } else if let localVC = localMeta.vectorClock {
+                                // 比较删除记录的 VC 和文件的 VC
+                                let comparison = remoteDel.vectorClock.compare(to: localVC)
+                                switch comparison {
+                                case .successor, .equal:
+                                    // 删除记录的 VC 更新或相等，删除本地文件
+                                    print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录，VC 更新）: \(deletedPath)")
+                                    await MainActor.run {
+                                        syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                                    }
+                                case .antecedent:
+                                    // 删除记录的 VC 更旧，文件是在删除之后重新创建的，保留文件并清除删除记录
+                                    print("[SyncEngine] ✅ 保留文件（文件 VC 更新，删除记录 VC 更旧）: \(deletedPath)")
+                                    // 清除本地删除记录（如果存在）
+                                    let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+                                    if let localState = stateStore.getState(for: deletedPath),
+                                       case .deleted = localState {
+                                        stateStore.removeState(path: deletedPath)
+                                        deletedSet.remove(deletedPath)
+                                    }
+                                case .concurrent:
+                                    // 并发冲突，保守处理：删除文件
+                                    print("[SyncEngine] ⚠️ 并发冲突，保守处理：删除文件: \(deletedPath)")
+                                    await MainActor.run {
+                                        syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                                    }
+                                }
+                            } else {
+                                // 文件存在但没有 VC，保守处理：删除文件
+                                print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录，文件没有 VC）: \(deletedPath)")
+                                await MainActor.run {
+                                    syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                                }
+                            }
+                        } else if isNewFile {
+                            // 新文件但没有元数据，创建元数据并保留文件
+                            print("[SyncEngine] ✅ 保留新文件（新文件，创建 VC）: \(deletedPath)")
+                            // 为新文件创建 Vector Clock
+                            var newVC = VectorClock()
+                            newVC.increment(for: myPeerID)
+                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: newVC)
+                            // 清除本地删除记录（如果存在）
+                            let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+                            if let localState = stateStore.getState(for: deletedPath),
+                               case .deleted = localState {
+                                stateStore.removeState(path: deletedPath)
+                                deletedSet.remove(deletedPath)
+                            }
+                        } else {
+                            // 如果无法获取 VC 且不是新文件，保守处理：删除文件
+                            print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录，无法比较 VC）: \(deletedPath)")
+                            await MainActor.run {
+                                syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                            }
                         }
                     } else {
                         // 如果本地没有文件，合并删除记录
@@ -759,22 +835,22 @@ class SyncEngine {
                     
                     // 获取本地和远程状态
                     let localState = localStates[path]
-                    let remoteState = remoteStates[path]
+                    var remoteState = remoteStates[path]
                     
-                    // 检查远程是否有删除记录
-                    if remoteDeletedPaths.contains(path) {
-                        // 远程已删除，应该删除本地文件（如果存在）
-                        if localState?.isDeleted != true {
-                            // 本地文件存在，应该删除
-                            print("[SyncEngine] 🗑️ [download] 远程已删除，删除本地文件: 路径=\(path)")
-                            await MainActor.run {
-                                syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
-                            }
+                    // 重要：如果路径在 remoteDeletedPaths 中但不在 remoteStates 中，
+                    // 需要确保 remoteState 包含删除记录，以便 SyncDecisionEngine 能正确比较 VC
+                    if remoteState == nil && remoteDeletedPaths.contains(path) {
+                        // 从 remoteStates 中查找删除记录（应该已经在构建时包含了）
+                        // 如果还是没有，说明是旧格式，需要创建删除记录
+                        // 但这种情况应该已经在构建 remoteStates 时处理了
+                        // 这里再次检查，确保 remoteState 不为 nil
+                        if let state = remoteStates[path] {
+                            remoteState = state
                         }
-                        continue
                     }
                     
-                    // 使用统一的决策引擎
+                    // 使用统一的决策引擎（它会正确比较 VC）
+                    // SyncDecisionEngine 会正确处理删除记录和文件 VC 的比较
                     let action = SyncDecisionEngine.decideSyncAction(
                         localState: localState,
                         remoteState: remoteState,
@@ -875,22 +951,19 @@ class SyncEngine {
                     
                     // 获取本地和远程状态
                     let localState = localStates[path]
-                    let remoteState = remoteStates[path]
+                    var remoteState = remoteStates[path]
                     
-                    // 检查远程是否有删除记录（即使不在 remoteStates 中，也可能在 remoteDeletedPaths 中）
-                    if remoteDeletedPaths.contains(path) {
-                        // 远程已删除，应该删除本地文件（如果存在），不应该上传
-                        if localState?.isDeleted != true {
-                            // 本地文件存在，应该删除
-                            print("[SyncEngine] 🗑️ [upload] 远程已删除，删除本地文件: 路径=\(path)")
-                            await MainActor.run {
-                                syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
-                            }
+                    // 重要：如果路径在 remoteDeletedPaths 中但不在 remoteStates 中，
+                    // 需要确保 remoteState 包含删除记录，以便 SyncDecisionEngine 能正确比较 VC
+                    if remoteState == nil && remoteDeletedPaths.contains(path) {
+                        // 从 remoteStates 中查找删除记录（应该已经在构建时包含了）
+                        if let state = remoteStates[path] {
+                            remoteState = state
                         }
-                        continue
                     }
                     
-                    // 使用统一的决策引擎
+                    // 使用统一的决策引擎（它会正确比较 VC）
+                    // SyncDecisionEngine 会正确处理删除记录和文件 VC 的比较
                     let action = SyncDecisionEngine.decideSyncAction(
                         localState: localState,
                         remoteState: remoteState,

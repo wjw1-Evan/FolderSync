@@ -575,6 +575,11 @@ public class StorageManager {
         let data = try encoder.encode(snapshot)
         try data.write(to: tempFile, options: [.atomic])
         
+        // 如果目标文件已存在，先删除（moveItem 不会自动替换）
+        if fileManager.fileExists(atPath: snapshotFile.path) {
+            try fileManager.removeItem(at: snapshotFile)
+        }
+        
         // 原子性地移动到目标文件
         try fileManager.moveItem(at: tempFile, to: snapshotFile)
     }

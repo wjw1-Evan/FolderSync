@@ -826,6 +826,12 @@ class SyncEngine {
                         continue
                     }
                     
+                    // 重要：跳过重命名的旧路径（旧路径会在删除阶段处理，不应该下载）
+                    if renamedFiles.keys.contains(path) {
+                        print("[SyncEngine] ⏭️ [download] 跳过重命名的旧路径: 路径=\(path)")
+                        continue
+                    }
+                    
                     // 重要：先检查删除记录，防止已删除的文件被下载
                     // 如果文件在 deletedSet 中，不应该下载
                     if deletedSet.contains(path) {
@@ -1150,9 +1156,9 @@ class SyncEngine {
             var totalDownloadBytes: Int64 = 0
             var totalUploadBytes: Int64 = 0
 
-            // 过滤掉已删除的文件（删除操作执行后，这些文件应该已经从 deletedSet 中移除，但为了安全再次检查）
+            // 过滤掉已删除的文件和重命名的旧路径（删除操作执行后，这些文件应该已经从 deletedSet 中移除，但为了安全再次检查）
             let filesToDownload = changedFiles.filter { path, _ in
-                !locallyDeleted.contains(path) && !deletedSet.contains(path)
+                !locallyDeleted.contains(path) && !deletedSet.contains(path) && !renamedFiles.keys.contains(path)
             }
 
             let transferOpsCount =

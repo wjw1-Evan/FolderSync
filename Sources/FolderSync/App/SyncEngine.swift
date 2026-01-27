@@ -425,7 +425,7 @@ class SyncEngine {
                 return
             }
 
-            guard case .files(_, let remoteEntriesRaw) = filesRes else {
+            guard case .files(_, let remoteEntriesRaw, let remoteDeletedPaths) = filesRes else {
                 print("[SyncEngine] ❌ [performSync] filesRes 不是 files 类型")
                 // 记录错误日志
                 let log = SyncLog(
@@ -538,14 +538,41 @@ class SyncEngine {
             // 合并已删除的文件集合：包括之前记录的删除和本次检测到的本地删除
             var deletedSet = syncManager.deletedPaths(for: syncID)
             deletedSet.formUnion(locallyDeleted)  // 确保包含本次检测到的本地删除
+            
+            // 处理远程的删除记录（tombstones）：如果远程有删除记录，说明这些文件已被删除
+            // 需要删除本地文件并更新 deletedSet，防止已删除的文件被重新上传
+            let remoteDeletedSet = Set(remoteDeletedPaths)
+            if !remoteDeletedSet.isEmpty {
+                print("[SyncEngine] 📋 收到远程删除记录: \(remoteDeletedSet.count) 个文件")
+                for deletedPath in remoteDeletedSet {
+                    // 如果本地有这个文件，删除它
+                    let fileURL = currentFolder.localPath.appendingPathComponent(deletedPath)
+                    if fileManager.fileExists(atPath: fileURL.path) {
+                        print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录）: \(deletedPath)")
+                        try? fileManager.removeItem(at: fileURL)
+                        // 删除 Vector Clock
+                        VectorClockManager.deleteVectorClock(syncID: syncID, path: deletedPath)
+                    }
+                    // 更新 deletedSet，确保这个文件不会被上传
+                    deletedSet.insert(deletedPath)
+                    // 如果这个文件在本地元数据中，从上传列表中排除
+                    if localMetadata.keys.contains(deletedPath) {
+                        print("[SyncEngine] ⚠️ 阻止上传已删除的文件: \(deletedPath)")
+                    }
+                }
+                // 更新持久化的删除记录（在 deletedSet 更新后）
+                syncManager.updateDeletedPaths(deletedSet, for: syncID)
+            }
 
             // 清理已确认删除的文件（远程也没有了）
             // 注意：如果文件在远程不存在，说明删除已经完成，从 deletedSet 中移除
+            // 这是删除确认的唯一正确时机：通过检查远程文件列表确认文件已不存在
             let confirmed = deletedSet.filter { !remoteEntries.keys.contains($0) }
             for p in confirmed {
                 deletedSet.remove(p)
                 // 同时从 locallyDeleted 中移除（如果存在），因为远程已经确认删除
                 locallyDeleted.remove(p)
+                print("[SyncEngine] ✅ 删除已确认: \(p) (远程文件已不存在)")
             }
             if deletedSet.isEmpty {
                 syncManager.removeDeletedPaths(for: syncID)
@@ -610,8 +637,8 @@ class SyncEngine {
                         continue
                     }
                     
-                    // 跳过已删除的文件
-                    if locallyDeleted.contains(path) {
+                    // 跳过已删除的文件（包括本地删除和远程删除记录）
+                    if locallyDeleted.contains(path) || deletedSet.contains(path) {
                         continue
                     }
                     // 跳过重命名的旧路径（旧路径会在删除阶段处理，新路径会正常上传）
@@ -697,12 +724,14 @@ class SyncEngine {
                 )
 
                 if case .deleteAck = delRes {
-                    // 删除成功后，从 deletedSet 中移除这些文件，避免后续逻辑重复处理
+                    // 删除请求已发送成功
+                    // 重要：不要立即从 deletedSet 中移除，因为：
+                    // 1. deleteAck 只表示远程收到了删除请求，不一定表示文件已真正删除
+                    // 2. 应该等到下次同步时，通过检查远程文件列表确认文件已不存在后再移除
+                    // 3. 这样可以防止删除请求成功后，但远程文件还在的情况下，文件被重新下载
+                    
                     for rel in toDelete {
-                        deletedSet.remove(rel)
-                        // 同时从 locallyDeleted 中移除，因为删除已经完成
-                        locallyDeleted.remove(rel)
-
+                        // 删除本地文件（如果存在）
                         let fileURL = currentFolder.localPath.appendingPathComponent(rel)
                         let fileName = (rel as NSString).lastPathComponent
                         let pathDir = (rel as NSString).deletingLastPathComponent
@@ -722,6 +751,7 @@ class SyncEngine {
                             try? fileManager.removeItem(at: fileURL)
                         }
 
+                        // 删除 Vector Clock
                         VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
 
                         syncedFiles.append(
@@ -732,15 +762,15 @@ class SyncEngine {
                                 size: fileSize,
                                 operation: .delete
                             ))
+                        
+                        // 注意：不从这里移除 deletedSet，让第 542-549 行的逻辑在下次同步时确认删除
                     }
                     completedOps += toDelete.count
 
-                    // 更新 deletedPaths，移除已成功删除的文件
-                    if deletedSet.isEmpty {
-                        syncManager.removeDeletedPaths(for: syncID)
-                    } else {
-                        syncManager.updateDeletedPaths(deletedSet, for: syncID)
-                    }
+                    // 注意：不在这里更新 deletedPaths
+                    // deletedSet 仍然包含已发送删除请求的文件，直到下次同步时确认远程文件已不存在
+                    // 这样可以防止删除请求成功后，但远程文件还在的情况下，文件被重新下载
+                    // deletedPaths 会在第 550-554 行统一更新
                 } else {
                     // 删除失败，记录错误但不阻止后续操作
                     print("[SyncEngine] ⚠️ 删除操作失败，响应: \(delRes)")

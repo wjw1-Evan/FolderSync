@@ -27,7 +27,7 @@ public struct FileMetadata: Codable {
 
 public enum SyncResponse: Codable {
     case mstRoot(syncID: String, rootHash: String)
-    case files(syncID: String, entries: [String: FileMetadata]) // path: metadata
+    case files(syncID: String, entries: [String: FileMetadata], deletedPaths: [String] = []) // path: metadata, deletedPaths: 删除记录（tombstones）
     case fileData(syncID: String, path: String, data: Data)
     case putAck(syncID: String, path: String)
     case deleteAck(syncID: String)

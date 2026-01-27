@@ -44,7 +44,9 @@ class P2PHandlers {
                 let (_, metadataRaw, _, _) = await folderStatistics.calculateFullState(for: folder)
                 // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
                 let metadata = ConflictFileFilter.filterConflictFiles(metadataRaw)
-                return .files(syncID: syncID, entries: metadata)
+                // 获取本地的删除记录（tombstones），发送给远程客户端
+                let deletedPaths = Array(syncManager.deletedPaths(for: syncID))
+                return .files(syncID: syncID, entries: metadata, deletedPaths: deletedPaths)
             }
             return .error("Folder not found")
             

@@ -22,6 +22,15 @@ let package = Package(
             resources: [
                 .process("Resources")
             ]
+        ),
+        .testTarget(
+            name: "FolderSyncTests",
+            dependencies: [
+                "FolderSync",
+                .product(name: "Crypto", package: "swift-crypto")
+            ],
+            path: "Tests/FolderSyncTests",
+            exclude: ["README.md"]
         )
     ]
 )

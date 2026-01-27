@@ -841,10 +841,47 @@ public class SyncManager: ObservableObject {
             return
         }
 
-        // 清理过期的待处理重命名操作
+        // 清理过期的待处理重命名操作，并将过期的转换为删除操作
         let now = Date()
-        pendingRenames = pendingRenames.filter { _, value in
-            now.timeIntervalSince(value.timestamp) <= renameDetectionWindow
+        var expiredRenames: [String] = []  // 存储过期的重命名操作的路径
+        pendingRenames = pendingRenames.filter { key, value in
+            let isExpired = now.timeIntervalSince(value.timestamp) > renameDetectionWindow
+            if isExpired {
+                // 提取路径
+                let keyParts = key.split(separator: ":", maxSplits: 1)
+                if keyParts.count == 2, keyParts[0] == folder.syncID {
+                    let path = String(keyParts[1])
+                    expiredRenames.append(path)
+                }
+            }
+            return !isExpired
+        }
+        
+        // 将过期的重命名操作转换为删除操作
+        for expiredPath in expiredRenames {
+            // 检查文件是否真的不存在（可能已经被删除）
+            let expiredFileURL = folder.localPath.appendingPathComponent(expiredPath)
+            if !fileManager.fileExists(atPath: expiredFileURL.path) {
+                // 文件不存在，这是真正的删除，不是重命名
+                print("[recordLocalChange] ⏰ 重命名操作超时，转换为删除操作: \(expiredPath)")
+                let change = LocalChange(
+                    folderID: folder.id,
+                    path: expiredPath,
+                    changeType: .deleted,
+                    size: nil,
+                    timestamp: Date(),
+                    sequence: nil
+                )
+                // 立即从已知路径列表中移除（如果还在）
+                lastKnownLocalPaths[folder.syncID]?.remove(expiredPath)
+                lastKnownMetadata[folder.syncID]?.removeValue(forKey: expiredPath)
+                print("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(expiredPath)")
+                
+                Task.detached {
+                    try? StorageManager.shared.addLocalChange(change)
+                    print("[recordLocalChange] 💾 已保存删除记录（从过期重命名转换）: \(expiredPath)")
+                }
+            }
         }
         
         // 去重检查：如果在短时间内已经处理过这个路径，跳过
@@ -889,14 +926,32 @@ public class SyncManager: ObservableObject {
             print("[recordLocalChange] 🔍 文件不存在，检查删除逻辑...")
             
             // 如果文件在已知路径中且设置了 Renamed 标志，可能是重命名操作
-            // 保存旧文件的哈希值，等待新文件出现
-            if isKnownPath && hasRenamedFlag {
+            // 但是，如果同时设置了 Removed 标志，这是明确的删除操作，不应该等待重命名
+            // 只有在只有 Renamed 标志且没有 Removed 标志时，才可能等待重命名
+            if isKnownPath && hasRenamedFlag && !hasRemovedFlag {
                 if let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
+                    // 检查是否有过期的重命名操作（可能已经超时，应该转换为删除）
                     let pendingKey = "\(folder.syncID):\(relativePath)"
-                    pendingRenames[pendingKey] = (hash: knownMeta.hash, timestamp: now)
-                    print("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
-                    // 暂时不记录，等待新文件出现
-                    return
+                    if let existingPending = pendingRenames[pendingKey] {
+                        // 如果已经有待处理的重命名操作，检查是否超时
+                        if now.timeIntervalSince(existingPending.timestamp) > renameDetectionWindow {
+                            // 超时了，这是真正的删除，不是重命名
+                            print("[recordLocalChange] ⏰ 待处理的重命名操作已超时，转换为删除操作: \(relativePath)")
+                            pendingRenames.removeValue(forKey: pendingKey)
+                            // 继续执行删除逻辑（不返回）
+                        } else {
+                            // 还在时间窗口内，继续等待新文件出现
+                            print("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
+                            // 暂时不记录，等待新文件出现
+                            return
+                        }
+                    } else {
+                        // 没有待处理的重命名操作，保存哈希值等待新文件出现
+                        pendingRenames[pendingKey] = (hash: knownMeta.hash, timestamp: now)
+                        print("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
+                        // 暂时不记录，等待新文件出现
+                        return
+                    }
                 }
             }
             

@@ -84,8 +84,12 @@ class SyncDecisionEngine {
                 // 删除记录的 VC 更新或相等，删除本地文件
                 return .deleteLocal
             case .antecedent:
-                // 删除记录的 VC 更旧，上传本地文件（删除被覆盖）
-                return .upload
+                // 删除记录的 VC 更旧，理论上应该上传本地文件（删除被覆盖）
+                // 但为了安全，保守处理：如果删除记录的 VC 更旧，说明删除操作更早
+                // 这种情况下，应该保持删除状态，而不是上传文件
+                // 因为删除操作已经发生，不应该被覆盖
+                print("[SyncDecisionEngine] ⚠️ 删除记录的 VC 更旧，但保守处理为保持删除: 路径=\(path)")
+                return .skip
             case .concurrent:
                 // 并发冲突，保守处理：删除本地，但记录冲突
                 return .conflict
@@ -100,7 +104,15 @@ class SyncDecisionEngine {
         
         // 6. 只有一方存在
         if localState != nil && remoteState == nil {
-            return .upload
+            // 重要：如果本地有文件，但远程没有，需要检查远程是否有删除记录
+            // 如果远程有删除记录（在 remoteStates 中但没有这个路径），说明文件已被删除
+            // 这种情况下不应该上传，应该跳过或删除本地
+            // 注意：这里 remoteState == nil 可能意味着：
+            // 1. 文件不存在（新文件，应该上传）
+            // 2. 文件已删除但删除记录没有传播（不应该上传）
+            // 为了安全，如果本地文件存在，但远程没有状态，保守处理为不确定
+            // 让调用者根据 deletedSet 等额外信息来决定
+            return .uncertain
         }
         if localState == nil && remoteState != nil {
             return .download

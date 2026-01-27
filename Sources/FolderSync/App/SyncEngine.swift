@@ -362,7 +362,6 @@ class SyncEngine {
             // 使用原子性删除操作创建删除记录
             if !locallyDeleted.isEmpty {
                 let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
-                let stateStore = syncManager.getFileStateStore(for: syncID)
                 
                 for path in locallyDeleted {
                     // 使用原子性删除操作创建删除记录
@@ -720,7 +719,9 @@ class SyncEngine {
 
             if mode == .twoWay || mode == .downloadOnly {
                 // 合并所有路径（本地和远程）
-                let allPaths = Set(remoteStates.keys).union(Set(localStates.keys))
+                // 重要：也要包含 remoteDeletedPaths，确保删除记录被检查
+                var allPaths = Set(remoteStates.keys).union(Set(localStates.keys))
+                allPaths.formUnion(Set(remoteDeletedPaths))
                 
                 for path in allPaths {
                     // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
@@ -730,6 +731,26 @@ class SyncEngine {
                     
                     // 跳过已处理的文件
                     if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
+                        continue
+                    }
+                    
+                    // 重要：先检查删除记录，防止已删除的文件被下载
+                    // 如果文件在 deletedSet 中，不应该下载
+                    if deletedSet.contains(path) {
+                        print("[SyncEngine] ⏭️ [download] 文件已删除，跳过下载: 路径=\(path)")
+                        continue
+                    }
+                    
+                    // 检查远程是否有删除记录
+                    if remoteDeletedPaths.contains(path) {
+                        // 远程已删除，应该删除本地文件（如果存在）
+                        if localState?.isDeleted != true {
+                            // 本地文件存在，应该删除
+                            print("[SyncEngine] 🗑️ [download] 远程已删除，删除本地文件: 路径=\(path)")
+                            await MainActor.run {
+                                syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
+                            }
+                        }
                         continue
                     }
                     
@@ -751,6 +772,11 @@ class SyncEngine {
                         
                     case .download:
                         // 下载文件（覆盖本地）
+                        // 再次检查删除记录（双重保险）
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [download] 文件已删除，跳过下载: 路径=\(path)")
+                            continue
+                        }
                         if let remoteMeta = remoteState?.metadata {
                             changedFilesSet.insert(path)
                             changedFiles.append((path, remoteMeta))
@@ -758,7 +784,7 @@ class SyncEngine {
                         
                     case .deleteLocal:
                         // 删除本地文件（远程已删除）
-                        if remoteState?.isDeleted == true {
+                        if remoteState?.isDeleted == true || remoteDeletedPaths.contains(path) {
                             await MainActor.run {
                                 syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
                             }
@@ -766,16 +792,25 @@ class SyncEngine {
                         
                     case .conflict:
                         // 冲突：保存远程版本为冲突文件
+                        // 再次检查删除记录（双重保险）
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [download] 冲突但文件已删除，跳过: 路径=\(path)")
+                            continue
+                        }
                         if let remoteMeta = remoteState?.metadata {
                             conflictFilesSet.insert(path)
                             conflictFiles.append((path, remoteMeta))
                         }
                         
                     case .uncertain:
-                        // 不确定：保守处理，记录警告
-                        print("[SyncEngine] ⚠️ [download] 无法确定同步方向: 路径=\(path)")
+                        // 不确定：检查删除记录后再决定
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [download] 不确定但文件已删除，跳过: 路径=\(path)")
+                            continue
+                        }
                         // 如果远程存在，下载（保守策略）
                         if let remoteMeta = remoteState?.metadata {
+                            print("[SyncEngine] ⚠️ [download] 无法确定同步方向: 路径=\(path)")
                             changedFilesSet.insert(path)
                             changedFiles.append((path, remoteMeta))
                         }
@@ -795,7 +830,9 @@ class SyncEngine {
 
             if mode == .twoWay || mode == .uploadOnly {
                 // 合并所有路径（本地和远程）
-                let allPaths = Set(localStates.keys).union(Set(remoteStates.keys))
+                // 重要：也要包含 remoteDeletedPaths，确保删除记录被检查
+                var allPaths = Set(localStates.keys).union(Set(remoteStates.keys))
+                allPaths.formUnion(Set(remoteDeletedPaths))
                 
                 for path in allPaths {
                     // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
@@ -810,6 +847,26 @@ class SyncEngine {
                     
                     // 跳过已处理的文件
                     if filesToUploadSet.contains(path) {
+                        continue
+                    }
+                    
+                    // 重要：先检查删除记录，防止已删除的文件被上传
+                    // 如果文件在 deletedSet 中，或者远程有删除记录，不应该上传
+                    if deletedSet.contains(path) {
+                        print("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
+                        continue
+                    }
+                    
+                    // 检查远程是否有删除记录（即使不在 remoteStates 中，也可能在 remoteDeletedPaths 中）
+                    if remoteDeletedPaths.contains(path) {
+                        // 远程已删除，应该删除本地文件（如果存在），不应该上传
+                        if localState?.isDeleted != true {
+                            // 本地文件存在，应该删除
+                            print("[SyncEngine] 🗑️ [upload] 远程已删除，删除本地文件: 路径=\(path)")
+                            await MainActor.run {
+                                syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
+                            }
+                        }
                         continue
                     }
                     
@@ -831,6 +888,11 @@ class SyncEngine {
                         
                     case .upload:
                         // 上传文件（覆盖远程）
+                        // 再次检查删除记录（双重保险）
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
+                            continue
+                        }
                         if let localMeta = localState?.metadata {
                             filesToUploadSet.insert(path)
                             filesToUpload.append((path, localMeta))
@@ -843,6 +905,11 @@ class SyncEngine {
                         
                     case .conflict:
                         // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                        // 再次检查删除记录（双重保险）
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [upload] 冲突但文件已删除，跳过: 路径=\(path)")
+                            continue
+                        }
                         if let localMeta = localState?.metadata {
                             if let remoteMeta = remoteState?.metadata {
                                 uploadConflictFiles.append((path, remoteMeta))
@@ -852,9 +919,15 @@ class SyncEngine {
                         }
                         
                     case .uncertain:
-                        // 无法确定：采用本地优先策略
-                        print("[SyncEngine] ⚠️ [upload] 无法确定同步方向，采用本地优先上传策略: 路径=\(path)")
+                        // 无法确定：检查删除记录后再决定
+                        // 如果文件已删除，不应该上传
+                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                            print("[SyncEngine] ⏭️ [upload] 不确定但文件已删除，跳过: 路径=\(path)")
+                            continue
+                        }
+                        // 如果本地有文件，但远程没有状态，且不在删除记录中，可能是新文件，应该上传
                         if let localMeta = localState?.metadata {
+                            print("[SyncEngine] ⚠️ [upload] 无法确定同步方向，采用本地优先上传策略: 路径=\(path)")
                             filesToUploadSet.insert(path)
                             filesToUpload.append((path, localMeta))
                         }

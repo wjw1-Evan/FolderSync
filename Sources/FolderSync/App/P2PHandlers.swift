@@ -69,13 +69,24 @@ class P2PHandlers {
                 // 如果远程客户端支持 filesV2，使用新格式；否则使用旧格式（兼容性）
                 // TODO: 可以通过协议协商来确定是否支持 filesV2
                 // 目前先同时支持两种格式，优先使用新格式
-                if !fileStates.isEmpty {
+                // 重要：即使 fileStates 为空，也要返回新格式，确保删除记录能传播
+                // 如果只有删除记录没有文件，fileStates 不为空（包含删除记录）
+                // 如果只有文件没有删除记录，fileStates 不为空（包含文件）
+                // 如果两者都没有，fileStates 为空，但这种情况很少见
+                if !fileStates.isEmpty || !deletedPaths.isEmpty {
+                    // 如果有删除记录但没有文件，确保删除记录包含在 fileStates 中
+                    if fileStates.isEmpty && !deletedPaths.isEmpty {
+                        for path in deletedPaths {
+                            if let state = stateStore.getState(for: path) {
+                                fileStates[path] = state
+                            }
+                        }
+                    }
                     return .filesV2(syncID: syncID, states: fileStates)
                 }
                 
-                // 兼容旧格式
-                let deletedPathsArray = Array(deletedPaths)
-                return .files(syncID: syncID, entries: metadata, deletedPaths: deletedPathsArray)
+                // 兼容旧格式（如果没有删除记录也没有文件）
+                return .files(syncID: syncID, entries: metadata, deletedPaths: [])
             }
             return .error("Folder not found")
             

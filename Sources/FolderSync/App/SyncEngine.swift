@@ -505,6 +505,9 @@ class SyncEngine {
             }
 
             /// 决定是否上传（使用 VectorClockManager 统一决策逻辑）
+            /// 
+            /// 注意：此函数已被重构，冲突检测现在在上层统一处理。
+            /// 此函数保留用于 FileTransfer 等需要简单布尔判断的场景。
             nonisolated func shouldUpload(local: FileMetadata, remote: FileMetadata?, path: String) -> Bool {
                 let localVC = local.vectorClock
                 let remoteVC = remote?.vectorClock
@@ -522,15 +525,13 @@ class SyncEngine {
                 switch decision {
                 case .skip, .overwriteLocal:
                     return false
-                case .overwriteRemote:
+                case .overwriteRemote, .uncertain:
+                    // uncertain 情况采用本地优先策略
                     return true
                 case .conflict:
-                    // 并发冲突在上层逻辑中单独处理（先保存远程版本为冲突文件，再上传本地版本）
+                    // 冲突情况：在上层逻辑中统一处理，这里返回 false 避免重复处理
+                    // 注意：FileTransfer 中使用此函数时，冲突会在上层被检测到并单独处理
                     return false
-                case .uncertain:
-                    // 没有可用的 Vector Clock：采用"本地优先"策略，使集群最终收敛到本地版本
-                    print("[SyncEngine] ⚠️ [shouldUpload] 缺少 Vector Clock，采用本地优先上传策略: 路径=\(path)")
-                    return true
                 }
             }
 
@@ -622,23 +623,39 @@ class SyncEngine {
                         continue
                     }
 
-                    // 检查是否有并发冲突
-                    if let remoteMeta = remoteEntries[path],
-                        let lvc = localMeta.vectorClock,
-                        let rvc = remoteMeta.vectorClock,
-                        !lvc.versions.isEmpty || !rvc.versions.isEmpty
-                    {
-                        let cmp = lvc.compare(to: rvc)
-                        if case .concurrent = cmp {
-                            // 并发冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                    // 统一使用 VectorClockManager 检测冲突（包括并发冲突和 equal 但哈希不同的情况）
+                    let remoteMeta = remoteEntries[path]
+                    let decision = VectorClockManager.decideSyncAction(
+                        localVC: localMeta.vectorClock,
+                        remoteVC: remoteMeta?.vectorClock,
+                        localHash: localMeta.hash,
+                        remoteHash: remoteMeta?.hash ?? "",
+                        direction: .upload
+                    )
+                    
+                    switch decision {
+                    case .skip, .overwriteLocal:
+                        // 不需要上传
+                        break
+                    case .overwriteRemote:
+                        // 需要上传覆盖远程
+                        filesToUploadSet.insert(path)
+                        filesToUpload.append((path, localMeta))
+                    case .conflict:
+                        // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                        if let remoteMeta = remoteMeta {
                             uploadConflictFiles.append((path, remoteMeta))
                             filesToUploadSet.insert(path)
                             filesToUpload.append((path, localMeta))
-                            continue
+                        } else {
+                            // 没有远程元数据，但检测到冲突（可能是 equal 但哈希不同），直接上传
+                            print("[SyncEngine] ⚠️ [upload] 检测到冲突但无远程元数据，直接上传: 路径=\(path)")
+                            filesToUploadSet.insert(path)
+                            filesToUpload.append((path, localMeta))
                         }
-                    }
-
-                    if shouldUpload(local: localMeta, remote: remoteEntries[path], path: path) {
+                    case .uncertain:
+                        // 无法确定：采用本地优先策略
+                        print("[SyncEngine] ⚠️ [upload] 无法确定同步方向，采用本地优先上传策略: 路径=\(path)")
                         filesToUploadSet.insert(path)
                         filesToUpload.append((path, localMeta))
                     }

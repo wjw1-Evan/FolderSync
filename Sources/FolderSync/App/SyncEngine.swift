@@ -279,8 +279,12 @@ class SyncEngine {
             }
 
             // 重要：使用最新的 folder 对象计算状态，而不是传入的旧对象
-            let (localMST, localMetadata, _, _) = await folderStatistics.calculateFullState(
+            // calculateFullState 已经排除了冲突文件，所以 localMetadata 不包含冲突文件
+            let (localMST, localMetadataRaw, _, _) = await folderStatistics.calculateFullState(
                 for: currentFolder)
+            
+            // 再次过滤冲突文件（双重保险，确保冲突文件不会被同步）
+            let localMetadata = ConflictFileFilter.filterConflictFiles(localMetadataRaw)
 
             let currentPaths = Set(localMetadata.keys)
             let lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
@@ -421,7 +425,7 @@ class SyncEngine {
                 return
             }
 
-            guard case .files(_, let remoteEntries) = filesRes else {
+            guard case .files(_, let remoteEntriesRaw) = filesRes else {
                 print("[SyncEngine] ❌ [performSync] filesRes 不是 files 类型")
                 // 记录错误日志
                 let log = SyncLog(
@@ -431,6 +435,9 @@ class SyncEngine {
                 try? StorageManager.shared.addSyncLog(log)
                 return
             }
+            
+            // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
+            let remoteEntries = ConflictFileFilter.filterConflictFiles(remoteEntriesRaw)
 
             let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
             var totalOps = 0
@@ -553,6 +560,11 @@ class SyncEngine {
 
             if mode == .twoWay || mode == .downloadOnly {
                 for (path, remoteMeta) in remoteEntries {
+                    // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
+                    if ConflictFileFilter.isConflictFile(path) {
+                        continue
+                    }
+                    
                     // 重要：如果文件在本地被删除（locallyDeleted）或已标记删除（deletedSet），不应该下载
                     // 同时检查文件是否在本地存在（如果不存在且不在 lastKnown 中，可能是第一次同步，应该下载）
                     if locallyDeleted.contains(path) || deletedSet.contains(path) {
@@ -592,6 +604,11 @@ class SyncEngine {
 
             if mode == .twoWay || mode == .uploadOnly {
                 for (path, localMeta) in localMetadata {
+                    // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
+                    if ConflictFileFilter.isConflictFile(path) {
+                        continue
+                    }
+                    
                     // 跳过已删除的文件
                     if locallyDeleted.contains(path) {
                         continue

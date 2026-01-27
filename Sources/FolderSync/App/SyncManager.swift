@@ -756,6 +756,12 @@ public class SyncManager: ObservableObject {
             }
         }
 
+        // 忽略冲突文件（冲突文件不应该被同步，避免无限循环）
+        if ConflictFileFilter.isConflictFile(relativePath) {
+            print("[recordLocalChange] ⏭️ 忽略冲突文件: \(relativePath)")
+            return
+        }
+        
         // 忽略排除规则或隐藏文件
         if isIgnored(relativePath, folder: folder) {
             print("[recordLocalChange] ⏭️ 忽略文件（排除规则）: \(relativePath)")

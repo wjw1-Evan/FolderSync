@@ -41,7 +41,9 @@ class P2PHandlers {
         case .getFiles(let syncID):
             let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
             if let folder = folder {
-                let (_, metadata, _, _) = await folderStatistics.calculateFullState(for: folder)
+                let (_, metadataRaw, _, _) = await folderStatistics.calculateFullState(for: folder)
+                // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
+                let metadata = ConflictFileFilter.filterConflictFiles(metadataRaw)
                 return .files(syncID: syncID, entries: metadata)
             }
             return .error("Folder not found")

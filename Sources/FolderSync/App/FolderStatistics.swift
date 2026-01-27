@@ -117,8 +117,10 @@ class FolderStatistics {
                         folderCount += 1
                     }
                 } else {
-                    // 文件路径
-                    filePaths.append((fileURL, relativePath))
+                    // 文件路径：排除冲突文件（冲突文件不应该被同步）
+                    if !ConflictFileFilter.isConflictFile(relativePath) {
+                        filePaths.append((fileURL, relativePath))
+                    }
                 }
             } catch {
                 print("[FolderStatistics] ⚠️ 无法读取文件属性: \(fileURL.path) - \(error)")

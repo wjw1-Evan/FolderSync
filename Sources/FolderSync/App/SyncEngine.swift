@@ -741,6 +741,10 @@ class SyncEngine {
                         continue
                     }
                     
+                    // 获取本地和远程状态
+                    let localState = localStates[path]
+                    let remoteState = remoteStates[path]
+                    
                     // 检查远程是否有删除记录
                     if remoteDeletedPaths.contains(path) {
                         // 远程已删除，应该删除本地文件（如果存在）
@@ -753,10 +757,6 @@ class SyncEngine {
                         }
                         continue
                     }
-                    
-                    // 获取本地和远程状态
-                    let localState = localStates[path]
-                    let remoteState = remoteStates[path]
                     
                     // 使用统一的决策引擎
                     let action = SyncDecisionEngine.decideSyncAction(
@@ -857,6 +857,10 @@ class SyncEngine {
                         continue
                     }
                     
+                    // 获取本地和远程状态
+                    let localState = localStates[path]
+                    let remoteState = remoteStates[path]
+                    
                     // 检查远程是否有删除记录（即使不在 remoteStates 中，也可能在 remoteDeletedPaths 中）
                     if remoteDeletedPaths.contains(path) {
                         // 远程已删除，应该删除本地文件（如果存在），不应该上传
@@ -869,10 +873,6 @@ class SyncEngine {
                         }
                         continue
                     }
-                    
-                    // 获取本地和远程状态
-                    let localState = localStates[path]
-                    let remoteState = remoteStates[path]
                     
                     // 使用统一的决策引擎
                     let action = SyncDecisionEngine.decideSyncAction(

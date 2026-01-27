@@ -359,7 +359,19 @@ class SyncEngine {
             }
 
             // 更新 deletedPaths（只包含真正的删除，不包括重命名）
+            // 使用原子性删除操作创建删除记录
             if !locallyDeleted.isEmpty {
+                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                let stateStore = syncManager.getFileStateStore(for: syncID)
+                
+                for path in locallyDeleted {
+                    // 使用原子性删除操作创建删除记录
+                    await MainActor.run {
+                        syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
+                    }
+                }
+                
+                // 更新旧的删除记录格式（兼容性）
                 var dp = syncManager.deletedPaths(for: syncID)
                 dp.formUnion(locallyDeleted)
                 syncManager.updateDeletedPaths(dp, for: syncID)
@@ -425,8 +437,49 @@ class SyncEngine {
                 return
             }
 
-            guard case .files(_, let remoteEntriesRaw, let remoteDeletedPaths) = filesRes else {
-                print("[SyncEngine] ❌ [performSync] filesRes 不是 files 类型")
+            // 处理新的统一状态格式（filesV2）或旧格式（files）
+            var remoteEntries: [String: FileMetadata] = [:]
+            var remoteDeletedPaths: [String] = []
+            var remoteStates: [String: FileState] = [:]
+            
+            switch filesRes {
+            case .filesV2(_, let states):
+                // 新格式：统一状态表示
+                remoteStates = states
+                // 提取文件元数据和删除记录
+                for (path, state) in states {
+                    switch state {
+                    case .exists(let meta):
+                        // 过滤冲突文件
+                        if !ConflictFileFilter.isConflictFile(path) {
+                            remoteEntries[path] = meta
+                        }
+                    case .deleted(_):
+                        remoteDeletedPaths.append(path)
+                    }
+                }
+            case .files(_, let entriesRaw, let deletedPaths):
+                // 旧格式：兼容处理
+                remoteEntries = ConflictFileFilter.filterConflictFiles(entriesRaw)
+                remoteDeletedPaths = deletedPaths
+                // 转换为统一状态格式
+                for (path, meta) in remoteEntries {
+                    remoteStates[path] = .exists(meta)
+                }
+                for path in remoteDeletedPaths {
+                    // 创建删除记录（使用当前时间，因为旧格式没有删除时间信息）
+                    // 尝试从远程获取删除记录的 Vector Clock，如果没有则创建新的
+                    let currentVC = VectorClockManager.getVectorClock(syncID: syncID, path: path) ?? VectorClock()
+                    let deletionRecord = DeletionRecord(
+                        deletedAt: Date(),
+                        deletedBy: peerID,
+                        vectorClock: currentVC
+                    )
+                    remoteStates[path] = .deleted(deletionRecord)
+                    // 注意：这里简化处理，实际应该从远程获取删除记录的 Vector Clock
+                }
+            default:
+                print("[SyncEngine] ❌ [performSync] filesRes 不是 files 或 filesV2 类型")
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -436,8 +489,23 @@ class SyncEngine {
                 return
             }
             
-            // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
-            let remoteEntries = ConflictFileFilter.filterConflictFiles(remoteEntriesRaw)
+            // 获取本地状态存储
+            let localStateStore = syncManager.getFileStateStore(for: syncID)
+            
+            // 构建本地状态映射（用于决策）
+            var localStates: [String: FileState] = [:]
+            for (path, meta) in localMetadata {
+                if !ConflictFileFilter.isConflictFile(path) {
+                    localStates[path] = .exists(meta)
+                }
+            }
+            // 添加本地删除记录
+            let localDeletedPaths = localStateStore.getDeletedPaths()
+            for path in localDeletedPaths {
+                if let state = localStateStore.getState(for: path) {
+                    localStates[path] = state
+                }
+            }
 
             let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
             var totalOps = 0
@@ -473,6 +541,13 @@ class SyncEngine {
 
             /// 决定下载操作（使用 VectorClockManager 统一决策逻辑）
             func downloadAction(remote: FileMetadata, local: FileMetadata?, path: String) -> DownloadAction {
+                // 重要：如果文件已删除（在 deletedSet 中），直接跳过，不下载
+                // 这可以防止已删除的文件因为 Vector Clock 相等但哈希不同而被重新下载
+                if deletedSet.contains(path) {
+                    print("[SyncEngine] ⏭️ [downloadAction] 文件已删除，跳过下载: 路径=\(path)")
+                    return .skip
+                }
+                
                 let localVC = local?.vectorClock
                 let remoteVC = remote.vectorClock
                 let localHash = local?.hash ?? ""
@@ -544,15 +619,59 @@ class SyncEngine {
             let remoteDeletedSet = Set(remoteDeletedPaths)
             if !remoteDeletedSet.isEmpty {
                 print("[SyncEngine] 📋 收到远程删除记录: \(remoteDeletedSet.count) 个文件")
+                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                
                 for deletedPath in remoteDeletedSet {
-                    // 如果本地有这个文件，删除它
+                    // 获取远程删除记录（如果使用新格式）
+                    let remoteState = remoteStates[deletedPath]
+                    let remoteDeletionRecord = remoteState?.deletionRecord
+                    
+                    // 使用原子性删除操作（如果本地有文件）
                     let fileURL = currentFolder.localPath.appendingPathComponent(deletedPath)
                     if fileManager.fileExists(atPath: fileURL.path) {
                         print("[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录）: \(deletedPath)")
-                        try? fileManager.removeItem(at: fileURL)
-                        // 删除 Vector Clock
-                        VectorClockManager.deleteVectorClock(syncID: syncID, path: deletedPath)
+                        await MainActor.run {
+                            syncManager.deleteFileAtomically(path: deletedPath, syncID: syncID, peerID: myPeerID)
+                        }
+                    } else {
+                        // 如果本地没有文件，合并删除记录
+                        let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+                        let localState = stateStore.getState(for: deletedPath)
+                        
+                        if let remoteDel = remoteDeletionRecord {
+                            // 有远程删除记录，合并 Vector Clock
+                            let localVC = localState?.vectorClock ?? VectorClock()
+                            let mergedVC = VectorClockManager.mergeVectorClocks(
+                                localVC: localVC,
+                                remoteVC: remoteDel.vectorClock
+                            )
+                            
+                            // 创建合并后的删除记录（使用更早的删除时间）
+                            let deletionRecord = DeletionRecord(
+                                deletedAt: min(remoteDel.deletedAt, localState?.deletionRecord?.deletedAt ?? remoteDel.deletedAt),
+                                deletedBy: remoteDel.deletedBy,  // 使用远程的删除者
+                                vectorClock: mergedVC
+                            )
+                            
+                            stateStore.setDeleted(path: deletedPath, record: deletionRecord)
+                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: mergedVC)
+                        } else {
+                            // 没有远程删除记录（旧格式），创建新的删除记录
+                            let currentVC = VectorClockManager.getVectorClock(syncID: syncID, path: deletedPath) ?? VectorClock()
+                            var updatedVC = currentVC
+                            updatedVC.increment(for: myPeerID)
+                            
+                            let deletionRecord = DeletionRecord(
+                                deletedAt: Date(),
+                                deletedBy: myPeerID,
+                                vectorClock: updatedVC
+                            )
+                            
+                            stateStore.setDeleted(path: deletedPath, record: deletionRecord)
+                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: updatedVC)
+                        }
                     }
+                    
                     // 更新 deletedSet，确保这个文件不会被上传
                     deletedSet.insert(deletedPath)
                     // 如果这个文件在本地元数据中，从上传列表中排除
@@ -567,12 +686,25 @@ class SyncEngine {
             // 清理已确认删除的文件（远程也没有了）
             // 注意：如果文件在远程不存在，说明删除已经完成，从 deletedSet 中移除
             // 这是删除确认的唯一正确时机：通过检查远程文件列表确认文件已不存在
-            let confirmed = deletedSet.filter { !remoteEntries.keys.contains($0) }
+            // 
+            // 重要：只有当文件不在远程文件列表中，且不在远程删除记录中时，才认为删除已确认
+            // 这样可以防止删除记录被过早清理，导致其他客户端重新同步已删除的文件
+            let confirmed = deletedSet.filter { path in
+                // 文件不在远程文件列表中
+                let notInRemoteFiles = !remoteEntries.keys.contains(path)
+                // 文件不在远程删除记录中（如果使用新格式）
+                let notInRemoteDeleted = !remoteDeletedPaths.contains(path)
+                // 只有当文件不在远程文件列表中，且不在远程删除记录中时，才确认删除
+                return notInRemoteFiles && notInRemoteDeleted
+            }
             for p in confirmed {
                 deletedSet.remove(p)
                 // 同时从 locallyDeleted 中移除（如果存在），因为远程已经确认删除
                 locallyDeleted.remove(p)
-                print("[SyncEngine] ✅ 删除已确认: \(p) (远程文件已不存在)")
+                // 从状态存储中移除删除记录（如果所有客户端都已确认）
+                let stateStore = syncManager.getFileStateStore(for: syncID)
+                stateStore.removeState(path: p)
+                print("[SyncEngine] ✅ 删除已确认: \(p) (远程文件已不存在且不在远程删除记录中)")
             }
             if deletedSet.isEmpty {
                 syncManager.removeDeletedPaths(for: syncID)
@@ -587,39 +719,70 @@ class SyncEngine {
             var conflictFiles: [(String, FileMetadata)] = []
 
             if mode == .twoWay || mode == .downloadOnly {
-                for (path, remoteMeta) in remoteEntries {
+                // 合并所有路径（本地和远程）
+                let allPaths = Set(remoteStates.keys).union(Set(localStates.keys))
+                
+                for path in allPaths {
                     // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
                     if ConflictFileFilter.isConflictFile(path) {
                         continue
                     }
                     
-                    // 重要：如果文件在本地被删除（locallyDeleted）或已标记删除（deletedSet），不应该下载
-                    // 同时检查文件是否在本地存在（如果不存在且不在 lastKnown 中，可能是第一次同步，应该下载）
-                    if locallyDeleted.contains(path) || deletedSet.contains(path) {
-                        continue
-                    }
-                    // 额外检查：如果文件在本地不存在，且不在 lastKnown 中（第一次同步），应该下载
-                    // 但如果文件在本地不存在，且在 lastKnown 中（已删除），不应该下载
-                    let fileURL = currentFolder.localPath.appendingPathComponent(path)
-                    if !fileManager.fileExists(atPath: fileURL.path) {
-                        // 文件不存在，检查是否在 lastKnown 中
-                        if lastKnown.contains(path) {
-                            // 文件在 lastKnown 中但不存在，说明被删除了，不应该下载
-                            continue
-                        }
-                        // 文件不在 lastKnown 中，可能是第一次同步，应该下载
-                    }
+                    // 跳过已处理的文件
                     if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
                         continue
                     }
-                    switch downloadAction(remote: remoteMeta, local: localMetadata[path], path: path) {
-                    case .skip: break
-                    case .overwrite:
-                        changedFilesSet.insert(path)
-                        changedFiles.append((path, remoteMeta))
+                    
+                    // 获取本地和远程状态
+                    let localState = localStates[path]
+                    let remoteState = remoteStates[path]
+                    
+                    // 使用统一的决策引擎
+                    let action = SyncDecisionEngine.decideSyncAction(
+                        localState: localState,
+                        remoteState: remoteState,
+                        path: path
+                    )
+                    
+                    switch action {
+                    case .skip:
+                        // 无需操作
+                        break
+                        
+                    case .download:
+                        // 下载文件（覆盖本地）
+                        if let remoteMeta = remoteState?.metadata {
+                            changedFilesSet.insert(path)
+                            changedFiles.append((path, remoteMeta))
+                        }
+                        
+                    case .deleteLocal:
+                        // 删除本地文件（远程已删除）
+                        if remoteState?.isDeleted == true {
+                            await MainActor.run {
+                                syncManager.deleteFileAtomically(path: path, syncID: syncID, peerID: myPeerID)
+                            }
+                        }
+                        
                     case .conflict:
-                        conflictFilesSet.insert(path)
-                        conflictFiles.append((path, remoteMeta))
+                        // 冲突：保存远程版本为冲突文件
+                        if let remoteMeta = remoteState?.metadata {
+                            conflictFilesSet.insert(path)
+                            conflictFiles.append((path, remoteMeta))
+                        }
+                        
+                    case .uncertain:
+                        // 不确定：保守处理，记录警告
+                        print("[SyncEngine] ⚠️ [download] 无法确定同步方向: 路径=\(path)")
+                        // 如果远程存在，下载（保守策略）
+                        if let remoteMeta = remoteState?.metadata {
+                            changedFilesSet.insert(path)
+                            changedFiles.append((path, remoteMeta))
+                        }
+                        
+                    case .upload, .deleteRemote:
+                        // 下载阶段不应该出现这些操作
+                        break
                     }
                 }
             }
@@ -631,60 +794,74 @@ class SyncEngine {
             var uploadConflictFiles: [(String, FileMetadata)] = []  // 上传时的冲突文件（需要先保存远程版本）
 
             if mode == .twoWay || mode == .uploadOnly {
-                for (path, localMeta) in localMetadata {
+                // 合并所有路径（本地和远程）
+                let allPaths = Set(localStates.keys).union(Set(remoteStates.keys))
+                
+                for path in allPaths {
                     // 重要：排除冲突文件（冲突文件不应该被同步，避免无限循环）
                     if ConflictFileFilter.isConflictFile(path) {
                         continue
                     }
                     
-                    // 跳过已删除的文件（包括本地删除和远程删除记录）
-                    if locallyDeleted.contains(path) || deletedSet.contains(path) {
-                        continue
-                    }
                     // 跳过重命名的旧路径（旧路径会在删除阶段处理，新路径会正常上传）
                     if renamedFiles.keys.contains(path) {
-                        // 这是重命名的旧路径，跳过（新路径会正常上传）
                         continue
                     }
+                    
+                    // 跳过已处理的文件
                     if filesToUploadSet.contains(path) {
                         continue
                     }
-
-                    // 统一使用 VectorClockManager 检测冲突（包括并发冲突和 equal 但哈希不同的情况）
-                    let remoteMeta = remoteEntries[path]
-                    let decision = VectorClockManager.decideSyncAction(
-                        localVC: localMeta.vectorClock,
-                        remoteVC: remoteMeta?.vectorClock,
-                        localHash: localMeta.hash,
-                        remoteHash: remoteMeta?.hash ?? "",
-                        direction: .upload
+                    
+                    // 获取本地和远程状态
+                    let localState = localStates[path]
+                    let remoteState = remoteStates[path]
+                    
+                    // 使用统一的决策引擎
+                    let action = SyncDecisionEngine.decideSyncAction(
+                        localState: localState,
+                        remoteState: remoteState,
+                        path: path
                     )
                     
-                    switch decision {
-                    case .skip, .overwriteLocal:
-                        // 不需要上传
+                    switch action {
+                    case .skip:
+                        // 无需操作
                         break
-                    case .overwriteRemote:
-                        // 需要上传覆盖远程
-                        filesToUploadSet.insert(path)
-                        filesToUpload.append((path, localMeta))
-                    case .conflict:
-                        // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
-                        if let remoteMeta = remoteMeta {
-                            uploadConflictFiles.append((path, remoteMeta))
-                            filesToUploadSet.insert(path)
-                            filesToUpload.append((path, localMeta))
-                        } else {
-                            // 没有远程元数据，但检测到冲突（可能是 equal 但哈希不同），直接上传
-                            print("[SyncEngine] ⚠️ [upload] 检测到冲突但无远程元数据，直接上传: 路径=\(path)")
+                        
+                    case .upload:
+                        // 上传文件（覆盖远程）
+                        if let localMeta = localState?.metadata {
                             filesToUploadSet.insert(path)
                             filesToUpload.append((path, localMeta))
                         }
+                        
+                    case .deleteRemote:
+                        // 删除远程文件（本地已删除）
+                        // 这个操作会在删除阶段处理
+                        break
+                        
+                    case .conflict:
+                        // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                        if let localMeta = localState?.metadata {
+                            if let remoteMeta = remoteState?.metadata {
+                                uploadConflictFiles.append((path, remoteMeta))
+                            }
+                            filesToUploadSet.insert(path)
+                            filesToUpload.append((path, localMeta))
+                        }
+                        
                     case .uncertain:
                         // 无法确定：采用本地优先策略
                         print("[SyncEngine] ⚠️ [upload] 无法确定同步方向，采用本地优先上传策略: 路径=\(path)")
-                        filesToUploadSet.insert(path)
-                        filesToUpload.append((path, localMeta))
+                        if let localMeta = localState?.metadata {
+                            filesToUploadSet.insert(path)
+                            filesToUpload.append((path, localMeta))
+                        }
+                        
+                    case .download, .deleteLocal:
+                        // 上传阶段不应该出现这些操作
+                        break
                     }
                 }
             }
@@ -730,15 +907,22 @@ class SyncEngine {
                     // 2. 应该等到下次同步时，通过检查远程文件列表确认文件已不存在后再移除
                     // 3. 这样可以防止删除请求成功后，但远程文件还在的情况下，文件被重新下载
                     
+                    // 获取当前设备的 PeerID（用于创建删除记录）
+                    let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                    
                     for rel in toDelete {
-                        // 删除本地文件（如果存在）
-                        let fileURL = currentFolder.localPath.appendingPathComponent(rel)
+                        // 使用原子性删除操作
+                        await MainActor.run {
+                            syncManager.deleteFileAtomically(path: rel, syncID: syncID, peerID: myPeerID)
+                        }
+                        
                         let fileName = (rel as NSString).lastPathComponent
                         let pathDir = (rel as NSString).deletingLastPathComponent
                         let folderName =
                             pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
                         var fileSize: Int64 = 0
+                        let fileURL = currentFolder.localPath.appendingPathComponent(rel)
                         if fileManager.fileExists(atPath: fileURL.path),
                             let attributes = try? fileManager.attributesOfItem(
                                 atPath: fileURL.path),
@@ -746,13 +930,6 @@ class SyncEngine {
                         {
                             fileSize = size
                         }
-
-                        if fileManager.fileExists(atPath: fileURL.path) {
-                            try? fileManager.removeItem(at: fileURL)
-                        }
-
-                        // 删除 Vector Clock
-                        VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
 
                         syncedFiles.append(
                             SyncLog.SyncedFileInfo(

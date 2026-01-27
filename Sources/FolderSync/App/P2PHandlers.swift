@@ -44,9 +44,38 @@ class P2PHandlers {
                 let (_, metadataRaw, _, _) = await folderStatistics.calculateFullState(for: folder)
                 // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
                 let metadata = ConflictFileFilter.filterConflictFiles(metadataRaw)
-                // 获取本地的删除记录（tombstones），发送给远程客户端
-                let deletedPaths = Array(syncManager.deletedPaths(for: syncID))
-                return .files(syncID: syncID, entries: metadata, deletedPaths: deletedPaths)
+                
+                // 获取文件状态存储
+                let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+                
+                // 构建统一的状态表示
+                var fileStates: [String: FileState] = [:]
+                
+                // 添加存在的文件
+                for (path, meta) in metadata {
+                    fileStates[path] = .exists(meta)
+                }
+                
+                // 添加删除记录
+                let deletedPaths = stateStore.getDeletedPaths()
+                for path in deletedPaths {
+                    if let state = stateStore.getState(for: path),
+                       case .deleted(let record) = state {
+                        fileStates[path] = .deleted(record)
+                    }
+                }
+                
+                // 优先返回新的统一状态格式（filesV2）
+                // 如果远程客户端支持 filesV2，使用新格式；否则使用旧格式（兼容性）
+                // TODO: 可以通过协议协商来确定是否支持 filesV2
+                // 目前先同时支持两种格式，优先使用新格式
+                if !fileStates.isEmpty {
+                    return .filesV2(syncID: syncID, states: fileStates)
+                }
+                
+                // 兼容旧格式
+                let deletedPathsArray = Array(deletedPaths)
+                return .files(syncID: syncID, entries: metadata, deletedPaths: deletedPathsArray)
             }
             return .error("Folder not found")
             
@@ -170,17 +199,16 @@ class P2PHandlers {
             return .error("Folder not found")
         }
         
-        let fileManager = FileManager.default
+        // 获取当前设备的 PeerID（用于创建删除记录）
+        let peerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
         
+        // 使用原子性删除操作
         for rel in paths {
-            let fileURL = folder.localPath.appendingPathComponent(rel)
-            // 如果文件存在，直接删除
-            if fileManager.fileExists(atPath: fileURL.path) {
-                try? fileManager.removeItem(at: fileURL)
+            await MainActor.run {
+                syncManager.deleteFileAtomically(path: rel, syncID: syncID, peerID: peerID)
             }
-            // 删除 Vector Clock（使用 VectorClockManager）
-            VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
         }
+        
         return .deleteAck(syncID: syncID)
     }
     

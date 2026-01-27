@@ -28,6 +28,8 @@ public struct FileMetadata: Codable {
 public enum SyncResponse: Codable {
     case mstRoot(syncID: String, rootHash: String)
     case files(syncID: String, entries: [String: FileMetadata], deletedPaths: [String] = []) // path: metadata, deletedPaths: 删除记录（tombstones）
+    // 新版本：统一状态表示（逐步迁移）
+    case filesV2(syncID: String, states: [String: FileState]) // path: FileState（统一的状态表示）
     case fileData(syncID: String, path: String, data: Data)
     case putAck(syncID: String, path: String)
     case deleteAck(syncID: String)

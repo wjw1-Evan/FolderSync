@@ -842,28 +842,35 @@ public class SyncManager: ObservableObject {
         }
 
         // 清理过期的待处理重命名操作，并将过期的转换为删除操作
+        // 重要：只处理当前文件夹的过期条目，避免影响其他文件夹的状态
         let now = Date()
         var expiredRenames: [String] = []  // 存储过期的重命名操作的路径
+        
+        // 只过滤当前文件夹的过期条目，保留其他文件夹的条目
+        let currentFolderPrefix = "\(folder.syncID):"
         pendingRenames = pendingRenames.filter { key, value in
+            // 如果不是当前文件夹的条目，保留它（不处理）
+            guard key.hasPrefix(currentFolderPrefix) else {
+                return true  // 保留其他文件夹的条目
+            }
+            
             let isExpired = now.timeIntervalSince(value.timestamp) > renameDetectionWindow
             if isExpired {
-                // 提取路径
-                let keyParts = key.split(separator: ":", maxSplits: 1)
-                if keyParts.count == 2, keyParts[0] == folder.syncID {
-                    let path = String(keyParts[1])
-                    expiredRenames.append(path)
-                }
+                // 提取路径（移除 syncID 前缀）
+                let path = String(key.dropFirst(currentFolderPrefix.count))
+                expiredRenames.append(path)
+                return false  // 移除过期的条目
             }
-            return !isExpired
+            return true  // 保留未过期的条目
         }
         
-        // 将过期的重命名操作转换为删除操作
+        // 将过期的重命名操作转换为删除操作（只处理当前文件夹）
         for expiredPath in expiredRenames {
             // 检查文件是否真的不存在（可能已经被删除）
             let expiredFileURL = folder.localPath.appendingPathComponent(expiredPath)
             if !fileManager.fileExists(atPath: expiredFileURL.path) {
                 // 文件不存在，这是真正的删除，不是重命名
-                print("[recordLocalChange] ⏰ 重命名操作超时，转换为删除操作: \(expiredPath)")
+                print("[recordLocalChange] ⏰ 重命名操作超时，转换为删除操作: \(expiredPath) (syncID: \(folder.syncID))")
                 let change = LocalChange(
                     folderID: folder.id,
                     path: expiredPath,

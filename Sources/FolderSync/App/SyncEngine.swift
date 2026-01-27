@@ -683,11 +683,12 @@ class SyncEngine {
             }
 
             // 清理已确认删除的文件（远程也没有了）
-            // 注意：如果文件在远程不存在，说明删除已经完成，从 deletedSet 中移除
-            // 这是删除确认的唯一正确时机：通过检查远程文件列表确认文件已不存在
+            // 重要：在多客户端场景下，删除记录的清理需要更保守的策略
+            // 问题：如果只检查单个远程客户端就清理删除记录，其他客户端可能还没有收到删除记录
+            // 解决方案：删除记录应该保留更长时间（至少7天），确保所有客户端都有机会收到删除记录
             // 
-            // 重要：只有当文件不在远程文件列表中，且不在远程删除记录中时，才认为删除已确认
-            // 这样可以防止删除记录被过早清理，导致其他客户端重新同步已删除的文件
+            // 当前策略：只从 deletedSet 中移除已确认的删除，但不立即清理 FileStateStore 中的删除记录
+            // FileStateStore 中的删除记录会通过 cleanupExpiredDeletions 定期清理（7天后）
             let confirmed = deletedSet.filter { path in
                 // 文件不在远程文件列表中
                 let notInRemoteFiles = !remoteEntries.keys.contains(path)
@@ -696,19 +697,34 @@ class SyncEngine {
                 // 只有当文件不在远程文件列表中，且不在远程删除记录中时，才确认删除
                 return notInRemoteFiles && notInRemoteDeleted
             }
+            
+            // 重要：只从 deletedSet 中移除，但不立即清理 FileStateStore 中的删除记录
+            // 这样可以确保删除记录保留更长时间，让所有客户端都有机会收到
             for p in confirmed {
                 deletedSet.remove(p)
                 // 同时从 locallyDeleted 中移除（如果存在），因为远程已经确认删除
                 locallyDeleted.remove(p)
-                // 从状态存储中移除删除记录（如果所有客户端都已确认）
-                let stateStore = syncManager.getFileStateStore(for: syncID)
-                stateStore.removeState(path: p)
-                print("[SyncEngine] ✅ 删除已确认: \(p) (远程文件已不存在且不在远程删除记录中)")
+                // 注意：不立即清理 FileStateStore 中的删除记录
+                // 删除记录会通过 cleanupExpiredDeletions 定期清理（7天后）
+                // 这样可以确保所有客户端都有机会收到删除记录
+                print("[SyncEngine] ✅ 删除已确认（从 deletedSet 移除）: \(p) (远程文件已不存在且不在远程删除记录中，但保留删除记录7天)")
             }
+            
+            // 更新 deletedSet（即使为空也更新，确保状态一致）
             if deletedSet.isEmpty {
                 syncManager.removeDeletedPaths(for: syncID)
             } else {
                 syncManager.updateDeletedPaths(deletedSet, for: syncID)
+            }
+            
+            // 定期清理过期的删除记录（7天后）
+            // 这样可以确保删除记录保留足够长时间，让所有客户端都有机会收到
+            let stateStore = syncManager.getFileStateStore(for: syncID)
+            stateStore.cleanupExpiredDeletions(expirationTime: 7 * 24 * 60 * 60) { path in
+                // 检查是否所有在线客户端都已确认删除
+                // 这里简化处理：如果删除记录超过7天，就清理
+                // 这样可以确保删除记录保留足够长时间，让所有客户端都有机会收到
+                return true  // 7天后自动清理
             }
 
             // 3. Download phase

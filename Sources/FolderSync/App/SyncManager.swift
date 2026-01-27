@@ -1041,12 +1041,6 @@ public class SyncManager: ObservableObject {
             // 这是重命名操作（通过哈希值匹配确认）
             changeType = .renamed
             print("[recordLocalChange] ✅ 记录为重命名：通过哈希值匹配检测到 \(oldPath) -> \(relativePath)")
-        } else if hasRenamedFlag && isKnownPath {
-            // 重要：只有在文件已经在已知路径中时，才将 Renamed 标志视为重命名
-            // 如果文件不在已知路径中，可能是从远程同步回来的文件，不应该被记录为重命名
-            // 这种情况下，应该检查是否真的是重命名（通过哈希值匹配），否则记录为新建
-            changeType = .renamed
-            print("[recordLocalChange] ✅ 记录为重命名：设置了 Renamed 标志且文件在已知路径中")
         } else if hasCreatedFlag {
             // 明确设置了 Created 标志，记录为新建
             changeType = .created

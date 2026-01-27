@@ -1009,32 +1009,81 @@ public class SyncManager: ObservableObject {
         
         // 首先检查是否有待处理的重命名操作（通过哈希值匹配）
         var matchedRename: String? = nil
-        if hasRenamedFlag || !isKnownPath {
+        var isOldPathOfRename: Bool = false  // 标记是否是重命名操作的旧路径
+        
+        // 如果文件不在已知路径中，需要检查是否是重命名操作的旧路径
+        // 即使没有 Renamed 标志，也要检查（因为从远程同步回来的文件可能没有该标志）
+        if !isKnownPath {
             // 计算当前文件的哈希值
             do {
                 let fileURL = URL(fileURLWithPath: absolutePath)
                 let currentHash = try computeFileHash(fileURL: fileURL)
                 
                 // 检查是否有待处理的重命名操作（旧文件哈希值匹配）
-                for (pendingKey, pendingInfo) in pendingRenames {
-                    let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
-                    if keyParts.count == 2, keyParts[0] == folder.syncID {
-                        let oldPath = String(keyParts[1])
-                        // 检查时间窗口和哈希值
-                        if now.timeIntervalSince(pendingInfo.timestamp) <= renameDetectionWindow,
-                           pendingInfo.hash == currentHash {
-                            // 找到匹配的重命名操作
-                            matchedRename = oldPath
-                            print("[recordLocalChange] 🔄 检测到重命名操作: \(oldPath) -> \(relativePath) (哈希值匹配)")
-                            // 从待处理列表中移除
-                            pendingRenames.removeValue(forKey: pendingKey)
-                            break
+                if hasRenamedFlag {
+                    for (pendingKey, pendingInfo) in pendingRenames {
+                        let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
+                        if keyParts.count == 2, keyParts[0] == folder.syncID {
+                            let oldPath = String(keyParts[1])
+                            // 检查时间窗口和哈希值
+                            if now.timeIntervalSince(pendingInfo.timestamp) <= renameDetectionWindow,
+                               pendingInfo.hash == currentHash {
+                                // 找到匹配的重命名操作
+                                matchedRename = oldPath
+                                print("[recordLocalChange] 🔄 检测到重命名操作: \(oldPath) -> \(relativePath) (哈希值匹配)")
+                                // 从待处理列表中移除
+                                pendingRenames.removeValue(forKey: pendingKey)
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                // 重要：如果文件不在已知路径中，且哈希值与某个 pendingRenames 中的旧路径匹配，
+                // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
+                if matchedRename == nil {
+                    for (pendingKey, pendingInfo) in pendingRenames {
+                        let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
+                        if keyParts.count == 2, keyParts[0] == folder.syncID {
+                            let oldPath = String(keyParts[1])
+                            // 检查哈希值（即使时间窗口已过，也检查哈希值，因为可能是从远程同步回来的）
+                            if pendingInfo.hash == currentHash {
+                                // 这是重命名操作的旧路径，不应该被记录为新建
+                                isOldPathOfRename = true
+                                print("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))")
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                // 重要：如果文件不在已知路径中，且哈希值与某个已知文件（可能是重命名的新路径）的哈希值匹配，
+                // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
+                // 注意：这个检查应该在 pendingRenames 检查之后，因为如果 pendingRenames 中有匹配，说明重命名操作正在进行中
+                if !isOldPathOfRename {
+                    // 检查所有已知文件的哈希值
+                    if let knownMetadata = lastKnownMetadata[folder.syncID] {
+                        for (knownPath, knownMeta) in knownMetadata {
+                            if knownMeta.hash == currentHash {
+                                // 哈希值匹配，说明这是重命名操作的旧路径（新路径已经在已知路径中）
+                                // 但需要确认这不是同一个文件（路径不同）
+                                if knownPath != relativePath {
+                                    isOldPathOfRename = true
+                                    print("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与已知文件匹配），不应该被记录为新建: \(relativePath) (新路径: \(knownPath))")
+                                    break
+                                }
+                            }
                         }
                     }
                 }
             } catch {
                 print("[recordLocalChange] ⚠️ 无法计算哈希值以检测重命名: \(error)")
             }
+        }
+        
+        // 如果是重命名操作的旧路径，跳过处理
+        if isOldPathOfRename {
+            return
         }
         
         if let oldPath = matchedRename {

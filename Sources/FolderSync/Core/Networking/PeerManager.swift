@@ -325,27 +325,6 @@ public class PeerManager: ObservableObject {
         savePeersDebounced()
     }
     
-    /// 标记 Peer 为正在注册（已废弃，使用 registrationService 管理）
-    @available(*, deprecated, message: "使用 PeerRegistrationService 管理注册状态")
-    public func startRegistering(_ peerIDString: String) -> Bool {
-        // 如果设置了 registrationService，使用它来检查
-        if let registrationService = registrationService {
-            let state = registrationService.getRegistrationState(peerIDString)
-            if case .registering = state {
-                return false
-            }
-            return true
-        }
-        // 如果没有 registrationService，总是返回 true（允许注册）
-        return true
-    }
-    
-    /// 标记 Peer 注册完成（已废弃，使用 registrationService 管理）
-    @available(*, deprecated, message: "使用 PeerRegistrationService 管理注册状态")
-    public func finishRegistering(_ peerIDString: String) {
-        // 不再需要，由 registrationService 管理
-    }
-    
     /// 移除 Peer
     public func removePeer(_ peerIDString: String) {
         peers.removeValue(forKey: peerIDString)

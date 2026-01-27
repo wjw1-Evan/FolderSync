@@ -259,13 +259,6 @@ struct LocalChangeHistoryView: View {
         }
     }
     
-    private func refreshAsync() async {
-        await loadHistoryChanges()
-        await MainActor.run {
-            applyFilters()
-        }
-    }
-    
     private func stopAutoRefresh() {
         refreshTimer?.invalidate()
         refreshTimer = nil

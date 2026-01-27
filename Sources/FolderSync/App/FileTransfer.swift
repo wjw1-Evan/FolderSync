@@ -66,12 +66,11 @@ class FileTransfer {
         
         try data.write(to: localURL)
         
-        // 合并 Vector Clock
-        var vc = remoteMeta.vectorClock ?? VectorClock()
-        if let localVC = localMetadata[path]?.vectorClock {
-            vc.merge(with: localVC)
-        }
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+        // 合并 Vector Clock（使用 VectorClockManager）
+        let localVC = localMetadata[path]?.vectorClock
+        let remoteVC = remoteMeta.vectorClock
+        let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
+        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: mergedVC)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -196,12 +195,11 @@ class FileTransfer {
         
         try fileData.write(to: localURL, options: [.atomic])
         
-        // 合并 Vector Clock
-        var vc = remoteMeta.vectorClock ?? VectorClock()
-        if let localVC = localMetadata[path]?.vectorClock {
-            vc.merge(with: localVC)
-        }
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+        // 合并 Vector Clock（使用 VectorClockManager）
+        let localVC = localMetadata[path]?.vectorClock
+        let remoteVC = remoteMeta.vectorClock
+        let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
+        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: mergedVC)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -224,7 +222,7 @@ class FileTransfer {
         peerID: String,
         myPeerID: String,
         remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?) -> Bool
+        shouldUpload: (FileMetadata, FileMetadata?, String) -> Bool
     ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
         let syncManager = await MainActor.run { self.syncManager }
         guard let syncManager = syncManager else {
@@ -245,17 +243,19 @@ class FileTransfer {
         }
         
         // 再次检查是否需要上传（可能在准备上传时文件已被同步）
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta) {
+        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta, path) {
             throw NSError(domain: "FileTransfer", code: -2, userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
         }
         
         let data = try Data(contentsOf: fileURL)
         
-        // 更新 Vector Clock
-        var vc = localMeta.vectorClock ?? VectorClock()
+        // 准备 Vector Clock（在发送前准备，但只在成功后保存）
+        // 注意：Vector Clock 应该在文件实际修改时更新，这里只是确保有最新的 VC
+        let currentVC = VectorClockManager.getVectorClock(syncID: folder.syncID, path: path) ?? VectorClock()
+        var vc = currentVC
         vc.increment(for: myPeerID)
         
-        // 发送文件数据
+        // 发送文件数据（携带更新后的 VC）
         let putRes: SyncResponse = try await syncManager.sendSyncRequest(
             .putFileData(syncID: folder.syncID, path: path, data: data, vectorClock: vc),
             to: peer,
@@ -266,6 +266,7 @@ class FileTransfer {
         )
         
         guard case .putAck = putRes else {
+            // 发送失败，不保存 VC（保持一致性）
             // 记录详细的错误信息以便调试
             let errorMsg: String
             if case .error(let errorString) = putRes {
@@ -277,8 +278,8 @@ class FileTransfer {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: errorMsg])
         }
         
-        // 保存 Vector Clock
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+        // 发送成功后才保存 Vector Clock（确保一致性）
+        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: vc)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -301,7 +302,7 @@ class FileTransfer {
         peerID: String,
         myPeerID: String,
         remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?) -> Bool
+        shouldUpload: (FileMetadata, FileMetadata?, String) -> Bool
     ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
         let syncManager = await MainActor.run { self.syncManager }
         guard let syncManager = syncManager else {
@@ -322,7 +323,7 @@ class FileTransfer {
         }
         
         // 再次检查是否需要上传
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta) {
+        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta, path) {
             throw NSError(domain: "FileTransfer", code: -2, userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
         }
         
@@ -338,11 +339,13 @@ class FileTransfer {
             }
         }
         
-        // 3. 更新 Vector Clock
-        var vc = localMeta.vectorClock ?? VectorClock()
+        // 3. 准备 Vector Clock（在发送前准备，但只在成功后保存）
+        // 注意：Vector Clock 应该在文件实际修改时更新，这里只是确保有最新的 VC
+        let currentVC = VectorClockManager.getVectorClock(syncID: folder.syncID, path: path) ?? VectorClock()
+        var vc = currentVC
         vc.increment(for: myPeerID)
         
-        // 4. 上传块列表
+        // 4. 上传块列表（携带更新后的 VC）
         let chunksRes: SyncResponse = try await syncManager.sendSyncRequest(
             .putFileChunks(syncID: folder.syncID, path: path, chunkHashes: chunkHashes, vectorClock: vc),
             to: peer,
@@ -353,12 +356,14 @@ class FileTransfer {
         )
         
         var uploadedBytes: Int64 = 0
+        var uploadSucceeded = false
         
         // 检查响应类型
         switch chunksRes {
         case .fileChunksAck:
             // 所有块都存在，文件已重建完成，没有实际传输字节
             uploadedBytes = 0
+            uploadSucceeded = true
             
         case .error(let errorMsg) where errorMsg.hasPrefix("缺失块:"):
             // 远程缺失某些块，需要上传这些块
@@ -419,7 +424,7 @@ class FileTransfer {
             )
             
             guard case .fileChunksAck = confirmRes else {
-                // 确认失败，回退到全量上传
+                // 确认失败，回退到全量上传（不保存 VC，因为上传失败）
                 if case .error(let errorString) = confirmRes {
                     print("[FileTransfer] ⚠️ 块级同步确认失败（错误响应），回退到全量上传: \(path) - \(errorString)")
                 } else {
@@ -436,9 +441,11 @@ class FileTransfer {
                     shouldUpload: shouldUpload
                 )
             }
+            // 确认成功
+            uploadSucceeded = true
             
         default:
-            // 其他错误，回退到全量上传
+            // 其他错误，回退到全量上传（不保存 VC，因为上传失败）
             print("[FileTransfer] ⚠️ 块级同步失败，回退到全量上传: \(path)")
             return try await uploadFileFull(
                 path: path,
@@ -452,8 +459,10 @@ class FileTransfer {
             )
         }
         
-        // 保存 Vector Clock
-        try? StorageManager.shared.setVectorClock(syncID: folder.syncID, path: path, vc)
+        // 只有在成功上传后才保存 Vector Clock（确保一致性）
+        if uploadSucceeded {
+            VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: vc)
+        }
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent

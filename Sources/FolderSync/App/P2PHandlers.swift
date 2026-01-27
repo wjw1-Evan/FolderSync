@@ -135,15 +135,21 @@ class P2PHandlers {
         }
         
         do {
-            try data.write(to: fileURL)
+            // 先合并 Vector Clock（在写入文件之前，确保 VC 逻辑正确）
+            var mergedVC: VectorClock?
             if let vc = vectorClock {
-                // 合并 Vector Clock：保留本地 VC 的历史信息，同时更新远程 VC
-                var mergedVC = vc
-                if let localVC = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) {
-                    mergedVC.merge(with: localVC)
-                }
-                try? StorageManager.shared.setVectorClock(syncID: syncID, path: relativePath, mergedVC)
+                let localVC = VectorClockManager.getVectorClock(syncID: syncID, path: relativePath)
+                mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
             }
+            
+            // 写入文件
+            try data.write(to: fileURL)
+            
+            // 文件写入成功后，保存 Vector Clock
+            if let vc = mergedVC {
+                VectorClockManager.saveVectorClock(syncID: syncID, path: relativePath, vc: vc)
+            }
+            
             return .putAck(syncID: syncID, path: relativePath)
         } catch {
             return .error("写入文件失败: \(error.localizedDescription)")
@@ -168,8 +174,8 @@ class P2PHandlers {
             if fileManager.fileExists(atPath: fileURL.path) {
                 try? fileManager.removeItem(at: fileURL)
             }
-            // 删除 Vector Clock
-            try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
+            // 删除 Vector Clock（使用 VectorClockManager）
+            VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
         }
         return .deleteAck(syncID: syncID)
     }
@@ -258,9 +264,9 @@ class P2PHandlers {
         do {
             try fileData.write(to: fileURL, options: [.atomic])
             
-            // 保存 Vector Clock
+            // 保存 Vector Clock（使用 VectorClockManager）
             if let vc = vectorClock {
-                try? StorageManager.shared.setVectorClock(syncID: syncID, path: path, vc)
+                VectorClockManager.saveVectorClock(syncID: syncID, path: path, vc: vc)
             }
             
             return .chunkAck(syncID: syncID, chunkHash: chunkHashes.first ?? "")

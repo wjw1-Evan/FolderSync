@@ -157,7 +157,7 @@ class FolderStatistics {
                     do {
                         let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
                         let mtime = resourceValues.contentModificationDate ?? Date()
-                        let vc = StorageManager.shared.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
+                        let vc = VectorClockManager.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
                         
                         // 获取文件大小
                         var fileSize: Int64 = 0

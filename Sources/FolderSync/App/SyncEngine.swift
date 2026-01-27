@@ -345,13 +345,13 @@ class SyncEngine {
                 }
             }
 
-            // 处理重命名：更新 Vector Clock 路径映射
+            // 处理重命名：迁移 Vector Clock 路径映射（使用 VectorClockManager）
             for (oldPath, newPath) in renamedFiles {
-                // 迁移 Vector Clock
-                if let oldVC = StorageManager.shared.getVectorClock(syncID: syncID, path: oldPath) {
-                    try? StorageManager.shared.setVectorClock(syncID: syncID, path: newPath, oldVC)
-                    try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: oldPath)
-                }
+                VectorClockManager.migrateVectorClock(
+                    syncID: syncID,
+                    oldPath: oldPath,
+                    newPath: newPath
+                )
             }
 
             // 更新 deletedPaths（只包含真正的删除，不包括重命名）
@@ -464,53 +464,67 @@ class SyncEngine {
                 case conflict
             }
 
-            func downloadAction(remote: FileMetadata, local: FileMetadata?) -> DownloadAction {
-                guard let loc = local else {
-                    return .overwrite
-                }
-                if loc.hash == remote.hash {
+            /// 决定下载操作（使用 VectorClockManager 统一决策逻辑）
+            func downloadAction(remote: FileMetadata, local: FileMetadata?, path: String) -> DownloadAction {
+                let localVC = local?.vectorClock
+                let remoteVC = remote.vectorClock
+                let localHash = local?.hash ?? ""
+                let remoteHash = remote.hash
+                
+                let decision = VectorClockManager.decideSyncAction(
+                    localVC: localVC,
+                    remoteVC: remoteVC,
+                    localHash: localHash,
+                    remoteHash: remoteHash,
+                    direction: .download
+                )
+                
+                switch decision {
+                case .skip:
                     return .skip
-                }
-                if let rvc = remote.vectorClock, let lvc = loc.vectorClock,
-                    !rvc.versions.isEmpty || !lvc.versions.isEmpty
-                {
-                    let cmp = lvc.compare(to: rvc)
-                    switch cmp {
-                    case .antecedent:
-                        return .overwrite
-                    case .successor, .equal:
-                        return .skip
-                    case .concurrent:
-                        print("[SyncEngine] ⚠️ [downloadAction] VC 并发冲突，保存为冲突文件")
-                        return .conflict
+                case .overwriteLocal:
+                    return .overwrite
+                case .overwriteRemote, .uncertain:
+                    // 下载方向不应该出现 overwriteRemote
+                    // uncertain 情况保守处理为冲突
+                    if decision == .uncertain {
+                        print("[SyncEngine] ⚠️ [downloadAction] 无法确定同步方向，保存为冲突文件: 路径=\(path)")
                     }
+                    return .conflict
+                case .conflict:
+                    print("[SyncEngine] ⚠️ [downloadAction] Vector Clock 并发冲突，保存为冲突文件: 路径=\(path)")
+                    return .conflict
                 }
-                return remote.mtime > loc.mtime ? .overwrite : .skip
             }
 
-            nonisolated func shouldUpload(local: FileMetadata, remote: FileMetadata?) -> Bool {
-                guard let rem = remote else { return true }
-                if local.hash == rem.hash {
+            /// 决定是否上传（使用 VectorClockManager 统一决策逻辑）
+            nonisolated func shouldUpload(local: FileMetadata, remote: FileMetadata?, path: String) -> Bool {
+                let localVC = local.vectorClock
+                let remoteVC = remote?.vectorClock
+                let localHash = local.hash
+                let remoteHash = remote?.hash ?? ""
+                
+                let decision = VectorClockManager.decideSyncAction(
+                    localVC: localVC,
+                    remoteVC: remoteVC,
+                    localHash: localHash,
+                    remoteHash: remoteHash,
+                    direction: .upload
+                )
+                
+                switch decision {
+                case .skip, .overwriteLocal:
                     return false
+                case .overwriteRemote:
+                    return true
+                case .conflict:
+                    // 并发冲突在上层逻辑中单独处理（先保存远程版本为冲突文件，再上传本地版本）
+                    return false
+                case .uncertain:
+                    // 没有可用的 Vector Clock：采用"本地优先"策略，使集群最终收敛到本地版本
+                    print("[SyncEngine] ⚠️ [shouldUpload] 缺少 Vector Clock，采用本地优先上传策略: 路径=\(path)")
+                    return true
                 }
-                if let lvc = local.vectorClock, let rvc = rem.vectorClock,
-                    !lvc.versions.isEmpty || !rvc.versions.isEmpty
-                {
-                    let cmp = lvc.compare(to: rvc)
-                    switch cmp {
-                    case .successor:
-                        return true
-                    case .antecedent, .equal:
-                        return false
-                    case .concurrent:
-                        let shouldUpload = local.mtime > rem.mtime
-                        print(
-                            "[SyncEngine] ⚠️ [shouldUpload] VC 并发冲突，使用 mtime 判断: 本地=\(local.mtime), 远程=\(rem.mtime), 结果=\(shouldUpload)"
-                        )
-                        return shouldUpload
-                    }
-                }
-                return local.mtime > rem.mtime
             }
 
             // 合并已删除的文件集合：包括之前记录的删除和本次检测到的本地删除
@@ -558,7 +572,7 @@ class SyncEngine {
                     if changedFilesSet.contains(path) || conflictFilesSet.contains(path) {
                         continue
                     }
-                    switch downloadAction(remote: remoteMeta, local: localMetadata[path]) {
+                    switch downloadAction(remote: remoteMeta, local: localMetadata[path], path: path) {
                     case .skip: break
                     case .overwrite:
                         changedFilesSet.insert(path)
@@ -607,7 +621,7 @@ class SyncEngine {
                         }
                     }
 
-                    if shouldUpload(local: localMeta, remote: remoteEntries[path]) {
+                    if shouldUpload(local: localMeta, remote: remoteEntries[path], path: path) {
                         filesToUploadSet.insert(path)
                         filesToUpload.append((path, localMeta))
                     }
@@ -674,7 +688,7 @@ class SyncEngine {
                             try? fileManager.removeItem(at: fileURL)
                         }
 
-                        try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: rel)
+                        VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
 
                         syncedFiles.append(
                             SyncLog.SyncedFileInfo(

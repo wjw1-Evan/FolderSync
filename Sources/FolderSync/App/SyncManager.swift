@@ -47,9 +47,10 @@ public class SyncManager: ObservableObject {
     private var peersSyncTask: Task<Void, Never>?  // 定期同步 peers 数组的任务
     private var peerDiscoveryTask: Task<Void, Never>?  // 对等点发现处理任务
 
-    // 同步完成后的冷却时间：记录每个 syncID 的最后同步完成时间，在冷却期内忽略文件变化检测
-    var syncCooldown: [String: Date] = [:]  // syncID -> 最后同步完成时间
-    var syncCooldownDuration: TimeInterval = 5.0  // 同步完成后5秒内忽略文件变化检测
+    // 同步写入冷却：对“某个 syncID 下的某个路径”的最近一次同步落地写入打标。
+    // 用于忽略该路径由同步写入引发的 FSEvents，避免把远端落地误判为本地编辑。
+    private var syncWriteCooldown: [String: Date] = [:]  // "syncID:path" -> 最后写入时间
+    var syncCooldownDuration: TimeInterval = 5.0  // 写入后 N 秒内忽略该路径的本地事件
 
     // 按 peer-folder 对记录的同步冷却时间，用于避免频繁同步
     var peerSyncCooldown: [String: Date] = [:]  // "peerID:syncID" -> 最后同步完成时间
@@ -69,53 +70,66 @@ public class SyncManager: ObservableObject {
     private var syncEngine: SyncEngine!
 
     public init() {
-        // 运行环境检测
-        print("\n[EnvironmentCheck] 开始环境检测...")
-        let reports = EnvironmentChecker.runAllChecks()
-        EnvironmentChecker.printReport(reports)
+        if AppPaths.isRunningTests {
+            // 测试中需要更频繁地触发同步（大量快速操作），缩短 peer 冷却期避免漏同步。
+            self.peerSyncCooldownDuration = 1.0
+        }
 
-        // Load from storage
-        do {
-            let loadedFolders = try StorageManager.shared.getAllFolders()
-            var normalized: [SyncFolder] = []
-            if !loadedFolders.isEmpty {
-                for var folder in loadedFolders {
-                    // 启动时清理可能遗留的“同步中”状态，避免界面一直卡在同步中
-                    if folder.status == .syncing {
-                        folder.status = .synced
-                        folder.syncProgress = 0
-                        folder.lastSyncMessage = nil
-                        // 持久化修正，防止下次启动再次卡住
-                        do {
-                            try StorageManager.shared.saveFolder(folder)
-                        } catch {
-                            print("[SyncManager] ⚠️ 无法保存同步状态修正: \(error)")
+        if !AppPaths.isRunningTests {
+            // 运行环境检测（测试环境跳过，避免噪音/污染用户数据目录）
+            print("\n[EnvironmentCheck] 开始环境检测...")
+            let reports = EnvironmentChecker.runAllChecks()
+            EnvironmentChecker.printReport(reports)
+
+            // Load from storage
+            do {
+                let loadedFolders = try StorageManager.shared.getAllFolders()
+                var normalized: [SyncFolder] = []
+                if !loadedFolders.isEmpty {
+                    for var folder in loadedFolders {
+                        // 启动时清理可能遗留的“同步中”状态，避免界面一直卡在同步中
+                        if folder.status == .syncing {
+                            folder.status = .synced
+                            folder.syncProgress = 0
+                            folder.lastSyncMessage = nil
+                            // 持久化修正，防止下次启动再次卡住
+                            do {
+                                try StorageManager.shared.saveFolder(folder)
+                            } catch {
+                                print("[SyncManager] ⚠️ 无法保存同步状态修正: \(error)")
+                            }
                         }
+                        normalized.append(folder)
+                        // 注册 syncID 到管理器
+                        let registered = syncIDManager.registerSyncID(
+                            folder.syncID, folderID: folder.id)
+                        if !registered {
+                            print("[SyncManager] ⚠️ 警告: syncID 注册失败（可能已存在）: \(folder.syncID)")
+                        }
+                        print(
+                            "[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))"
+                        )
                     }
-                    normalized.append(folder)
-                    // 注册 syncID 到管理器
-                    let registered = syncIDManager.registerSyncID(
-                        folder.syncID, folderID: folder.id)
-                    if !registered {
-                        print("[SyncManager] ⚠️ 警告: syncID 注册失败（可能已存在）: \(folder.syncID)")
-                    }
-                    print(
-                        "[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))"
-                    )
                 }
+                self.folders = normalized
+                // 加载持久化的删除记录（tombstones），防止重启后丢失删除信息导致文件被重新拉回
+                self.deletedRecords = (try? StorageManager.shared.getDeletedRecords()) ?? [:]
+            } catch {
+                print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
+                print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                self.folders = []
+                self.deletedRecords = [:]
             }
-            self.folders = normalized
-            // 加载持久化的删除记录（tombstones），防止重启后丢失删除信息导致文件被重新拉回
-            self.deletedRecords = (try? StorageManager.shared.getDeletedRecords()) ?? [:]
-        } catch {
-            print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
-            print("[SyncManager] 错误详情: \(error.localizedDescription)")
+        } else {
+            // 测试环境：不从用户目录加载持久化文件夹/删除记录，保持每个测试用例起点干净
             self.folders = []
             self.deletedRecords = [:]
         }
         
         // 从快照恢复 lastKnownLocalPaths 和 lastKnownMetadata
-        restoreSnapshots()
+        if !AppPaths.isRunningTests {
+            restoreSnapshots()
+        }
 
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
@@ -265,6 +279,16 @@ public class SyncManager: ObservableObject {
                 }
             }
         }
+    }
+    
+    /// 标记某个 (syncID, path) 进入“同步写入冷却期”，用于忽略由同步落地导致的该路径 FSEvents。
+    /// - Note: 既会在处理远端 PUT 写入时调用，也会在本地“下载落地写入”时调用（pull 同步）。
+    func markSyncCooldown(syncID: String, path: String) {
+        let key = "\(syncID):\(path)"
+        syncWriteCooldown[key] = Date()
+        // 顺带清理过期条目（避免字典无限增长）
+        let cutoff = Date().addingTimeInterval(-max(10.0, syncCooldownDuration * 2))
+        syncWriteCooldown = syncWriteCooldown.filter { $0.value > cutoff }
     }
 
     /// 启动定期检查设备在线状态
@@ -673,8 +697,13 @@ public class SyncManager: ObservableObject {
     ///   - syncID: 同步 ID
     ///   - peerID: 当前设备的 PeerID
     func deleteFileAtomically(path: String, syncID: String, peerID: String) {
+        guard let folder = folders.first(where: { $0.syncID == syncID }) else { return }
+        let folderID = folder.id
+
         // 1. 获取当前 Vector Clock
-        let currentVC = VectorClockManager.getVectorClock(syncID: syncID, path: path) ?? VectorClock()
+        let currentVC =
+            VectorClockManager.getVectorClock(folderID: folderID, syncID: syncID, path: path)
+            ?? VectorClock()
         
         // 2. 递增 Vector Clock（标记删除操作）
         var updatedVC = currentVC
@@ -692,16 +721,14 @@ public class SyncManager: ObservableObject {
         stateStore.setDeleted(path: path, record: deletionRecord)
         
         // 5. 删除文件（如果存在）
-        if let folder = folders.first(where: { $0.syncID == syncID }) {
-            let fileURL = folder.localPath.appendingPathComponent(path)
-            let fileManager = FileManager.default
-            if fileManager.fileExists(atPath: fileURL.path) {
-                try? fileManager.removeItem(at: fileURL)
-            }
+        let fileURL = folder.localPath.appendingPathComponent(path)
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: fileURL.path) {
+            try? fileManager.removeItem(at: fileURL)
         }
         
         // 6. 保存 Vector Clock（标记为删除状态）
-        VectorClockManager.saveVectorClock(syncID: syncID, path: path, vc: updatedVC)
+        VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: path, vc: updatedVC)
         
         // 7. 更新旧的删除记录（兼容性）
         var dp = deletedPaths(for: syncID)
@@ -803,12 +830,26 @@ public class SyncManager: ObservableObject {
     func recordLocalChange(
         for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags
     ) {
-        let basePath = folder.localPath.standardizedFileURL.path
-        guard absolutePath.hasPrefix(basePath) else { return }
+        // macOS 上 `/var` 是 `/private/var` 的符号链接，FSEvents 可能返回不同前缀。
+        // 这里统一做路径规范化，避免出现类似 "private/xxx" 的错误相对路径，进而导致同步找不到文件。
+        let basePath = folder.localPath.resolvingSymlinksInPath().standardizedFileURL.path
+        let canonicalAbsolutePath = URL(fileURLWithPath: absolutePath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+        guard canonicalAbsolutePath.hasPrefix(basePath) else { return }
 
-        var relativePath = String(absolutePath.dropFirst(basePath.count))
+        var relativePath = String(canonicalAbsolutePath.dropFirst(basePath.count))
         if relativePath.hasPrefix("/") { relativePath.removeFirst() }
         if relativePath.isEmpty { relativePath = "." }
+
+        // 如果该路径刚被“同步落地写入”，忽略本地事件记录，避免把“同步落地写入”误当成本地编辑
+        let cooldownKey = "\(folder.syncID):\(relativePath)"
+        if let lastWriteTime = syncWriteCooldown[cooldownKey],
+            Date().timeIntervalSince(lastWriteTime) < syncCooldownDuration
+        {
+            return
+        }
 
         // 忽略文件夹本身（根路径）
         if relativePath == "." {
@@ -817,13 +858,34 @@ public class SyncManager: ObservableObject {
         }
 
         let fileManager = FileManager.default
-        let exists = fileManager.fileExists(atPath: absolutePath)
+        let exists = fileManager.fileExists(atPath: canonicalAbsolutePath)
         
         // 检查是否为目录，如果是目录则忽略（只记录文件变更）
+        // 但需要清除该路径的删除记录（如果存在），因为目录的创建意味着该路径不再被删除
         if exists {
             var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: absolutePath, isDirectory: &isDirectory),
+            if fileManager.fileExists(atPath: canonicalAbsolutePath, isDirectory: &isDirectory),
                isDirectory.boolValue {
+                // 检查是否有删除记录，如果有则清除（目录创建意味着路径不再被删除）
+                // 同时需要从 lastKnownMetadata 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
+                let stateStore = getFileStateStore(for: folder.syncID)
+                if stateStore.getState(for: relativePath)?.isDeleted == true {
+                    print("[recordLocalChange] 🔄 检测到目录创建，清除删除记录: \(relativePath)")
+                    // 移除删除状态（使用 removeState 清除整个状态，包括删除记录）
+                    stateStore.removeState(path: relativePath)
+                    // 同时从旧的删除记录格式中移除
+                    lastKnownLocalPaths[folder.syncID]?.insert(relativePath)
+                    // 更新 deletedPaths（兼容性）
+                    var dp = deletedPaths(for: folder.syncID)
+                    dp.remove(relativePath)
+                    updateDeletedPaths(dp, for: folder.syncID)
+                }
+                // 从 lastKnownMetadata 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
+                // 这样可以防止系统尝试将目录作为文件上传
+                if lastKnownMetadata[folder.syncID]?[relativePath] != nil {
+                    print("[recordLocalChange] 🔄 检测到目录创建，移除文件元数据: \(relativePath)")
+                    lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
+                }
                 print("[recordLocalChange] ⏭️ 忽略目录（只记录文件变更）: \(relativePath)")
                 return
             }
@@ -891,12 +953,23 @@ public class SyncManager: ObservableObject {
             }
         }
         
-        // 去重检查：如果在短时间内已经处理过这个路径，跳过
+        // 去重检查：短时间内的重复事件通常可忽略，但“创建→写入完成”的场景可能在 1 秒内发生多次变更。
+        // 若内容哈希已发生变化，则不应去重，否则会导致 VectorClock 未更新、进而被误判为冲突（VC 相等但 hash 不同）。
         let changeKey = "\(folder.syncID):\(relativePath)"
         if let lastProcessed = recentChanges[changeKey],
-           now.timeIntervalSince(lastProcessed) < changeDeduplicationWindow {
-            print("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
-            return
+            now.timeIntervalSince(lastProcessed) < changeDeduplicationWindow
+        {
+            if exists, let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
+                let currentHash = (try? computeFileHash(fileURL: URL(fileURLWithPath: canonicalAbsolutePath))) ?? knownMeta.hash
+                if currentHash == knownMeta.hash {
+                    print("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
+                    return
+                }
+                // 哈希不同：允许继续处理该事件（避免漏记真实变更）
+            } else {
+                print("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
+                return
+            }
         }
         // 记录本次处理时间
         recentChanges[changeKey] = now
@@ -1161,6 +1234,28 @@ public class SyncManager: ObservableObject {
             changeType = .created
             print("[recordLocalChange] ✅ 记录为新建：文件不在已知列表中且无明确标志（可能是复制文件）")
         }
+
+        // 本地内容发生变化时，必须立即递增并持久化 VectorClock。
+        // 否则在“内容已变但 VC 仍旧值”的窗口期，会出现 VC 相等但哈希不同，从而被误判为冲突。
+        var updatedVC: VectorClock?
+        if let myPeerID = p2pNode.peerID, !myPeerID.isEmpty {
+            if changeType == .renamed, let oldPath = matchedRename {
+                _ = VectorClockManager.migrateVectorClock(
+                    folderID: folder.id,
+                    syncID: folder.syncID,
+                    oldPath: oldPath,
+                    newPath: relativePath
+                )
+            }
+            let vc = VectorClockManager.updateForLocalChange(
+                folderID: folder.id,
+                syncID: folder.syncID,
+                path: relativePath,
+                peerID: myPeerID
+            )
+            VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
+            updatedVC = vc
+        }
         
         let change = LocalChange(
             folderID: folder.id,
@@ -1189,9 +1284,9 @@ public class SyncManager: ObservableObject {
             // 计算并保存元数据
             if exists {
                 do {
-                    let fileURL = URL(fileURLWithPath: absolutePath)
+                    let fileURL = URL(fileURLWithPath: canonicalAbsolutePath)
                     let hash = try computeFileHash(fileURL: fileURL)
-                    let attrs = try? fileManager.attributesOfItem(atPath: absolutePath)
+                    let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
                     
                     if lastKnownMetadata[folder.syncID] == nil {
@@ -1200,7 +1295,7 @@ public class SyncManager: ObservableObject {
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
                         mtime: mtime,
-                        vectorClock: nil
+                        vectorClock: updatedVC
                     )
                     print("[recordLocalChange] 🔄 已更新已知路径和元数据: \(relativePath)")
                 } catch {
@@ -1211,9 +1306,9 @@ public class SyncManager: ObservableObject {
             // 修改：更新元数据
             if exists {
                 do {
-                    let fileURL = URL(fileURLWithPath: absolutePath)
+                    let fileURL = URL(fileURLWithPath: canonicalAbsolutePath)
                     let hash = try computeFileHash(fileURL: fileURL)
-                    let attrs = try? fileManager.attributesOfItem(atPath: absolutePath)
+                    let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
                     
                     if lastKnownMetadata[folder.syncID] == nil {
@@ -1222,7 +1317,7 @@ public class SyncManager: ObservableObject {
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
                         mtime: mtime,
-                        vectorClock: nil
+                        vectorClock: updatedVC
                     )
                     print("[recordLocalChange] 🔄 已更新元数据: \(relativePath)")
                 } catch {
@@ -1324,16 +1419,19 @@ public class SyncManager: ObservableObject {
                 // 先合并 Vector Clock（在写入文件之前，确保 VC 逻辑正确）
                 var mergedVC: VectorClock?
                 if let vc = vectorClock {
-                    let localVC = VectorClockManager.getVectorClock(syncID: syncID, path: relativePath)
+                    let localVC = VectorClockManager.getVectorClock(folderID: folder.id, syncID: syncID, path: relativePath)
                     mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
                 }
                 
+                // 标记同步写入冷却：即将落地远端写入，避免 FSEvents 回调把它当成本地修改并递增 VC
+                self.markSyncCooldown(syncID: syncID, path: relativePath)
+
                 // 写入文件
                 try data.write(to: fileURL)
                 
                 // 文件写入成功后，保存 Vector Clock
                 if let vc = mergedVC {
-                    VectorClockManager.saveVectorClock(syncID: syncID, path: relativePath, vc: vc)
+                    VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: relativePath, vc: vc)
                 }
                 
                 return .putAck(syncID: syncID, path: relativePath)
@@ -1352,7 +1450,7 @@ public class SyncManager: ObservableObject {
                         try? fileManager.removeItem(at: fileURL)
                     }
                     // 删除 Vector Clock（使用 VectorClockManager）
-                    VectorClockManager.deleteVectorClock(syncID: syncID, path: rel)
+                    VectorClockManager.deleteVectorClock(folderID: folder.id, syncID: syncID, path: rel)
                 }
                 return .deleteAck(syncID: syncID)
             }
@@ -1510,14 +1608,17 @@ public class SyncManager: ObservableObject {
                 fileData.append(chunkData)
             }
 
+            // 标记同步写入冷却：即将落地远端写入，避免 FSEvents 回调把它当成本地修改并递增 VC
+            self.markSyncCooldown(syncID: syncID, path: path)
+
             // 写入文件
             try fileData.write(to: fileURL, options: [.atomic])
 
             // 更新 Vector Clock（使用 VectorClockManager）
             if let vc = vectorClock {
-                let localVC = VectorClockManager.getVectorClock(syncID: syncID, path: path)
+                let localVC = VectorClockManager.getVectorClock(folderID: folder.id, syncID: syncID, path: path)
                 let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
-                VectorClockManager.saveVectorClock(syncID: syncID, path: path, vc: mergedVC)
+                VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: path, vc: mergedVC)
             }
 
             return .fileChunksAck(syncID: syncID, path: path)

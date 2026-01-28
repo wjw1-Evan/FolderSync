@@ -9,7 +9,7 @@ class SyncEngine {
     weak var folderStatistics: FolderStatistics?
 
     private let chunkSyncThreshold: Int64 = 1 * 1024 * 1024  // 1MB，超过此大小的文件使用块级增量同步
-    private let maxConcurrentTransfers = 3  // 最大并发传输数（上传/下载）
+    private let maxConcurrentTransfers = 8  // 最大并发传输数（上传/下载）
 
     init(syncManager: SyncManager, fileTransfer: FileTransfer, folderStatistics: FolderStatistics) {
         self.syncManager = syncManager
@@ -352,6 +352,7 @@ class SyncEngine {
             // 处理重命名：迁移 Vector Clock 路径映射（使用 VectorClockManager）
             for (oldPath, newPath) in renamedFiles {
                 VectorClockManager.migrateVectorClock(
+                    folderID: folderID,
                     syncID: syncID,
                     oldPath: oldPath,
                     newPath: newPath
@@ -468,7 +469,7 @@ class SyncEngine {
                 for path in remoteDeletedPaths {
                     // 创建删除记录（使用当前时间，因为旧格式没有删除时间信息）
                     // 尝试从远程获取删除记录的 Vector Clock，如果没有则创建新的
-                    let currentVC = VectorClockManager.getVectorClock(syncID: syncID, path: path) ?? VectorClock()
+                    let currentVC = VectorClock()
                     let deletionRecord = DeletionRecord(
                         deletedAt: Date(),
                         deletedBy: peerID,
@@ -644,7 +645,7 @@ class SyncEngine {
                                 if localMeta.vectorClock == nil {
                                     var newVC = VectorClock()
                                     newVC.increment(for: myPeerID)
-                                    VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: newVC)
+                                    VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: deletedPath, vc: newVC)
                                 }
                                 // 清除本地删除记录（如果存在）
                                 let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
@@ -693,7 +694,7 @@ class SyncEngine {
                             // 为新文件创建 Vector Clock
                             var newVC = VectorClock()
                             newVC.increment(for: myPeerID)
-                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: newVC)
+                            VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: deletedPath, vc: newVC)
                             // 清除本地删除记录（如果存在）
                             let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
                             if let localState = stateStore.getState(for: deletedPath),
@@ -729,10 +730,12 @@ class SyncEngine {
                             )
                             
                             stateStore.setDeleted(path: deletedPath, record: deletionRecord)
-                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: mergedVC)
+                            VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: deletedPath, vc: mergedVC)
                         } else {
                             // 没有远程删除记录（旧格式），创建新的删除记录
-                            let currentVC = VectorClockManager.getVectorClock(syncID: syncID, path: deletedPath) ?? VectorClock()
+                            let currentVC =
+                                VectorClockManager.getVectorClock(folderID: folderID, syncID: syncID, path: deletedPath)
+                                ?? VectorClock()
                             var updatedVC = currentVC
                             updatedVC.increment(for: myPeerID)
                             
@@ -743,7 +746,7 @@ class SyncEngine {
                             )
                             
                             stateStore.setDeleted(path: deletedPath, record: deletionRecord)
-                            VectorClockManager.saveVectorClock(syncID: syncID, path: deletedPath, vc: updatedVC)
+                            VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: deletedPath, vc: updatedVC)
                         }
                     }
                     
@@ -1657,7 +1660,6 @@ class SyncEngine {
             syncManager.syncIDManager.updateLastSyncedAt(syncID)
             syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
             syncManager.updateDeviceCounts()
-            syncManager.syncCooldown[syncID] = Date()
             let cooldownKey = "\(peerID):\(syncID)"
             syncManager.peerSyncCooldown[cooldownKey] = Date()
 

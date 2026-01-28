@@ -8,7 +8,7 @@ class FileTransfer {
     weak var syncManager: SyncManager?
     
     private let chunkSyncThreshold: Int64 = 1 * 1024 * 1024 // 1MB，超过此大小的文件使用块级增量同步
-    private let maxConcurrentTransfers = 3 // 最大并发传输数（上传/下载）
+    private let maxConcurrentTransfers = 8 // 最大并发传输数（上传/下载）
     
     init(syncManager: SyncManager) {
         self.syncManager = syncManager
@@ -55,7 +55,24 @@ class FileTransfer {
         let fileManager = FileManager.default
         
         // 检查并创建父目录
+        // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
+            // 计算父目录的相对路径
+            let parentRelativePath = (path as NSString).deletingLastPathComponent
+            // 如果父目录路径不为空，检查并清除删除记录
+            if !parentRelativePath.isEmpty && parentRelativePath != "." {
+                let stateStore = await MainActor.run { syncManager.getFileStateStore(for: folder.syncID) }
+                if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
+                    print("[FileTransfer] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    await MainActor.run {
+                        stateStore.removeState(path: parentRelativePath)
+                        // 同时从旧的删除记录格式中移除
+                        var dp = syncManager.deletedPaths(for: folder.syncID)
+                        dp.remove(parentRelativePath)
+                        syncManager.updateDeletedPaths(dp, for: folder.syncID)
+                    }
+                }
+            }
             try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
@@ -64,13 +81,15 @@ class FileTransfer {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "没有写入权限: \(parentDir.path)"])
         }
         
+        // 标记同步写入冷却：即将把“下载数据”落地到本地，避免 FSEvents 把它误判为本地编辑
+        syncManager.markSyncCooldown(syncID: folder.syncID, path: path)
         try data.write(to: localURL)
         
         // 合并 Vector Clock（使用 VectorClockManager）
         let localVC = localMetadata[path]?.vectorClock
         let remoteVC = remoteMeta.vectorClock
         let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
-        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: mergedVC)
+        VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: path, vc: mergedVC)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -176,7 +195,24 @@ class FileTransfer {
         let parentDir = localURL.deletingLastPathComponent()
         let fileManager = FileManager.default
         
+        // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
+            // 计算父目录的相对路径
+            let parentRelativePath = (path as NSString).deletingLastPathComponent
+            // 如果父目录路径不为空，检查并清除删除记录
+            if !parentRelativePath.isEmpty && parentRelativePath != "." {
+                let stateStore = await MainActor.run { syncManager.getFileStateStore(for: folder.syncID) }
+                if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
+                    print("[FileTransfer] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    await MainActor.run {
+                        stateStore.removeState(path: parentRelativePath)
+                        // 同时从旧的删除记录格式中移除
+                        var dp = syncManager.deletedPaths(for: folder.syncID)
+                        dp.remove(parentRelativePath)
+                        syncManager.updateDeletedPaths(dp, for: folder.syncID)
+                    }
+                }
+            }
             try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
@@ -193,13 +229,15 @@ class FileTransfer {
             fileData.append(chunkData)
         }
         
+        // 标记同步写入冷却：即将把“下载数据”落地到本地，避免 FSEvents 把它误判为本地编辑
+        syncManager.markSyncCooldown(syncID: folder.syncID, path: path)
         try fileData.write(to: localURL, options: [.atomic])
         
         // 合并 Vector Clock（使用 VectorClockManager）
         let localVC = localMetadata[path]?.vectorClock
         let remoteVC = remoteMeta.vectorClock
         let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
-        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: mergedVC)
+        VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: path, vc: mergedVC)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -238,6 +276,14 @@ class FileTransfer {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件不存在: \(path)"])
         }
         
+        // 检查是否为目录，如果是目录则跳过（目录不应该被上传）
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            print("[FileTransfer] ⏭️ 跳过目录上传: \(path)")
+            throw NSError(domain: "FileTransfer", code: -2, userInfo: [NSLocalizedDescriptionKey: "路径是目录，不是文件: \(path)"])
+        }
+        
         guard fileManager.isReadableFile(atPath: fileURL.path) else {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
         }
@@ -251,7 +297,9 @@ class FileTransfer {
         
         // 准备 Vector Clock（在发送前准备，但只在成功后保存）
         // 注意：Vector Clock 应该在文件实际修改时更新，这里只是确保有最新的 VC
-        let currentVC = VectorClockManager.getVectorClock(syncID: folder.syncID, path: path) ?? VectorClock()
+        let currentVC =
+            VectorClockManager.getVectorClock(folderID: folder.id, syncID: folder.syncID, path: path)
+            ?? VectorClock()
         var vc = currentVC
         vc.increment(for: myPeerID)
         
@@ -279,7 +327,7 @@ class FileTransfer {
         }
         
         // 发送成功后才保存 Vector Clock（确保一致性）
-        VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: vc)
+        VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: path, vc: vc)
         
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
@@ -318,6 +366,14 @@ class FileTransfer {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件不存在: \(path)"])
         }
         
+        // 检查是否为目录，如果是目录则跳过（目录不应该被上传）
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            print("[FileTransfer] ⏭️ 跳过目录上传: \(path)")
+            throw NSError(domain: "FileTransfer", code: -2, userInfo: [NSLocalizedDescriptionKey: "路径是目录，不是文件: \(path)"])
+        }
+        
         guard fileManager.isReadableFile(atPath: fileURL.path) else {
             throw NSError(domain: "FileTransfer", code: -1, userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
         }
@@ -341,7 +397,9 @@ class FileTransfer {
         
         // 3. 准备 Vector Clock（在发送前准备，但只在成功后保存）
         // 注意：Vector Clock 应该在文件实际修改时更新，这里只是确保有最新的 VC
-        let currentVC = VectorClockManager.getVectorClock(syncID: folder.syncID, path: path) ?? VectorClock()
+        let currentVC =
+            VectorClockManager.getVectorClock(folderID: folder.id, syncID: folder.syncID, path: path)
+            ?? VectorClock()
         var vc = currentVC
         vc.increment(for: myPeerID)
         
@@ -461,7 +519,7 @@ class FileTransfer {
         
         // 只有在成功上传后才保存 Vector Clock（确保一致性）
         if uploadSucceeded {
-            VectorClockManager.saveVectorClock(syncID: folder.syncID, path: path, vc: vc)
+            VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: path, vc: vc)
         }
         
         let pathDir = (path as NSString).deletingLastPathComponent

@@ -23,9 +23,7 @@ public class PersistentPeerStore {
     
     private let fileManager = FileManager.default
     private var peersFile: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
-        return folderSyncDir.appendingPathComponent("peers.json")
+        return AppPaths.appDirectory.appendingPathComponent("peers.json")
     }
     
     private init() {

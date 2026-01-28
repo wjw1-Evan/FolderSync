@@ -35,6 +35,11 @@ final class MultiPeerSyncTests: XCTestCase {
     }
     
     override func tearDown() async throws {
+        // 停止 P2P 节点以清理资源
+        try? await syncManager1?.p2pNode.stop()
+        try? await syncManager2?.p2pNode.stop()
+        try? await syncManager3?.p2pNode.stop()
+        
         // 清理
         syncManager1 = nil
         syncManager2 = nil

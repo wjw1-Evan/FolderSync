@@ -95,6 +95,29 @@ class TestHelpers {
         return false
     }
     
+    /// 等待 P2P 节点启动（检查节点是否已准备好）
+    @MainActor
+    static func waitForP2PNodeReady(
+        syncManager: SyncManager,
+        timeout: TimeInterval = 10.0
+    ) async -> Bool {
+        return await waitForCondition(timeout: timeout) {
+            syncManager.p2pNode.peerID != nil
+        }
+    }
+    
+    /// 等待 peer 发现（检查是否有其他 peer）
+    @MainActor
+    static func waitForPeerDiscovery(
+        syncManager: SyncManager,
+        expectedCount: Int = 1,
+        timeout: TimeInterval = 15.0
+    ) async -> Bool {
+        return await waitForCondition(timeout: timeout) {
+            syncManager.peerManager.allPeers.count >= expectedCount
+        }
+    }
+    
     /// 等待同步完成
     static func waitForSyncCompletion(
         syncManager: SyncManager,

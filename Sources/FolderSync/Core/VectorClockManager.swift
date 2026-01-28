@@ -92,11 +92,13 @@ class VectorClockManager {
     ///   - peerID: 当前设备的 PeerID
     /// - Returns: 更新后的 Vector Clock
     static func updateForLocalChange(
+        folderID: UUID,
         syncID: String,
         path: String,
         peerID: String
     ) -> VectorClock {
-        var vc = StorageManager.shared.getVectorClock(syncID: syncID, path: path) ?? VectorClock()
+        var vc = StorageManager.shared.getVectorClock(folderID: folderID, syncID: syncID, path: path)
+            ?? VectorClock()
         vc.increment(for: peerID)
         return vc
     }
@@ -138,20 +140,24 @@ class VectorClockManager {
     /// - Returns: 是否成功迁移
     @discardableResult
     static func migrateVectorClock(
+        folderID: UUID,
         syncID: String,
         oldPath: String,
         newPath: String
     ) -> Bool {
-        guard let oldVC = StorageManager.shared.getVectorClock(syncID: syncID, path: oldPath) else {
+        guard
+            let oldVC = StorageManager.shared.getVectorClock(
+                folderID: folderID, syncID: syncID, path: oldPath)
+        else {
             // 旧路径没有 Vector Clock，无需迁移
             return false
         }
         
         do {
             // 迁移到新路径
-            try StorageManager.shared.setVectorClock(syncID: syncID, path: newPath, oldVC)
+            try StorageManager.shared.setVectorClock(folderID: folderID, syncID: syncID, path: newPath, oldVC)
             // 删除旧路径的 Vector Clock
-            try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: oldPath)
+            try? StorageManager.shared.deleteVectorClock(folderID: folderID, syncID: syncID, path: oldPath)
             return true
         } catch {
             print("[VectorClockManager] ⚠️ 迁移 Vector Clock 失败: \(oldPath) -> \(newPath), 错误: \(error)")
@@ -163,8 +169,8 @@ class VectorClockManager {
     /// - Parameters:
     ///   - syncID: 同步 ID
     ///   - path: 文件路径
-    static func deleteVectorClock(syncID: String, path: String) {
-        try? StorageManager.shared.deleteVectorClock(syncID: syncID, path: path)
+    static func deleteVectorClock(folderID: UUID, syncID: String, path: String) {
+        try? StorageManager.shared.deleteVectorClock(folderID: folderID, syncID: syncID, path: path)
     }
     
     /// 保存 Vector Clock
@@ -172,9 +178,9 @@ class VectorClockManager {
     ///   - syncID: 同步 ID
     ///   - path: 文件路径
     ///   - vc: Vector Clock
-    static func saveVectorClock(syncID: String, path: String, vc: VectorClock) {
+    static func saveVectorClock(folderID: UUID, syncID: String, path: String, vc: VectorClock) {
         do {
-            try StorageManager.shared.setVectorClock(syncID: syncID, path: path, vc)
+            try StorageManager.shared.setVectorClock(folderID: folderID, syncID: syncID, path: path, vc)
         } catch {
             print("[VectorClockManager] ⚠️ 保存 Vector Clock 失败: \(path), 错误: \(error)")
         }
@@ -185,8 +191,8 @@ class VectorClockManager {
     ///   - syncID: 同步 ID
     ///   - path: 文件路径
     /// - Returns: Vector Clock（如果存在）
-    static func getVectorClock(syncID: String, path: String) -> VectorClock? {
-        return StorageManager.shared.getVectorClock(syncID: syncID, path: path)
+    static func getVectorClock(folderID: UUID, syncID: String, path: String) -> VectorClock? {
+        return StorageManager.shared.getVectorClock(folderID: folderID, syncID: syncID, path: path)
     }
 }
 

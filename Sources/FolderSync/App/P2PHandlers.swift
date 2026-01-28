@@ -170,7 +170,22 @@ class P2PHandlers {
         let parentDir = fileURL.deletingLastPathComponent()
         let fileManager = FileManager.default
         
+        // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
+            // 计算父目录的相对路径
+            let parentRelativePath = (relativePath as NSString).deletingLastPathComponent
+            // 如果父目录路径不为空，检查并清除删除记录
+            if !parentRelativePath.isEmpty && parentRelativePath != "." {
+                let stateStore = syncManager.getFileStateStore(for: syncID)
+                if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
+                    print("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    stateStore.removeState(path: parentRelativePath)
+                    // 同时从旧的删除记录格式中移除
+                    var dp = syncManager.deletedPaths(for: syncID)
+                    dp.remove(parentRelativePath)
+                    syncManager.updateDeletedPaths(dp, for: syncID)
+                }
+            }
             try? fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
@@ -182,16 +197,17 @@ class P2PHandlers {
             // 先合并 Vector Clock（在写入文件之前，确保 VC 逻辑正确）
             var mergedVC: VectorClock?
             if let vc = vectorClock {
-                let localVC = VectorClockManager.getVectorClock(syncID: syncID, path: relativePath)
+                let localVC = VectorClockManager.getVectorClock(folderID: folder.id, syncID: syncID, path: relativePath)
                 mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
             }
             
             // 写入文件
+            syncManager.markSyncCooldown(syncID: syncID, path: relativePath)
             try data.write(to: fileURL)
             
             // 文件写入成功后，保存 Vector Clock
             if let vc = mergedVC {
-                VectorClockManager.saveVectorClock(syncID: syncID, path: relativePath, vc: vc)
+                VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: relativePath, vc: vc)
             }
             
             return .putAck(syncID: syncID, path: relativePath)
@@ -204,9 +220,9 @@ class P2PHandlers {
         guard let syncManager = syncManager else {
             return .error("Manager deallocated")
         }
-        
-        let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-        guard let folder = folder else {
+
+        // 仅校验文件夹存在即可（避免未使用变量导致编译警告）
+        guard syncManager.folders.contains(where: { $0.syncID == syncID }) else {
             return .error("Folder not found")
         }
         
@@ -292,7 +308,22 @@ class P2PHandlers {
         let parentDir = fileURL.deletingLastPathComponent()
         let fileManager = FileManager.default
         
+        // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
+            // 计算父目录的相对路径
+            let parentRelativePath = (path as NSString).deletingLastPathComponent
+            // 如果父目录路径不为空，检查并清除删除记录
+            if !parentRelativePath.isEmpty && parentRelativePath != "." {
+                let stateStore = syncManager.getFileStateStore(for: syncID)
+                if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
+                    print("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    stateStore.removeState(path: parentRelativePath)
+                    // 同时从旧的删除记录格式中移除
+                    var dp = syncManager.deletedPaths(for: syncID)
+                    dp.remove(parentRelativePath)
+                    syncManager.updateDeletedPaths(dp, for: syncID)
+                }
+            }
             try? fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         }
         
@@ -305,11 +336,12 @@ class P2PHandlers {
         }
         
         do {
+            syncManager.markSyncCooldown(syncID: syncID, path: path)
             try fileData.write(to: fileURL, options: [.atomic])
             
             // 保存 Vector Clock（使用 VectorClockManager）
             if let vc = vectorClock {
-                VectorClockManager.saveVectorClock(syncID: syncID, path: path, vc: vc)
+                VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: path, vc: vc)
             }
             
             return .chunkAck(syncID: syncID, chunkHash: chunkHashes.first ?? "")

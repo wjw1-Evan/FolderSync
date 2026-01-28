@@ -167,9 +167,18 @@ class SyncDecisionEngine {
             return .upload
             
         case .equal:
-            // Vector Clock 相同但哈希不同，视为冲突
+            // Vector Clock 相同但哈希不同：理论上应视为冲突（说明因果信息缺失或时钟未正确更新）。
+            // 但在实际文件系统事件/网络同步中，可能出现“同一版本号、内容仍在写入/落地”的短暂窗口。
+            // 为了让系统最终收敛，这里引入基于 mtime 的启发式决策：
+            // - 若 mtime 差距明显，选择较新的版本覆盖较旧版本；
+            // - 若 mtime 接近（可能是真并发），仍视为冲突。
+            let timeDelta = local.mtime.timeIntervalSince(remote.mtime)  // >0: 本地更新
+            let epsilon: TimeInterval = 0.5
+            if abs(timeDelta) >= epsilon {
+                return timeDelta > 0 ? .upload : .download
+            }
             print(
-                "[SyncDecisionEngine] ⚠️ VectorClock 相等但哈希不同，视为冲突。" +
+                "[SyncDecisionEngine] ⚠️ VectorClock 相等但哈希不同且 mtime 接近，视为冲突。" +
                 " localHash=\(local.hash), remoteHash=\(remote.hash)"
             )
             return .conflict

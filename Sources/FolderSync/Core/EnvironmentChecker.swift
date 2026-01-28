@@ -85,9 +85,7 @@ public class EnvironmentChecker {
     /// 检测文件系统权限
     private static func checkFileSystemPermissions() -> CheckReport {
         let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
+        let folderSyncDir = AppPaths.appDirectory
 
         // 检查目录是否存在，不存在则尝试创建
         var isDirectory: ObjCBool = false
@@ -213,19 +211,7 @@ public class EnvironmentChecker {
     /// 检测 Application Support 目录
     private static func checkApplicationSupportDirectory() -> CheckReport {
         let fileManager = FileManager.default
-        guard
-            let appSupport = fileManager.urls(
-                for: .applicationSupportDirectory, in: .userDomainMask
-            ).first
-        else {
-            return CheckReport(
-                name: "Application Support 目录",
-                result: .error("无法获取 Application Support 目录路径"),
-                details: nil
-            )
-        }
-
-        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
+        let folderSyncDir = AppPaths.appDirectory
         var isDirectory: ObjCBool = false
 
         if fileManager.fileExists(atPath: folderSyncDir.path, isDirectory: &isDirectory) {

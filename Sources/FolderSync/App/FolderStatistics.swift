@@ -86,7 +86,8 @@ class FolderStatistics {
             return (MerkleSearchTree(), [:], 0, 0)
         }
         
-        let url = folder.localPath
+        // 统一规范化路径，避免 `/var` 与 `/private/var` 混用导致相对路径带上 `private/` 前缀
+        let url = folder.localPath.resolvingSymlinksInPath().standardizedFileURL
         let syncID = folder.syncID
         let mst = MerkleSearchTree()
         var metadata: [String: FileMetadata] = [:]
@@ -98,16 +99,21 @@ class FolderStatistics {
         var filePaths: [(URL, String)] = []
         let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .contentModificationDateKey]
         let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
+        let basePath = url.path
         
         // 第一阶段：收集文件路径
         while let fileURL = enumerator?.nextObject() as? URL {
             do {
-                guard fileManager.isReadableFile(atPath: fileURL.path) else {
+                let canonicalFileURL = fileURL.resolvingSymlinksInPath().standardizedFileURL
+                guard fileManager.isReadableFile(atPath: canonicalFileURL.path) else {
                     continue
                 }
                 
-                let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
-                var relativePath = fileURL.path.replacingOccurrences(of: url.path, with: "")
+                let resourceValues = try canonicalFileURL.resourceValues(forKeys: Set(resourceKeys))
+
+                // 通过标准化后的绝对路径计算相对路径，避免 replace 不匹配导致的 `private/...`
+                guard canonicalFileURL.path.hasPrefix(basePath) else { continue }
+                var relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
                 if relativePath.hasPrefix("/") { relativePath.removeFirst() }
                 
                 if syncManager.isIgnored(relativePath, folder: folder) { continue }
@@ -119,7 +125,7 @@ class FolderStatistics {
                 } else {
                     // 文件路径：排除冲突文件（冲突文件不应该被同步）
                     if !ConflictFileFilter.isConflictFile(relativePath) {
-                        filePaths.append((fileURL, relativePath))
+                        filePaths.append((canonicalFileURL, relativePath))
                     }
                 }
             } catch {
@@ -159,7 +165,10 @@ class FolderStatistics {
                     do {
                         let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
                         let mtime = resourceValues.contentModificationDate ?? Date()
-                        let vc = VectorClockManager.getVectorClock(syncID: syncID, path: relativePath) ?? VectorClock()
+                        let vc =
+                            VectorClockManager.getVectorClock(
+                                folderID: folder.id, syncID: syncID, path: relativePath)
+                            ?? VectorClock()
                         
                         // 获取文件大小
                         var fileSize: Int64 = 0

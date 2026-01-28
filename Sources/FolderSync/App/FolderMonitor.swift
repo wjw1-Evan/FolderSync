@@ -39,14 +39,6 @@ class FolderMonitor {
                 }
             }
 
-            // 检查是否在同步冷却期内（刚完成同步，忽略文件变化）
-            if let lastSyncTime = syncManager.syncCooldown[folder.syncID],
-                Date().timeIntervalSince(lastSyncTime) < syncManager.syncCooldownDuration
-            {
-                // 冷却期内不触发同步
-                return
-            }
-
             // 同步仍然使用防抖机制（避免频繁同步）
             // 检查文件是否正在被写入（文件大小是否稳定）
             Task { [weak self] in

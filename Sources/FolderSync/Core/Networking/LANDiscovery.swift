@@ -11,17 +11,126 @@ public class LANDiscovery {
     private var isRunning = false
     private let servicePort: UInt16 = 8765 // Custom port for FolderSync discovery
     private let serviceName = "_foldersync._tcp"
+    private let subscriberID = UUID()
     
     public var onPeerDiscovered: ((String, String, [String]) -> Void)? // (peerID, address, listenAddresses)
     
     public init() {}
+
+    // MARK: - Shared UDP listener (process-wide)
+    private static let sharedQueue = DispatchQueue(label: "com.foldersync.lanDiscovery.shared", qos: .userInitiated)
+    private static var sharedListener: NWListener?
+    private static var sharedHandlers: [UUID: (String, String) -> Void] = [:] // id -> (message, remoteAddressDesc)
+
+    private static func registerSharedHandler(id: UUID, handler: @escaping (String, String) -> Void) {
+        sharedQueue.sync {
+            sharedHandlers[id] = handler
+        }
+        ensureSharedListenerStarted()
+    }
+
+    private static func unregisterSharedHandler(id: UUID) {
+        let shouldStop: Bool = sharedQueue.sync {
+            sharedHandlers.removeValue(forKey: id)
+            return sharedHandlers.isEmpty
+        }
+        if shouldStop {
+            sharedQueue.async {
+                sharedListener?.cancel()
+                sharedListener = nil
+            }
+        }
+    }
+
+    private static func ensureSharedListenerStarted() {
+        sharedQueue.async {
+            guard sharedListener == nil else { return }
+
+            let parameters = NWParameters.udp
+            parameters.allowLocalEndpointReuse = true
+
+            do {
+                let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: servicePortStatic)!)
+                listener.newConnectionHandler = { connection in
+                    handleSharedIncomingConnection(connection)
+                }
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        print("[LANDiscovery] ✅ Listener ready on port \(servicePortStatic)")
+                    case .failed(let error):
+                        print("[LANDiscovery] ❌ Listener failed: \(error)")
+                    case .waiting(let error):
+                        print("[LANDiscovery] ⚠️ Listener waiting: \(error)")
+                    case .cancelled:
+                        print("[LANDiscovery] ℹ️ Listener cancelled")
+                    default:
+                        break
+                    }
+                }
+                listener.start(queue: sharedQueue)
+                sharedListener = listener
+            } catch {
+                print("[LANDiscovery] ❌ Failed to start listener: \(error)")
+            }
+        }
+    }
+
+    // 由于 shared listener 是静态的，这里需要一个静态端口常量供静态方法使用
+    private static let servicePortStatic: UInt16 = 8765
+
+    private static func handleSharedIncomingConnection(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                receiveSharedMessage(from: connection)
+            case .failed(let error):
+                print("[LANDiscovery] Connection failed: \(error)")
+                connection.cancel()
+            default:
+                break
+            }
+        }
+        connection.start(queue: sharedQueue)
+    }
+
+    private static func receiveSharedMessage(from connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, isComplete, error in
+            if let error = error {
+                if case .posix(let code) = error, code == .ECANCELED {
+                    // ignore
+                } else {
+                    print("[LANDiscovery] ⚠️ 接收错误: \(error)")
+                }
+                connection.cancel()
+                return
+            }
+
+            if let data = data, !data.isEmpty, let message = String(data: data, encoding: .utf8) {
+                let address = connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
+                sharedQueue.async {
+                    for handler in sharedHandlers.values {
+                        handler(message, address)
+                    }
+                }
+            }
+
+            if !isComplete {
+                receiveSharedMessage(from: connection)
+            } else {
+                connection.cancel()
+            }
+        }
+    }
     
     public func start(peerID: String, listenAddresses: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
-        
-        // Start listening for broadcasts
-        startListener(peerID: peerID)
+
+        // 注册到进程级共享 UDP 监听器，避免同一进程内多实例抢占端口导致 EADDRINUSE
+        LANDiscovery.registerSharedHandler(id: subscriberID) { [weak self] message, address in
+            self?.handleIncomingMessage(message, from: address, myPeerID: peerID)
+        }
         
         // Start broadcasting our presence
         startBroadcasting(peerID: peerID, listenAddresses: listenAddresses)
@@ -31,6 +140,7 @@ public class LANDiscovery {
         isRunning = false
         broadcastTimer?.invalidate()
         broadcastTimer = nil
+        LANDiscovery.unregisterSharedHandler(id: subscriberID)
         listener?.cancel()
         broadcastConnection?.cancel()
         
@@ -42,6 +152,27 @@ public class LANDiscovery {
         
         listener = nil
         broadcastConnection = nil
+    }
+
+    // MARK: - Shared listener message handling (per instance)
+    private func handleIncomingMessage(_ message: String, from address: String, myPeerID: String) {
+        guard isRunning else { return }
+
+        // 检查是否是发现请求
+        if message.contains("\"type\":\"discovery_request\"") {
+            // 收到发现请求，立即广播自己的信息作为响应
+            sendBroadcast(peerID: myPeerID, listenAddresses: currentListenAddresses)
+            return
+        }
+
+        // 解析正常的发现消息
+        if let peerInfo = parseDiscoveryMessage(message) {
+            // Ignore our own broadcasts
+            if peerInfo.peerID != myPeerID {
+                // 每次收到广播都触发回调，确保 lastSeenTime 被更新
+                onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+            }
+        }
     }
     
     /// 线程安全地添加连接

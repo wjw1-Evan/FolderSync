@@ -230,20 +230,22 @@ public class P2PNode {
     
 
     public func start() async throws {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+        let folderSyncDir = AppPaths.appDirectory
         
         // 加载或生成 PeerID
         let peerIDFile = folderSyncDir.appendingPathComponent("peerid.txt")
-        let password = KeychainManager.loadOrCreatePassword()
+        let password = AppPaths.isRunningTests ? "" : KeychainManager.loadOrCreatePassword()
         
-        var peerID: PeerID
-        if let savedPeerID = PeerID.load(from: peerIDFile, password: password) {
+        let peerID: PeerID
+        if AppPaths.isRunningTests {
+            // 测试场景通常会在同一台机器/同一进程里模拟多个“设备”，需要每个节点有唯一 PeerID
+            peerID = PeerID.generate()
+            print("[P2PNode] ✅ 测试模式：已生成临时 PeerID: \(peerID.b58String.prefix(12))...")
+        } else if let savedPeerID = PeerID.load(from: peerIDFile, password: password) {
             peerID = savedPeerID
             print("[P2PNode] ✅ 已加载现有 PeerID: \(peerID.b58String.prefix(12))...")
         } else {
-            // 生成新的 PeerID
+            // 生产模式：生成并持久化 PeerID
             peerID = PeerID.generate()
             try? peerID.save(to: peerIDFile, password: password)
             print("[P2PNode] ✅ 已生成新 PeerID: \(peerID.b58String.prefix(12))...")

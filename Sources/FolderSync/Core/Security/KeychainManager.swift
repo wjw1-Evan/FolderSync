@@ -7,12 +7,7 @@ public enum KeychainManager {
     
     /// 获取密码文件路径
     private static func passwordFilePath() -> URL? {
-        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        let folderSyncDir = appSupport.appendingPathComponent("FolderSync", isDirectory: true)
-        // 确保目录存在
-        try? FileManager.default.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
+        let folderSyncDir = AppPaths.appDirectory
         return folderSyncDir.appendingPathComponent(passwordFileName)
     }
     

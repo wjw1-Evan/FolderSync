@@ -35,10 +35,7 @@ public class StorageManager {
     private var nextLocalChangeSequence: Int64 = 1
 
     init() throws {
-        let path = NSSearchPathForDirectoriesInDomains(
-            .applicationSupportDirectory, .userDomainMask, true
-        ).first!
-        appDir = URL(fileURLWithPath: path).appendingPathComponent("FolderSync")
+        appDir = AppPaths.appDirectory
 
         // 确保目录存在并设置正确的权限
         if !fileManager.fileExists(atPath: appDir.path) {
@@ -212,8 +209,8 @@ public class StorageManager {
 
     // MARK: - 向量时钟管理
 
-    public func getVectorClock(syncID: String, path: String) -> VectorClock? {
-        let fileURL = vectorClockFile(syncID: syncID, path: path)
+    public func getVectorClock(folderID: UUID, syncID: String, path: String) -> VectorClock? {
+        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
         guard fileManager.fileExists(atPath: fileURL.path),
             let data = try? Data(contentsOf: fileURL),
             let vc = try? JSONDecoder().decode(VectorClock.self, from: data)
@@ -223,8 +220,8 @@ public class StorageManager {
         return vc
     }
 
-    public func setVectorClock(syncID: String, path: String, _ vc: VectorClock) throws {
-        let fileURL = vectorClockFile(syncID: syncID, path: path)
+    public func setVectorClock(folderID: UUID, syncID: String, path: String, _ vc: VectorClock) throws {
+        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
         let dir = fileURL.deletingLastPathComponent()
 
         // 确保目录存在
@@ -236,16 +233,18 @@ public class StorageManager {
         try data.write(to: fileURL, options: [.atomic])
     }
 
-    public func deleteVectorClock(syncID: String, path: String) throws {
-        let fileURL = vectorClockFile(syncID: syncID, path: path)
+    public func deleteVectorClock(folderID: UUID, syncID: String, path: String) throws {
+        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
         try? fileManager.removeItem(at: fileURL)
     }
 
-    private func vectorClockFile(syncID: String, path: String) -> URL {
+    private func vectorClockFile(folderID: UUID, syncID: String, path: String) -> URL {
         // 将路径中的 / 替换为 _ 作为文件名
         let safePath = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(
             of: "\\", with: "_")
-        let syncDir = vectorClocksDir.appendingPathComponent(syncID, isDirectory: true)
+        // 以 folderID 作为命名空间，避免同一进程/同一用户下多个“设备”实例共享同一份 VC 数据
+        let folderDir = vectorClocksDir.appendingPathComponent(folderID.uuidString, isDirectory: true)
+        let syncDir = folderDir.appendingPathComponent(syncID, isDirectory: true)
         return syncDir.appendingPathComponent("\(safePath).json")
     }
 

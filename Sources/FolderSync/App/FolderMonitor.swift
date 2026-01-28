@@ -20,7 +20,7 @@ class FolderMonitor {
     }
 
     func startMonitoring(_ folder: SyncFolder) {
-        guard let syncManager = syncManager else { return }
+        guard syncManager != nil else { return }
 
         // 注意：广播现在包含 syncID 列表，设备在发现 peer 时即可知道哪些 syncID 匹配
         // 这样可以提前过滤，只对匹配的 syncID 触发同步

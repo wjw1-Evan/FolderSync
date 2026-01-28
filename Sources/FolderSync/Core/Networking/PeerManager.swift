@@ -9,15 +9,17 @@ public struct PeerInfo {
     public var isOnline: Bool
     public var discoveryTime: Date
     public var lastSeenTime: Date
+    public var syncIDs: [String] // 从广播消息中获取的 syncID 列表
     
-    public init(peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false, isOnline: Bool = false, discoveryTime: Date? = nil, lastSeenTime: Date? = nil) {
+    public init(peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false, isOnline: Bool = false, discoveryTime: Date? = nil, lastSeenTime: Date? = nil, syncIDs: [String] = []) {
         self.peerID = peerID
         self.peerIDString = peerID.b58String
         self.addresses = addresses
         self.isRegistered = isRegistered
         self.isOnline = isOnline
         self.discoveryTime = discoveryTime ?? Date()
-        self.lastSeenTime = lastSeenTime ?? Date()
+       self.lastSeenTime = lastSeenTime ?? Date()
+        self.syncIDs = syncIDs
     }
     
     /// 更新地址
@@ -241,7 +243,6 @@ public class PeerManager: ObservableObject {
     public func addOrUpdatePeer(_ peerID: PeerID, addresses: [Multiaddr] = []) -> PeerInfo {
         let peerIDString = peerID.b58String
         var shouldSave = false
-        let isNewPeer = peers[peerIDString] == nil
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
@@ -343,7 +344,6 @@ public class PeerManager: ObservableObject {
         // 同步更新 PeerInfo 的在线状态
         if var peer = peers[peerIDString] {
             let isOnline = (status == .online)
-            let oldOnlineStatus = peer.isOnline
             peer.updateOnlineStatus(isOnline)
             peers[peerIDString] = peer
             

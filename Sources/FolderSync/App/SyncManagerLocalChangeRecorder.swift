@@ -217,9 +217,22 @@ extension SyncManager {
                 }
             }
             
+            // 重要：如果文件不在已知路径中但设置了 Renamed 标志，可能是重命名操作的旧路径
+            // 这种情况下，不应该立即记录为删除，而应该等待新文件出现
+            // 如果新文件出现且哈希值匹配，则记录为重命名；否则记录为删除
+            if !isKnownPath && hasRenamedFlag && !hasRemovedFlag {
+                // 文件不在已知路径中，但设置了 Renamed 标志，可能是重命名操作的旧路径
+                // 这种情况下，不应该立即记录为删除，而应该等待新文件出现
+                // 但是，由于文件不在已知路径中，我们无法获取其哈希值
+                // 所以，这种情况下，应该跳过，不记录任何操作
+                // 如果新文件出现，会在新文件的处理逻辑中检测重命名
+                print("[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Renamed 标志，等待新文件出现以检测重命名: \(relativePath)")
+                return
+            }
+            
             // 如果文件在已知路径列表中，或者设置了 Removed 标志，记录为删除
-            // 注意：如果只设置了 Renamed 标志但文件不在已知路径中，也记录为删除（可能是真正的删除）
-            if isKnownPath || hasRemovedFlag || (hasRenamedFlag && !isKnownPath) {
+            // 注意：如果只设置了 Renamed 标志但文件不在已知路径中，不应该记录为删除（已在上面处理）
+            if isKnownPath || hasRemovedFlag {
                 print("[recordLocalChange] ✅ 记录为删除: isKnownPath=\(isKnownPath), hasRemovedFlag=\(hasRemovedFlag), hasRenamedFlag=\(hasRenamedFlag)")
                 let change = LocalChange(
                     folderID: folder.id,
@@ -337,6 +350,7 @@ extension SyncManager {
                 let currentHash = try computeFileHash(fileURL: fileURL)
                 
                 // 检查是否有待处理的重命名操作（旧文件哈希值匹配）
+                // 重要：如果新文件设置了 Renamed 标志，应该优先检查 pendingRenames
                 if hasRenamedFlag {
                     for (pendingKey, pendingInfo) in pendingRenames {
                         let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
@@ -353,6 +367,18 @@ extension SyncManager {
                                 break
                             }
                         }
+                    }
+                    
+                    // 如果设置了 Renamed 标志但没有找到匹配的 pendingRenames，检查是否有最近删除的文件
+                    // 这可能是因为旧文件不在已知路径中，所以无法添加到 pendingRenames
+                    // 在这种情况下，我们需要通过其他方式检测重命名
+                    if matchedRename == nil {
+                        // 检查是否有最近删除的文件（在时间窗口内）
+                        // 如果新文件设置了 Renamed 标志，且不在已知路径中，可能是重命名操作
+                        // 但是，由于旧文件不在已知路径中，我们无法获取其哈希值
+                        // 所以，这种情况下，我们应该记录为新建，而不是重命名
+                        // 但是，如果旧文件在已知路径中，应该已经在 pendingRenames 中找到了
+                        print("[recordLocalChange] ⚠️ 新文件设置了 Renamed 标志但没有找到匹配的 pendingRenames，可能是旧文件不在已知路径中")
                     }
                 }
                 

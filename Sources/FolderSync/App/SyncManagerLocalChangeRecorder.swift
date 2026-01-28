@@ -357,7 +357,9 @@ extension SyncManager {
                 }
                 
                 // 重要：如果文件不在已知路径中，且哈希值与某个 pendingRenames 中的旧路径匹配，
-                // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
+                // 需要区分两种情况：
+                // 1. 如果文件设置了 Renamed 标志，说明这是重命名操作的新路径，应该记录为重命名
+                // 2. 如果文件没有设置 Renamed 标志，说明这是重命名操作的旧路径（可能从远程同步回来），应该跳过
                 if matchedRename == nil {
                     for (pendingKey, pendingInfo) in pendingRenames {
                         let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
@@ -365,10 +367,20 @@ extension SyncManager {
                             let oldPath = String(keyParts[1])
                             // 检查哈希值（即使时间窗口已过，也检查哈希值，因为可能是从远程同步回来的）
                             if pendingInfo.hash == currentHash {
-                                // 这是重命名操作的旧路径，不应该被记录为新建
-                                isOldPathOfRename = true
-                                print("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))")
-                                break
+                                if hasRenamedFlag {
+                                    // 文件设置了 Renamed 标志，说明这是重命名操作的新路径
+                                    // 应该记录为重命名，而不是跳过
+                                    matchedRename = oldPath
+                                    print("[recordLocalChange] 🔄 检测到重命名操作（通过 pendingRenames 和 Renamed 标志）: \(oldPath) -> \(relativePath) (哈希值匹配)")
+                                    // 从待处理列表中移除
+                                    pendingRenames.removeValue(forKey: pendingKey)
+                                    break
+                                } else {
+                                    // 没有 Renamed 标志，说明这是重命名操作的旧路径，不应该被记录为新建
+                                    isOldPathOfRename = true
+                                    print("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配，但无 Renamed 标志），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))")
+                                    break
+                                }
                             }
                         }
                     }
@@ -377,8 +389,9 @@ extension SyncManager {
                 // 重要：如果文件不在已知路径中，且哈希值与某个已知文件（可能是重命名的新路径）的哈希值匹配，
                 // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
                 // 注意：这个检查应该在 pendingRenames 检查之后，因为如果 pendingRenames 中有匹配，说明重命名操作正在进行中
-                if !isOldPathOfRename {
-                    // 检查所有已知文件的哈希值
+                // 但是，如果文件设置了 Renamed 标志，说明这是重命名操作的新路径，不应该跳过
+                if !isOldPathOfRename && !hasRenamedFlag {
+                    // 检查所有已知文件的哈希值（只有在没有 Renamed 标志时才检查，避免误判重命名操作的新路径）
                     if let knownMetadata = lastKnownMetadata[folder.syncID] {
                         for (knownPath, knownMeta) in knownMetadata {
                             if knownMeta.hash == currentHash {

@@ -194,7 +194,7 @@ class FileTransfer {
                 }
                 
                 for await result in group {
-                    if let (hash, data) = result {
+                    if let (_, data) = result {
                         downloadedBytes += Int64(data.count)
                         print("[FileTransfer] 📊 [DEBUG] 块下载进度: 路径=\(path), 已下载=\(downloadedBytes) bytes")
                     }
@@ -499,7 +499,7 @@ class FileTransfer {
                 }
                 
                 for await result in group {
-                    if let (hash, bytes) = result {
+                    if let (_, bytes) = result {
                         uploadedBytes += bytes
                         print("[FileTransfer] 📊 [DEBUG] 块上传进度: 路径=\(path), 已上传=\(uploadedBytes) bytes")
                     }

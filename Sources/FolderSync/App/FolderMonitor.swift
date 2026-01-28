@@ -22,10 +22,8 @@ class FolderMonitor {
     func startMonitoring(_ folder: SyncFolder) {
         guard let syncManager = syncManager else { return }
 
-        // Announce this folder on the network
-        Task {
-            try? await syncManager.p2pNode.announce(service: "folder-sync-\(folder.syncID)")
-        }
+        // 注意：广播不包含syncID，只代表客户端存在
+        // syncID的匹配在后续同步阶段进行验证
 
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path, flags in
             guard let self = self, let syncManager = self.syncManager else { return }

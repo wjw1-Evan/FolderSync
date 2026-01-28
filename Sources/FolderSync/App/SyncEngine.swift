@@ -18,7 +18,8 @@ class SyncEngine {
     }
 
     /// 与指定对等点同步指定文件夹
-    /// 同步条件：1. 对方客户端在线 2. 同步ID相同
+    /// 同步条件：1. 对方客户端在线（30秒内收到广播） 2. 同步ID相同
+    /// 简化逻辑：仅使用收到的广播判断peer有效性
     func syncWithPeer(peer: PeerID, folder: SyncFolder) {
         guard let syncManager = syncManager else { return }
 
@@ -26,9 +27,26 @@ class SyncEngine {
         let syncKey = "\(folder.syncID):\(peerID)"
 
         Task { @MainActor in
-            // 条件1：检查设备是否在线，离线设备不进行同步
-            if !syncManager.peerManager.isOnline(peerID) {
-                print("[SyncEngine] ⏭️ [syncWithPeer] 设备已离线，跳过同步: \(peerID.prefix(12))... (syncID: \(folder.syncID))")
+            // 条件1：检查设备是否在线（简化：仅使用广播判断）
+            // 检查最近是否收到过广播（30秒内）
+            guard let peerInfo = syncManager.peerManager.getPeer(peerID) else {
+                print("[SyncEngine] ⏭️ [syncWithPeer] Peer不存在，跳过同步: \(peerID.prefix(12))... (syncID: \(folder.syncID))")
+                return
+            }
+
+            let timeSinceLastSeen = Date().timeIntervalSince(peerInfo.lastSeenTime)
+            let isOnline = timeSinceLastSeen < 30.0  // 30秒内收到广播则认为在线
+
+            if !isOnline {
+                print("[SyncEngine] ⏭️ [syncWithPeer] 设备已离线（30秒内未收到广播），跳过同步: \(peerID.prefix(12))... (syncID: \(folder.syncID)), 距离上次广播=\(Int(timeSinceLastSeen))秒")
+                // 简化逻辑：无法访问的peer直接删除
+                print("[SyncEngine] 🗑️ [DEBUG] 删除无法访问的peer: \(peerID.prefix(12))...")
+                // 从所有syncID中移除该peer
+                for folder in syncManager.folders {
+                    syncManager.removeFolderPeer(folder.syncID, peerID: peerID)
+                }
+                // 从PeerManager中删除
+                syncManager.peerManager.removePeer(peerID)
                 return
             }
 
@@ -239,20 +257,9 @@ class SyncEngine {
                 let errorString = String(describing: error)
                 print("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
 
-                // 检查是否是超时或连接失败错误，如果是，将设备标记为离线
-                let isTimeoutOrConnectionError =
-                    errorString.contains("TimedOut") || errorString.contains("timeout")
-                    || errorString.contains("请求超时") || errorString.contains("connection")
-                    || errorString.contains("Connection") || errorString.contains("unreachable")
-
-                if isTimeoutOrConnectionError {
-                    // 将设备标记为离线，避免重复尝试连接
-                    await MainActor.run {
-                        syncManager.peerManager.updateOnlineStatus(peerID, isOnline: false)
-                    }
-                    print("[SyncEngine] ⚠️ [performSync] 对等点连接失败，已标记为离线: \(peerID.prefix(12))...")
-                }
-
+                // 简化逻辑：仅使用广播判断peer有效性，连接失败不删除peer
+                // 如果peer仍在发送广播，说明它是在线的，连接失败可能是临时网络问题
+                // peer的有效性由广播时间戳判断，不在同步过程中删除peer
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
                 // 记录错误日志
@@ -267,6 +274,7 @@ class SyncEngine {
             // 条件2：验证同步ID是否匹配（通过检查远程是否有该syncID）
             if case .error = rootRes {
                 // 远程没有这个syncID，说明同步ID不匹配，跳过同步
+                // 注意：这里不删除peer，因为peer可能在其他syncID下可用
                 print("[SyncEngine] ⏭️ [DEBUG] performSync: 同步ID不匹配（远程没有该syncID），跳过同步: syncID=\(syncID), peer=\(peerID.prefix(12))...")
                 syncManager.removeFolderPeer(syncID, peerID: peerID)
                 return

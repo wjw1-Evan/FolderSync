@@ -527,11 +527,6 @@ public class P2PNode {
         print("[P2PNode] 📡 已发送广播通知 IP 地址变化")
     }
 
-    public func announce(service: String) async throws {
-        // 原生实现：通过 LAN Discovery 广播服务
-        print("[P2PNode] 📡 广播服务: \(service)")
-        lanDiscovery?.sendDiscoveryRequest()
-    }
 
     public func stop() async throws {
         // 停止网络路径监控

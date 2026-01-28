@@ -318,6 +318,7 @@ public class SyncManager: ObservableObject {
     }
 
     /// 检查所有对等点的在线状态
+    /// 简化逻辑：仅使用收到的广播判断peer有效性
     private func checkAllPeersOnlineStatus() async {
         // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
         let peersToCheck = peerManager.allPeers
@@ -336,8 +337,6 @@ public class SyncManager: ObservableObject {
 
         for peerInfo in peersToCheck {
             let peerIDString = peerInfo.peerIDString
-            // 使用 deviceStatuses 作为权威状态源
-            let wasOnline = peerManager.isOnline(peerIDString)
 
             // 重新获取最新的 peerInfo（可能在检查过程中收到了新广播）
             let currentPeerInfo = peerManager.getPeer(peerIDString)
@@ -346,53 +345,29 @@ public class SyncManager: ObservableObject {
                 continue
             }
 
-            // 先检查最近是否收到过广播（30秒内）
-            // 如果最近收到过广播，直接认为在线，不需要发送请求检查
-            // 注意：广播间隔是1秒，检查间隔是10秒，考虑到UDP可能丢包，设置30秒窗口
-            // 这样即使连续丢失2-3个广播包，只要在30秒内收到一次，就认为在线
-            let recentlySeen: Bool = {
-                let timeSinceLastSeen = Date().timeIntervalSince(currentPeer.lastSeenTime)
-                return timeSinceLastSeen < 30.0  // 30秒窗口，平衡响应速度和容错性
-            }()
+            // 简化逻辑：仅使用广播判断有效性
+            // 检查最近是否收到过广播（30秒内）
+            // 广播间隔是1秒，检查间隔是10秒，考虑到UDP可能丢包，设置30秒窗口
+            let timeSinceLastSeen = Date().timeIntervalSince(currentPeer.lastSeenTime)
+            let isOnline = timeSinceLastSeen < 30.0  // 30秒内收到广播则认为在线
 
-            let isOnline: Bool
-            if recentlySeen {
-                // 最近收到过广播，认为在线
-                isOnline = true
-            } else {
-                // 没有最近收到广播，如果设备已经标记为离线，不再尝试连接检查
-                if !wasOnline {
-                    // 设备已经离线，不再尝试连接，直接返回离线状态
-                    isOnline = false
-                } else {
-                    // 设备之前在线但现在没有收到广播，发送请求检查
-                    isOnline = await checkPeerOnline(peer: currentPeer.peerID)
+            let wasOnline = peerManager.isOnline(peerIDString)
+
+            // 简化逻辑：无法访问的peer直接删除（30秒内没有收到广播）
+            if !isOnline {
+                print("[SyncManager] 🗑️ [DEBUG] 删除无法访问的peer（30秒内未收到广播）: \(peerIDString.prefix(12))..., 距离上次广播=\(Int(timeSinceLastSeen))秒")
+                // 从所有syncID中移除该peer
+                for folder in folders {
+                    removeFolderPeer(folder.syncID, peerID: peerIDString)
                 }
-            }
-
-            // 关键：广播是设备在线的直接证据，优先于检查结果
-            // 再次检查是否最近收到过广播（双重检查，避免竞态条件）
-            let finalCheck = peerManager.getPeer(peerIDString)
-            let finalRecentlySeen =
-                finalCheck.map { Date().timeIntervalSince($0.lastSeenTime) < 30.0 } ?? false
-
-            // 如果最近收到过广播，强制认为在线（广播是设备在线的直接证据）
-            let finalIsOnline: Bool
-            if finalRecentlySeen {
-                finalIsOnline = true
-                if !isOnline {
-                    print("[SyncManager] ⚠️ 检查结果离线，但最近收到过广播，强制保持在线: \(peerIDString.prefix(12))...")
-                }
-            } else {
-                // 没有最近广播，使用检查结果
-                finalIsOnline = isOnline
-            }
-
-            if finalIsOnline != wasOnline {
+                // 从PeerManager中删除
+                peerManager.removePeer(peerIDString)
                 statusChanged = true
+            } else if isOnline != wasOnline {
+                // 状态变化，更新在线状态
+                statusChanged = true
+                peerManager.updateOnlineStatus(peerIDString, isOnline: true)
             }
-
-            peerManager.updateOnlineStatus(peerIDString, isOnline: finalIsOnline)
         }
 
         if statusChanged {
@@ -400,117 +375,6 @@ public class SyncManager: ObservableObject {
         }
     }
 
-    /// 检查单个对等点是否在线
-    private func checkPeerOnline(peer: PeerID) async -> Bool {
-        let peerIDString = peer.b58String
-
-        // 注意：SyncManager 是 @MainActor，所以可以直接访问 peerManager
-
-        // 首先检查设备是否已经标记为离线，如果已离线，不再尝试连接
-        if !peerManager.isOnline(peerIDString) {
-            // 设备已经离线，不再尝试连接
-            return false
-        }
-
-        let isRegistered = peerManager.isRegistered(peerIDString)
-
-        // 检查是否是新发现的（1分钟内）
-        // 新发现的设备给更短的宽限期，加快离线检测
-        let isRecentlyDiscovered: Bool = {
-            if let peerInfo = peerManager.getPeer(peerIDString) {
-                return Date().timeIntervalSince(peerInfo.discoveryTime) < 60.0
-            }
-            return false
-        }()
-
-        // 检查最近是否收到过广播（30秒内）
-        // 如果最近收到过广播，说明设备在线，即使未注册也应该认为在线
-        // 注意：广播间隔是1秒，30秒窗口可以容忍一定的UDP丢包
-        let recentlySeen: Bool = {
-            if let peerInfo = peerManager.getPeer(peerIDString) {
-                return Date().timeIntervalSince(peerInfo.lastSeenTime) < 30.0
-            }
-            return false
-        }()
-
-        // 如果最近收到过广播，认为在线（广播是设备在线的直接证据）
-        if recentlySeen {
-            return true
-        }
-
-        // 如果未注册且不是新发现的，认为离线
-        if !isRegistered && !isRecentlyDiscovered {
-            return false
-        }
-
-        // 尝试发送轻量级请求验证设备是否在线
-        // 缩短超时时间，加快离线检测
-        do {
-            let randomSyncID = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
-                .description
-            let _: SyncResponse = try await sendSyncRequest(
-                .getMST(syncID: randomSyncID),
-                to: peer,
-                peerID: peer.b58String,
-                timeout: 3.0,  // 从5秒缩短到3秒
-                maxRetries: 1,
-                folder: nil
-            )
-            return true
-        } catch {
-            let errorString = String(describing: error)
-
-            // "Folder not found" 说明设备在线
-            if errorString.contains("Folder not found") || errorString.contains("not found")
-                || errorString.contains("does not exist")
-            {
-                return true
-            }
-
-            // 处理 peerNotFound 错误
-            if errorString.contains("peerNotFound")
-                || errorString.contains("BasicInMemoryPeerStore")
-            {
-                if isRegistered {
-                    let isInConnectionWindow: Bool = {
-                        if let peerInfo = peerManager.getPeer(peerIDString) {
-                            return Date().timeIntervalSince(peerInfo.discoveryTime) < 300.0
-                        }
-                        return false
-                    }()
-                    return isInConnectionWindow || peerManager.isRegistered(peerIDString)
-                } else {
-                    return isRecentlyDiscovered
-                }
-            }
-
-            // 连接相关错误（超时、连接失败等）
-            if errorString.contains("TimedOut") || errorString.contains("timeout")
-                || errorString.contains("请求超时") || errorString.contains("connection")
-                || errorString.contains("Connection") || errorString.contains("unreachable")
-            {
-                // 连接失败，将设备标记为离线
-                await MainActor.run {
-                    peerManager.updateOnlineStatus(peerIDString, isOnline: false)
-                }
-                return false
-            }
-
-            // 其他连接错误
-            let isConnectionError =
-                errorString.lowercased().contains("connect")
-                || errorString.lowercased().contains("network")
-                || errorString.lowercased().contains("unreachable")
-                || errorString.lowercased().contains("refused")
-
-            if isConnectionError {
-                return false
-            }
-
-            // 未知错误：新发现的保守认为在线
-            return isRecentlyDiscovered
-        }
-    }
 
     /// 刷新文件夹的文件数量和文件夹数量统计（不触发同步，立即执行）
     func refreshFileCount(for folder: SyncFolder) {
@@ -587,31 +451,9 @@ public class SyncManager: ObservableObject {
         print("[SyncManager] 📊 开始统计文件夹内容: \(folder.localPath.path)")
         refreshFileCount(for: folder)
 
-        // Announce this folder on the network
-        // 注意：如果 libp2p 没有配置 DHT 等发现服务，announce 会失败
-        // 但这不影响 LANDiscovery 的自动发现功能，所以降级为警告
-        Task {
-            do {
-                try await p2pNode.announce(service: "folder-sync-\(folder.syncID)")
-                print("[SyncManager] ✅ 已发布服务: folder-sync-\(folder.syncID)")
-            } catch {
-                // 检查是否是发现服务不可用的错误
-                let errorString = String(describing: error)
-                if errorString.contains("noDiscoveryServicesAvailable")
-                    || errorString.contains("DiscoveryServices")
-                {
-                    // 这是预期的，因为我们使用 LANDiscovery 而不是 DHT
-                    print(
-                        "[SyncManager] ℹ️ 服务发布跳过（使用 LANDiscovery 自动发现）: folder-sync-\(folder.syncID)"
-                    )
-                } else {
-                    print("[SyncManager] ⚠️ 无法发布服务: \(error)")
-                    print("[SyncManager] 错误详情: \(error.localizedDescription)")
-                }
-            }
-
-            // 等待一小段时间确保服务已发布，然后开始同步
-            print("[SyncManager] ℹ️ 新文件夹已添加，准备开始同步...")
+        // 注意：广播不包含syncID，只代表客户端存在
+        // syncID的匹配在后续同步阶段通过getMST请求进行验证
+        print("[SyncManager] ℹ️ 新文件夹已添加，准备开始同步...")
 
             // 延迟 3.5 秒后开始同步，确保：
             // P2PNode 已经等待了 2 秒，这里再等待 1.5 秒，总共约 3.5 秒
@@ -1675,7 +1517,16 @@ public class SyncManager: ObservableObject {
         // 从地址中提取第一个可用的 IP:Port 地址
         let addressStrings = peerAddresses.map { $0.description }
         guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
-            print("[SyncManager] ❌ [sendSyncRequest] 无法提取有效地址")
+            print("[SyncManager] 🗑️ [DEBUG] 删除无法访问的peer（无可用地址）: \(peerID.prefix(12))...")
+            // 简化逻辑：无法访问的peer直接删除
+            await MainActor.run {
+                // 从所有syncID中移除该peer
+                for folder in self.folders {
+                    self.removeFolderPeer(folder.syncID, peerID: peerID)
+                }
+                // 从PeerManager中删除
+                self.peerManager.removePeer(peerID)
+            }
             throw NSError(
                 domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "对等点无可用地址"])
         }
@@ -1705,9 +1556,9 @@ public class SyncManager: ObservableObject {
                 maxRetries: maxRetries
             ) as SyncResponse
         } catch {
-            // 注意：对等点应该已经注册（由 syncWithPeer 保证）
-            // 如果请求失败，可能是网络问题或对等点暂时不可用
-            // 不需要重新注册，直接抛出错误让调用者处理
+            // 简化逻辑：仅使用广播判断peer有效性，请求失败不删除peer
+            // 如果peer仍在发送广播，说明它是在线的，请求失败可能是临时网络问题
+            // peer的有效性由广播时间戳判断，不在请求过程中删除peer
             throw error
         }
     }
@@ -1722,6 +1573,7 @@ public class SyncManager: ObservableObject {
     func removeFolderPeer(_ syncID: String, peerID: String) {
         syncIDManager.removePeer(peerID, from: syncID)
         updatePeerCount(for: syncID)
+        print("[SyncManager] 🗑️ [DEBUG] 从syncID移除peer: syncID=\(syncID), peer=\(peerID.prefix(12))...")
     }
 
     @MainActor
@@ -1970,20 +1822,19 @@ public class SyncManager: ObservableObject {
     }
 
     /// 更新设备统计（内部方法）
-    /// 注意：统计逻辑与 allDevices 保持一致，只统计 .online 和 .offline 状态的设备
+    /// 简化逻辑：无法访问的设备会被直接删除，所以只统计在线设备
     func updateDeviceCounts() {
         // 先更新设备列表
         updateAllDevices()
 
-        // 然后基于列表计算统计数据，确保一致性
+        // 简化逻辑：只统计在线设备（无法访问的设备会被直接删除）
         let deviceListOnline = allDevicesValue.filter { $0.status == "在线" && !$0.isLocal }.count
-        let deviceListOffline = allDevicesValue.filter { $0.status == "离线" }.count
 
         let oldOnline = onlineDeviceCountValue
         let oldOffline = offlineDeviceCountValue
 
         onlineDeviceCountValue = deviceListOnline + 1  // 包括自身
-        offlineDeviceCountValue = deviceListOffline
+        offlineDeviceCountValue = 0  // 简化：无法访问的设备会被删除，所以离线设备数始终为0
 
         // 如果计数发生变化，输出日志
         if oldOnline != onlineDeviceCountValue || oldOffline != offlineDeviceCountValue {
@@ -1999,12 +1850,13 @@ public class SyncManager: ObservableObject {
     }
 
     /// 获取所有设备列表（包括自身）
-    /// 注意：只显示 .online 和 .offline 状态的设备，与 deviceCounts 保持一致
+    /// 简化逻辑：只显示在线设备，无法访问的设备会被直接删除
     public var allDevices: [DeviceInfo] {
         return allDevicesValue
     }
 
     /// 更新设备列表（内部方法）
+    /// 简化逻辑：只显示在线设备，无法访问的设备会被直接删除
     private func updateAllDevices() {
         var devices: [DeviceInfo] = []
 
@@ -2018,17 +1870,16 @@ public class SyncManager: ObservableObject {
                 ))
         }
 
-        // 添加其他设备（使用 peerManager，基于 deviceStatuses 作为权威状态源）
-        // 只显示 .online 和 .offline 状态的设备，与 deviceCounts 统计逻辑保持一致
+        // 简化逻辑：只添加在线设备（无法访问的设备会被直接删除）
         for peerInfo in peerManager.allPeers {
             let status = peerManager.getDeviceStatus(peerInfo.peerIDString)
-            // 只显示明确为在线或离线的设备，忽略 .connecting 和 .disconnected 状态
-            if status == .online || status == .offline {
+            // 只显示在线设备
+            if status == .online {
                 devices.append(
                     DeviceInfo(
                         peerID: peerInfo.peerIDString,
                         isLocal: false,
-                        status: status == .online ? "在线" : "离线"
+                        status: "在线"
                     ))
             }
         }

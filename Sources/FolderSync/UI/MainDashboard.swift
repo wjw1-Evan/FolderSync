@@ -83,38 +83,21 @@ struct MainDashboard: View {
 
                             Spacer()
 
-                            // 设备状态按钮
+                            // 设备状态按钮（简化：只显示在线设备，无法访问的设备会被直接删除）
                             Button {
                                 showingAllPeers = true
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "laptopcomputer.and.iphone")
                                         .font(.caption)
-                                    if syncManager.offlineDeviceCount > 0 {
-                                        HStack(spacing: 4) {
-                                            Circle()
-                                                .fill(.green)
-                                                .frame(width: 6, height: 6)
-                                            Text("\(syncManager.onlineDeviceCount)")
-                                                .foregroundStyle(.green)
-                                            Text("•")
-                                                .foregroundStyle(.secondary)
-                                            Circle()
-                                                .fill(.red)
-                                                .frame(width: 6, height: 6)
-                                            Text("\(syncManager.offlineDeviceCount)")
-                                                .foregroundStyle(.red)
-                                        }
-                                    } else {
-                                        HStack(spacing: 4) {
-                                            Circle()
-                                                .fill(.green)
-                                                .frame(width: 6, height: 6)
-                                            Text(
-                                                "\(syncManager.onlineDeviceCount)\(LocalizedString.onlineSuffix)"
-                                            )
-                                            .foregroundStyle(.green)
-                                        }
+                                    HStack(spacing: 4) {
+                                        Circle()
+                                            .fill(.green)
+                                            .frame(width: 6, height: 6)
+                                        Text(
+                                            "\(syncManager.onlineDeviceCount)\(LocalizedString.onlineSuffix)"
+                                        )
+                                        .foregroundStyle(.green)
                                     }
                                 }
                                 .font(.caption)
@@ -921,15 +904,13 @@ struct AllPeersListView: View {
                                     .truncationMode(.middle)
 
                                 HStack(spacing: 6) {
+                                    // 简化逻辑：只显示在线设备（无法访问的设备会被删除）
                                     Circle()
-                                        .fill(
-                                            device.status == LocalizedString.online ? .green : .red
-                                        )
+                                        .fill(.green)
                                         .frame(width: 6, height: 6)
-                                    Text(device.status)
+                                    Text(LocalizedString.online)
                                         .font(.caption2)
-                                        .foregroundStyle(
-                                            device.status == LocalizedString.online ? .green : .red)
+                                        .foregroundStyle(.green)
                                     if !device.isLocal {
                                         Text("•")
                                             .foregroundStyle(.secondary)

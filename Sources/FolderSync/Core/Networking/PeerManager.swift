@@ -368,8 +368,12 @@ public class PeerManager: ObservableObject {
     
     /// 移除 Peer
     public func removePeer(_ peerIDString: String) {
+        let existed = peers[peerIDString] != nil
         peers.removeValue(forKey: peerIDString)
         deviceStatuses.removeValue(forKey: peerIDString)
+        if existed {
+            print("[PeerManager] 🗑️ [DEBUG] 已删除peer: \(peerIDString.prefix(12))...")
+        }
         // 保存到持久化存储
         Task {
             await savePeers()

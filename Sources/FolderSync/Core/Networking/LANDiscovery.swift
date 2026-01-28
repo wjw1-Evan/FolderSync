@@ -505,6 +505,8 @@ public class LANDiscovery {
     
     private func createDiscoveryMessage(peerID: String, listenAddresses: [String] = []) -> String {
         // JSON format: {"peerID": "...", "service": "foldersync", "addresses": [...]}
+        // 注意：广播消息不包含syncID，只代表客户端存在
+        // syncID的匹配在后续同步阶段通过getMST请求进行验证
         // 过滤掉端口为0的地址（0表示自动分配，不能用于连接）
         let validAddresses = listenAddresses.filter { addr in
             // 检查地址格式：/ip4/IP/tcp/PORT

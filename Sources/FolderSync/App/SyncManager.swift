@@ -153,6 +153,13 @@ public class SyncManager: ObservableObject {
 
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
+        
+        // 初始化广播中的 syncID（在 P2PNode 启动后）
+        Task { @MainActor in
+            // 等待 P2PNode 启动完成
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            self.updateBroadcastSyncIDs()
+        }
 
         // 初始化模块化组件
         folderMonitor = FolderMonitor(syncManager: self)
@@ -179,7 +186,7 @@ public class SyncManager: ObservableObject {
         }
 
         peerDiscoveryTask = Task { @MainActor in
-            p2pNode.onPeerDiscovered = { [weak self] peer in
+            p2pNode.onPeerDiscovered = { [weak self] peer, remoteSyncIDs in
                 Task { @MainActor in
                     guard let self = self else { return }
                     let peerIDString = peer.b58String
@@ -216,19 +223,28 @@ public class SyncManager: ObservableObject {
                     }
                     // 减少收到广播的日志输出，只在状态变化时输出
 
-                    // 对于新对等点，立即触发同步
-                    // 对于已存在的对等点，只有在最近没有同步过的情况下才触发同步
-                    // 避免频繁触发不必要的同步
+                    // 利用广播中的 syncID 信息，只对匹配的 syncID 触发同步
+                    let remoteSyncIDSet = Set(remoteSyncIDs)
+                    let matchingFolders = self.folders.filter { folder in
+                        remoteSyncIDSet.contains(folder.syncID)
+                    }
+                    
+                    if !matchingFolders.isEmpty {
+                        print("[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)")
+                    } else if !remoteSyncIDs.isEmpty {
+                        print("[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)")
+                    }
+
+                    // 对于新对等点，只同步匹配的文件夹
+                    // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹
                     Task { @MainActor in
                         // syncWithPeer 内部会处理对等点注册，这里直接调用即可
-                        if wasNew {
-                            // 向所有文件夹同步（多点同步）
-                            for folder in self.folders {
+                        for folder in matchingFolders {
+                            if wasNew {
+                                // 新 peer，立即同步匹配的文件夹
                                 self.syncWithPeer(peer: peer, folder: folder)
-                            }
-                        } else {
-                            // 只同步不在冷却期内的文件夹
-                            for folder in self.folders {
+                            } else {
+                                // 已存在的 peer，只同步不在冷却期内的文件夹
                                 if self.shouldSyncFolderWithPeer(
                                     peerID: peerIDString, folder: folder)
                                 {
@@ -313,6 +329,12 @@ public class SyncManager: ObservableObject {
 
     let ignorePatterns = [".DS_Store", ".git/", "node_modules/", ".build/", ".swiftpm/"]
 
+    /// 更新广播中的 syncID 列表
+    func updateBroadcastSyncIDs() {
+        let syncIDs = folders.map { $0.syncID }
+        p2pNode.updateBroadcastSyncIDs(syncIDs)
+        print("[SyncManager] 📡 已更新广播 syncID: \(syncIDs.count) 个")
+    }
 
     func setupP2PHandlers() {
         // 设置原生网络服务的消息处理器

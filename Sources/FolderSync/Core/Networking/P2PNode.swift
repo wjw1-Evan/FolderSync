@@ -13,7 +13,7 @@ public class P2PNode {
     // 本机 PeerID（持久化存储）
     private var myPeerID: PeerID?
     
-    public var onPeerDiscovered: ((PeerID) -> Void)? // Peer 发现回调
+    public var onPeerDiscovered: ((PeerID, [String]) -> Void)? // Peer 发现回调 (peer, syncIDs)
     
     // 网络路径监控，用于检测 IP 地址变化
     private var pathMonitor: NWPathMonitor?
@@ -112,9 +112,9 @@ public class P2PNode {
     }
     
     /// Setup LAN discovery using UDP broadcast
-    private func setupLANDiscovery(peerID: String, listenAddresses: [String] = []) {
+    private func setupLANDiscovery(peerID: String, listenAddresses: [String] = [], syncIDs: [String] = []) {
         let discovery = LANDiscovery()
-        discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses in
+        discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses, syncIDs in
             guard !discoveredPeerID.isEmpty else {
                 print("[P2PNode] ⚠️ 收到空的 peerID，忽略")
                 return
@@ -128,17 +128,17 @@ public class P2PNode {
             
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                await self.handleDiscoveredPeer(peerID: discoveredPeerID, discoveryAddress: address, listenAddresses: peerAddresses)
+                await self.handleDiscoveredPeer(peerID: discoveredPeerID, discoveryAddress: address, listenAddresses: peerAddresses, syncIDs: syncIDs)
             }
         }
-        discovery.start(peerID: peerID, listenAddresses: listenAddresses)
+        discovery.start(peerID: peerID, listenAddresses: listenAddresses, syncIDs: syncIDs)
         self.lanDiscovery = discovery
     }
     
     /// 处理发现的 peer（新的统一入口）
     @MainActor
-    private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String]) async {
-        print("[P2PNode] 🔍 [DEBUG] 处理发现的 peer: peerID=\(peerID.prefix(12))..., 发现地址=\(discoveryAddress), 监听地址数=\(listenAddresses.count)")
+    private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String], syncIDs: [String]) async {
+        print("[P2PNode] 🔍 [DEBUG] 处理发现的 peer: peerID=\(peerID.prefix(12))..., 发现地址=\(discoveryAddress), 监听地址数=\(listenAddresses.count), syncID数=\(syncIDs.count)")
         
         // 关键修复：确保不会处理自己的广播
         guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else {
@@ -200,7 +200,7 @@ public class P2PNode {
                 peerManager.updateDeviceStatus(peerID, status: .online)
                 
                 // 通知 SyncManager
-                self.onPeerDiscovered?(peerIDObj)
+                self.onPeerDiscovered?(peerIDObj, syncIDs)
             } else {
                 // 注册失败，检查原因
                 let state = registrationService.getRegistrationState(peerID)
@@ -208,7 +208,7 @@ public class P2PNode {
                 
                 // 即使注册失败，也更新设备状态并通知（让后续重试机制处理）
                 peerManager.updateDeviceStatus(peerID, status: .online)
-                self.onPeerDiscovered?(peerIDObj)
+                self.onPeerDiscovered?(peerIDObj, syncIDs)
             }
         } else {
             print("[P2PNode] ℹ️ [DEBUG] Peer 已注册且地址未变化，跳过注册: \(peerID.prefix(12))...")
@@ -221,7 +221,7 @@ public class P2PNode {
             peerManager.updateDeviceStatus(peerID, status: .online)
             
             // 即使已注册，也通知 SyncManager（可能状态有变化）
-            self.onPeerDiscovered?(peerIDObj)
+            self.onPeerDiscovered?(peerIDObj, syncIDs)
         }
     }
     
@@ -292,7 +292,7 @@ public class P2PNode {
         }
 
         // 启用 LAN discovery（UDP 广播）
-        setupLANDiscovery(peerID: peerID.b58String, listenAddresses: [])
+        setupLANDiscovery(peerID: peerID.b58String, listenAddresses: [], syncIDs: [])
         
         // 启动网络路径监控，监听 IP 地址变化
         startNetworkPathMonitoring()
@@ -337,6 +337,9 @@ public class P2PNode {
         }
         
         lanDiscovery?.updateListenAddresses(addresses)
+        
+        // 更新广播中的 syncID（如果有提供）
+        // 注意：syncID 会在 SyncManager 初始化后通过 updateBroadcastSyncIDs 更新
         
         // 地址更新后立即发送广播
         if !addresses.isEmpty {
@@ -526,7 +529,12 @@ public class P2PNode {
         lanDiscovery?.sendDiscoveryRequest()
         print("[P2PNode] 📡 已发送广播通知 IP 地址变化")
     }
-
+    
+    /// 更新广播中的 syncID 列表
+    @MainActor
+    public func updateBroadcastSyncIDs(_ syncIDs: [String]) {
+        lanDiscovery?.updateSyncIDs(syncIDs)
+    }
 
     public func stop() async throws {
         // 停止网络路径监控

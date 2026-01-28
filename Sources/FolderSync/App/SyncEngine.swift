@@ -273,9 +273,9 @@ class SyncEngine {
 
             // 条件2：验证同步ID是否匹配（通过检查远程是否有该syncID）
             if case .error = rootRes {
-                // 远程没有这个syncID，说明同步ID不匹配，跳过同步
-                // 注意：这里不删除peer，因为peer可能在其他syncID下可用
-                print("[SyncEngine] ⏭️ [DEBUG] performSync: 同步ID不匹配（远程没有该syncID），跳过同步: syncID=\(syncID), peer=\(peerID.prefix(12))...")
+                // 远程没有这个syncID，说明该设备不需要同步此文件夹
+                // 这是正常情况：不同设备可能有不同的文件夹配置
+                print("[SyncEngine] ℹ️ [DEBUG] performSync: 远程设备没有该syncID（正常情况）: syncID=\(syncID), peer=\(peerID.prefix(12))...")
                 syncManager.removeFolderPeer(syncID, peerID: peerID)
                 return
             }

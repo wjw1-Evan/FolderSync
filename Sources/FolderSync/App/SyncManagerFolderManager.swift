@@ -78,8 +78,9 @@ extension SyncManager {
         print("[SyncManager] 📊 开始统计文件夹内容: \(folder.localPath.path)")
         refreshFileCount(for: folder)
 
-        // 注意：广播不包含syncID，只代表客户端存在
-        // syncID的匹配在后续同步阶段通过getMST请求进行验证
+        // 更新广播中的 syncID 列表
+        updateBroadcastSyncIDs()
+
         print("[SyncManager] ℹ️ 新文件夹已添加，准备开始同步...")
 
         Task {
@@ -102,6 +103,8 @@ extension SyncManager {
         removeDeletedPaths(for: folder.syncID)
         // 防抖任务由 FolderMonitor 管理，停止监控时会自动取消
         try? StorageManager.shared.deleteFolder(folder.id)
+        // 更新广播中的 syncID 列表
+        updateBroadcastSyncIDs()
     }
 
     func updateFolder(_ folder: SyncFolder) {

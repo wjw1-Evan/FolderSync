@@ -22,8 +22,8 @@ class FolderMonitor {
     func startMonitoring(_ folder: SyncFolder) {
         guard let syncManager = syncManager else { return }
 
-        // 注意：广播不包含syncID，只代表客户端存在
-        // syncID的匹配在后续同步阶段进行验证
+        // 注意：广播现在包含 syncID 列表，设备在发现 peer 时即可知道哪些 syncID 匹配
+        // 这样可以提前过滤，只对匹配的 syncID 触发同步
 
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path, flags in
             guard let self = self, let syncManager = self.syncManager else { return }

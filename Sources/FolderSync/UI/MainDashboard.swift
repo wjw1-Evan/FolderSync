@@ -8,6 +8,7 @@ struct MainDashboard: View {
     @State private var showingAllPeers = false
     @State private var conflictCount: Int = 0
     @State private var selectedLogFolderID: UUID? = nil
+    @State private var showingLocalChanges = false
     @State private var selectedLocalChangesFolder: SyncFolder? = nil
 
     var body: some View {
@@ -134,9 +135,8 @@ struct MainDashboard: View {
                         FolderRow(
                             folderID: folder.id,
                             onViewLocalChanges: { folder in
-                                // 直接设置 selectedLocalChangesFolder，sheet 会自动显示
-                                print("[MainDashboard] 准备显示本地变更视图，文件夹: \(folder.localPath.lastPathComponent)")
                                 selectedLocalChangesFolder = folder
+                                showingLocalChanges = true
                             },
                             onViewSyncLogs: { folderID in
                                 selectedLogFolderID = folderID
@@ -238,9 +238,16 @@ struct MainDashboard: View {
                 ConflictCenter()
                     .environmentObject(syncManager)
             }
-            .sheet(item: $selectedLocalChangesFolder) { folder in
-                LocalChangeHistoryView(folder: folder)
-                    .environmentObject(syncManager)
+            .sheet(isPresented: $showingLocalChanges, onDismiss: {
+                selectedLocalChangesFolder = nil
+            }) {
+                if let folder = selectedLocalChangesFolder {
+                    LocalChangeHistoryView(folder: folder)
+                        .environmentObject(syncManager)
+                } else {
+                    // 防止异常空白窗口
+                    EmptyView()
+                }
             }
             .sheet(isPresented: $showingSyncHistory) {
                 SyncHistoryView(preselectedFolderID: selectedLogFolderID)
@@ -520,16 +527,7 @@ struct FolderRow: View {
                 }
 
                 Button {
-                    // 确保使用最新的 folder 对象
-                    if let currentFolder = syncManager.folders.first(where: { $0.id == folder.id }) {
-                        print("[FolderRow] 打开本地变更视图: \(currentFolder.localPath.lastPathComponent)")
-                        // 直接传递最新的 folder 对象
-                        onViewLocalChanges(currentFolder)
-                    } else {
-                        print("[FolderRow] ⚠️ 无法找到文件夹，使用计算属性中的 folder 对象")
-                        // 如果找不到，使用计算属性中的 folder（应该总是有值）
-                        onViewLocalChanges(folder)
-                    }
+                    onViewLocalChanges(folder)
                 } label: {
                     Label(
                         LocalizedString.viewLocalChanges, systemImage: "clock.badge.exclamationmark"

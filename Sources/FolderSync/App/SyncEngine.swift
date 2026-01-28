@@ -832,13 +832,6 @@ class SyncEngine {
                         continue
                     }
                     
-                    // 重要：先检查删除记录，防止已删除的文件被下载
-                    // 如果文件在 deletedSet 中，不应该下载
-                    if deletedSet.contains(path) {
-                        print("[SyncEngine] ⏭️ [download] 文件已删除，跳过下载: 路径=\(path)")
-                        continue
-                    }
-                    
                     // 获取本地和远程状态
                     let localState = localStates[path]
                     var remoteState = remoteStates[path]
@@ -857,6 +850,8 @@ class SyncEngine {
                     
                     // 使用统一的决策引擎（它会正确比较 VC）
                     // SyncDecisionEngine 会正确处理删除记录和文件 VC 的比较
+                    // 重要：先让 SyncDecisionEngine 做决策，因为它需要比较删除记录的 VC 和文件的 VC
+                    // 对于删除-修改冲突，即使文件在 deletedSet 中，也应该生成冲突文件
                     let action = SyncDecisionEngine.decideSyncAction(
                         localState: localState,
                         remoteState: remoteState,
@@ -870,7 +865,7 @@ class SyncEngine {
                         
                     case .download:
                         // 下载文件（覆盖本地）
-                        // 再次检查删除记录（双重保险）
+                        // 检查删除记录（双重保险），但允许冲突情况通过
                         if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
                             print("[SyncEngine] ⏭️ [download] 文件已删除，跳过下载: 路径=\(path)")
                             continue
@@ -890,14 +885,30 @@ class SyncEngine {
                         
                     case .conflict:
                         // 冲突：保存远程版本为冲突文件
-                        // 再次检查删除记录（双重保险）
-                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
-                            print("[SyncEngine] ⏭️ [download] 冲突但文件已删除，跳过: 路径=\(path)")
-                            continue
-                        }
+                        // 重要：对于删除-修改冲突，即使文件在 deletedSet 中，也应该生成冲突文件
+                        // 因为 SyncDecisionEngine 已经检测到并发冲突（删除记录的 VC 和文件的 VC 并发）
+                        // 这种情况下，需要保存远程版本为冲突文件，让用户决定保留哪个版本
                         if let remoteMeta = remoteState?.metadata {
-                            conflictFilesSet.insert(path)
-                            conflictFiles.append((path, remoteMeta))
+                            // 检查是否是删除-修改冲突（本地有删除记录，远程有文件）
+                            let isDeleteModifyConflict = localState?.isDeleted == true && remoteState?.isDeleted == false
+                            
+                            if isDeleteModifyConflict {
+                                // 删除-修改冲突：即使文件在 deletedSet 中，也生成冲突文件
+                                print("[SyncEngine] ⚠️ [download] 删除-修改冲突，生成冲突文件: 路径=\(path), deletedSet=\(deletedSet.contains(path))")
+                                conflictFilesSet.insert(path)
+                                conflictFiles.append((path, remoteMeta))
+                            } else if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                                // 其他冲突但文件已删除，跳过
+                                print("[SyncEngine] ⏭️ [download] 冲突但文件已删除，跳过: 路径=\(path)")
+                                continue
+                            } else {
+                                // 普通冲突（双方都修改），生成冲突文件
+                                print("[SyncEngine] ⚠️ [download] 普通冲突，生成冲突文件: 路径=\(path)")
+                                conflictFilesSet.insert(path)
+                                conflictFiles.append((path, remoteMeta))
+                            }
+                        } else {
+                            print("[SyncEngine] ⚠️ [download] 冲突但 remoteMeta 为空: 路径=\(path), localDeleted=\(localState?.isDeleted ?? false), remoteDeleted=\(remoteState?.isDeleted ?? false)")
                         }
                         
                     case .uncertain:
@@ -948,14 +959,6 @@ class SyncEngine {
                         continue
                     }
                     
-                    // 重要：先检查删除记录，防止已删除的文件被上传
-                    // 如果文件在 deletedSet 中，不应该上传
-                    // 注意：如果文件在 remoteDeletedPaths 中，让 SyncDecisionEngine 处理，保持与下载阶段的一致性
-                    if deletedSet.contains(path) {
-                        print("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
-                        continue
-                    }
-                    
                     // 获取本地和远程状态
                     let localState = localStates[path]
                     var remoteState = remoteStates[path]
@@ -971,6 +974,8 @@ class SyncEngine {
                     
                     // 使用统一的决策引擎（它会正确比较 VC）
                     // SyncDecisionEngine 会正确处理删除记录和文件 VC 的比较
+                    // 重要：先让 SyncDecisionEngine 做决策，因为它需要比较删除记录的 VC 和文件的 VC
+                    // 对于删除-修改冲突，即使文件在 deletedSet 中，也应该生成冲突文件
                     let action = SyncDecisionEngine.decideSyncAction(
                         localState: localState,
                         remoteState: remoteState,
@@ -984,7 +989,7 @@ class SyncEngine {
                         
                     case .upload:
                         // 上传文件（覆盖远程）
-                        // 再次检查删除记录（双重保险）
+                        // 检查删除记录（双重保险），但允许冲突情况通过
                         if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
                             print("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
                             continue
@@ -1001,17 +1006,32 @@ class SyncEngine {
                         
                     case .conflict:
                         // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
-                        // 再次检查删除记录（双重保险）
-                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
-                            print("[SyncEngine] ⏭️ [upload] 冲突但文件已删除，跳过: 路径=\(path)")
-                            continue
-                        }
+                        // 重要：对于删除-修改冲突，即使文件在 deletedSet 中，也应该生成冲突文件
+                        // 因为 SyncDecisionEngine 已经检测到并发冲突（删除记录的 VC 和文件的 VC 并发）
                         if let localMeta = localState?.metadata {
-                            if let remoteMeta = remoteState?.metadata {
-                                uploadConflictFiles.append((path, remoteMeta))
+                            // 检查是否是删除-修改冲突（本地有文件，远程有删除记录）
+                            let isDeleteModifyConflict = localState?.isDeleted == false && remoteState?.isDeleted == true
+                            
+                            if isDeleteModifyConflict {
+                                // 删除-修改冲突：即使文件在 deletedSet 中，也生成冲突文件
+                                print("[SyncEngine] ⚠️ [upload] 删除-修改冲突，生成冲突文件: 路径=\(path)")
+                                if let remoteMeta = remoteState?.metadata {
+                                    uploadConflictFiles.append((path, remoteMeta))
+                                }
+                                filesToUploadSet.insert(path)
+                                filesToUpload.append((path, localMeta))
+                            } else if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
+                                // 其他冲突但文件已删除，跳过
+                                print("[SyncEngine] ⏭️ [upload] 冲突但文件已删除，跳过: 路径=\(path)")
+                                continue
+                            } else {
+                                // 普通冲突（双方都修改），先保存远程版本为冲突文件，然后上传本地版本
+                                if let remoteMeta = remoteState?.metadata {
+                                    uploadConflictFiles.append((path, remoteMeta))
+                                }
+                                filesToUploadSet.insert(path)
+                                filesToUpload.append((path, localMeta))
                             }
-                            filesToUploadSet.insert(path)
-                            filesToUpload.append((path, localMeta))
                         }
                         
                     case .uncertain:

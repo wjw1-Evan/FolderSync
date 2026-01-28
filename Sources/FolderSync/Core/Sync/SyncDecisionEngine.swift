@@ -59,7 +59,14 @@ class SyncDecisionEngine {
                 // 删除记录的 VC 更新或相等，保持删除
                 return .skip
             case .antecedent:
-                // 删除记录的 VC 更旧，下载远程文件（删除被覆盖）
+                // 删除记录的 VC 更旧，但检查时间差
+                // 如果删除时间和文件修改时间很接近（1秒内），可能是并发操作，视为冲突
+                let timeDiff = abs(remoteMeta.mtime.timeIntervalSince(localDel.deletedAt))
+                if timeDiff < 1.0 {
+                    print("[SyncDecisionEngine] ⚠️ 删除和修改时间接近（\(String(format: "%.2f", timeDiff))秒），视为并发冲突: 路径=\(path)")
+                    return .conflict
+                }
+                // 删除记录的 VC 更旧且时间差较大，下载远程文件（删除被覆盖）
                 return .download
             case .concurrent:
                 // 并发冲突，保守处理：保持删除，但记录冲突
@@ -84,7 +91,14 @@ class SyncDecisionEngine {
                 // 删除记录的 VC 更新或相等，删除本地文件
                 return .deleteLocal
             case .antecedent:
-                // 删除记录的 VC 更旧，理论上应该上传本地文件（删除被覆盖）
+                // 删除记录的 VC 更旧，但检查时间差
+                // 如果删除时间和文件修改时间很接近（1秒内），可能是并发操作，视为冲突
+                let timeDiff = abs(localMeta.mtime.timeIntervalSince(remoteDel.deletedAt))
+                if timeDiff < 1.0 {
+                    print("[SyncDecisionEngine] ⚠️ 删除和修改时间接近（\(String(format: "%.2f", timeDiff))秒），视为并发冲突: 路径=\(path)")
+                    return .conflict
+                }
+                // 删除记录的 VC 更旧且时间差较大，理论上应该上传本地文件（删除被覆盖）
                 // 但为了安全，保守处理：如果删除记录的 VC 更旧，说明删除操作更早
                 // 这种情况下，应该保持删除状态，而不是上传文件
                 // 因为删除操作已经发生，不应该被覆盖

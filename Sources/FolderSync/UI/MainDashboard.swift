@@ -238,9 +238,12 @@ struct MainDashboard: View {
                 ConflictCenter()
                     .environmentObject(syncManager)
             }
-            .sheet(isPresented: $showingLocalChanges, onDismiss: {
-                selectedLocalChangesFolder = nil
-            }) {
+            .sheet(
+                isPresented: $showingLocalChanges,
+                onDismiss: {
+                    selectedLocalChangesFolder = nil
+                }
+            ) {
                 if let folder = selectedLocalChangesFolder {
                     LocalChangeHistoryView(folder: folder)
                         .environmentObject(syncManager)

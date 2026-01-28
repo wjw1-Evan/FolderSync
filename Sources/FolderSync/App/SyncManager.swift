@@ -880,11 +880,16 @@ public class SyncManager: ObservableObject {
                     dp.remove(relativePath)
                     updateDeletedPaths(dp, for: folder.syncID)
                 }
-                // 从 lastKnownMetadata 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
+                // 从 lastKnownMetadata 和 lastKnownLocalPaths 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
                 // 这样可以防止系统尝试将目录作为文件上传
                 if lastKnownMetadata[folder.syncID]?[relativePath] != nil {
                     print("[recordLocalChange] 🔄 检测到目录创建，移除文件元数据: \(relativePath)")
                     lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
+                }
+                // 同时从 lastKnownLocalPaths 中移除，防止系统尝试将目录作为文件处理
+                if lastKnownLocalPaths[folder.syncID]?.contains(relativePath) == true {
+                    print("[recordLocalChange] 🔄 检测到目录创建，移除已知路径: \(relativePath)")
+                    lastKnownLocalPaths[folder.syncID]?.remove(relativePath)
                 }
                 print("[recordLocalChange] ⏭️ 忽略目录（只记录文件变更）: \(relativePath)")
                 return
@@ -1842,6 +1847,39 @@ public class SyncManager: ObservableObject {
                 // 多点同步：同时向所有已注册且在线的对等点同步
                 for peerInfo in registeredPeers {
                     syncWithPeer(peer: peerInfo.peerID, folder: folder)
+                }
+                
+                // 定期检查同步状态，如果所有同步都完成但状态仍然是 .syncing，重置状态
+                // 这样可以避免因为所有 peer 都失败而导致状态一直卡在 .syncing
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    let maxWaitTime = 60.0 // 最多等待60秒
+                    let checkInterval = 2.0 // 每2秒检查一次
+                    let startTime = Date()
+                    
+                    while Date().timeIntervalSince(startTime) < maxWaitTime {
+                        try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+                        
+                        // 检查是否所有 peer 的同步都已完成
+                        let allSyncCompleted = registeredPeers.allSatisfy { peerInfo in
+                            let syncKey = "\(folder.syncID):\(peerInfo.peerIDString)"
+                            return !self.syncInProgress.contains(syncKey)
+                        }
+                        
+                        if allSyncCompleted {
+                            // 所有同步都完成，检查状态
+                            if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
+                                let currentFolder = self.folders[index]
+                                if currentFolder.status == .syncing {
+                                    print("[SyncManager] 🔄 所有同步已完成但状态仍为 .syncing，重置状态: \(folder.syncID)")
+                                    self.updateFolderStatus(
+                                        folder.id, status: .synced, message: "同步完成", progress: 1.0)
+                                }
+                            }
+                            // 状态已重置，退出循环
+                            break
+                        }
+                    }
                 }
             }
         }

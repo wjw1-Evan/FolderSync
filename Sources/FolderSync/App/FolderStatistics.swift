@@ -105,6 +105,22 @@ class FolderStatistics {
         while let fileURL = enumerator?.nextObject() as? URL {
             do {
                 let canonicalFileURL = fileURL.resolvingSymlinksInPath().standardizedFileURL
+                
+                // 先检查是否为目录，如果是目录则跳过（目录不应该被同步）
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: canonicalFileURL.path, isDirectory: &isDirectory) else {
+                    continue
+                }
+                if isDirectory.boolValue {
+                    // 目录：只统计数量，不添加到文件列表
+                    let relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    if !relativePath.isEmpty {
+                        folderCount += 1
+                    }
+                    continue
+                }
+                
                 guard fileManager.isReadableFile(atPath: canonicalFileURL.path) else {
                     continue
                 }

@@ -360,7 +360,17 @@ class SyncEngine {
 
             // 如果是第一次同步（lastKnown 为空），初始化 lastKnown 为当前路径，不检测删除
             // 这样可以避免第一次同步时误判删除
-            let isFirstSync = lastKnown.isEmpty
+            // 重要：如果本地文件夹为空，即使有快照数据，也应该视为第一次同步
+            // 因为空文件夹不应该删除远程文件
+            let isFirstSync = lastKnown.isEmpty || (currentPaths.isEmpty && !lastKnown.isEmpty)
+            
+            if isFirstSync && currentPaths.isEmpty && !lastKnown.isEmpty {
+                print("[SyncEngine] ⚠️ [DEBUG] 检测到本地文件夹为空但存在快照数据，清空快照数据以避免误判删除: syncID=\(syncID)")
+                await MainActor.run {
+                    syncManager.lastKnownLocalPaths[syncID] = []
+                    syncManager.lastKnownMetadata[syncID] = [:]
+                }
+            }
 
             // 检测文件重命名：通过比较哈希值匹配删除的文件和新文件
             var renamedFiles: [String: String] = [:]  // oldPath -> newPath

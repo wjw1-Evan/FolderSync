@@ -72,6 +72,67 @@ extension SyncManager {
                 folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)")
             return
         }
+        
+        // 重要：检查本地文件夹是否为空，如果为空则清空快照数据
+        // 这样可以避免添加新文件夹时，如果之前有快照数据（可能是其他文件夹的），误判为删除
+        Task {
+            let fileManager = FileManager.default
+            let folderPath = folder.localPath.path
+            
+            // 检查文件夹是否为空（只检查文件，不包括子目录）
+            let contents = try? fileManager.contentsOfDirectory(atPath: folderPath)
+            let isEmpty = contents?.isEmpty ?? true
+            
+            if isEmpty {
+                // 文件夹为空，清空该 syncID 的快照数据和状态
+                print("[SyncManager] 🔄 检测到新文件夹为空，清空快照数据: syncID=\(folder.syncID)")
+                await MainActor.run {
+                    // 清空 lastKnownLocalPaths 和 lastKnownMetadata
+                    self.lastKnownLocalPaths[folder.syncID] = []
+                    self.lastKnownMetadata[folder.syncID] = [:]
+                    
+                    // 清空删除记录
+                    self.removeDeletedPaths(for: folder.syncID)
+                    
+                    // 清空文件状态存储
+                    self.fileStateStores.removeValue(forKey: folder.syncID)
+                    
+                    // 删除快照文件（如果存在）
+                    try? StorageManager.shared.deleteSnapshot(syncID: folder.syncID)
+                    
+                    print("[SyncManager] ✅ 已清空新文件夹的快照数据: syncID=\(folder.syncID)")
+                }
+            } else {
+                // 文件夹不为空，检查是否有旧的快照数据
+                // 如果快照数据中的文件路径在当前文件夹中不存在，可能是旧的快照数据，应该清空
+                await MainActor.run {
+                    if let lastKnown = self.lastKnownLocalPaths[folder.syncID],
+                       !lastKnown.isEmpty {
+                        // 检查快照中的文件是否在当前文件夹中存在
+                        var hasValidFiles = false
+                        for path in lastKnown {
+                            let fileURL = folder.localPath.appendingPathComponent(path)
+                            if fileManager.fileExists(atPath: fileURL.path) {
+                                hasValidFiles = true
+                                break
+                            }
+                        }
+                        
+                        // 如果快照中的文件都不存在，清空快照数据
+                        if !hasValidFiles {
+                            print("[SyncManager] 🔄 检测到快照数据中的文件都不存在，清空快照数据: syncID=\(folder.syncID)")
+                            self.lastKnownLocalPaths[folder.syncID] = []
+                            self.lastKnownMetadata[folder.syncID] = [:]
+                            self.removeDeletedPaths(for: folder.syncID)
+                            self.fileStateStores.removeValue(forKey: folder.syncID)
+                            try? StorageManager.shared.deleteSnapshot(syncID: folder.syncID)
+                            print("[SyncManager] ✅ 已清空无效的快照数据: syncID=\(folder.syncID)")
+                        }
+                    }
+                }
+            }
+        }
+        
         startMonitoring(folder)
 
         // 立即统计文件数量和文件夹数量

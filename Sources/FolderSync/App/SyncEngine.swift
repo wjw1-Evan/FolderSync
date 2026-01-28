@@ -207,13 +207,15 @@ class SyncEngine {
             }
 
             // 尝试使用原生网络服务
-            let rootRes: SyncResponse
+            var rootRes: SyncResponse?
             do {
                 let addressStrings = peerAddresses.map { $0.description }
                 print("[SyncEngine] 🔗 [DEBUG] 准备连接: syncID=\(syncID), 地址列表=\(addressStrings.joined(separator: ", "))")
 
-                guard let address = AddressConverter.extractFirstAddress(from: addressStrings)
-                else {
+                // 获取所有按优先级排序的地址（用于地址回退）
+                let sortedAddresses = AddressConverter.extractAllAddresses(from: addressStrings)
+                
+                guard !sortedAddresses.isEmpty else {
                     let errorMsg = "无法从地址中提取 IP:Port（地址数: \(addressStrings.count)）"
                     print("[SyncEngine] ❌ [DEBUG] performSync: \(errorMsg)")
                     throw NSError(
@@ -221,38 +223,65 @@ class SyncEngine {
                         userInfo: [NSLocalizedDescriptionKey: errorMsg])
                 }
 
-                // 验证提取的地址
-                let addressComponents = address.split(separator: ":")
-                guard addressComponents.count == 2,
-                    let extractedIP = String(addressComponents[0]).removingPercentEncoding,
-                    let extractedPort = UInt16(String(addressComponents[1])),
-                    extractedPort > 0,
-                    extractedPort <= 65535
-                else {
-                    print("[SyncEngine] ❌ [DEBUG] performSync: 地址格式验证失败: \(address)")
+                // 验证所有地址格式
+                var validAddresses: [String] = []
+                for address in sortedAddresses {
+                    let addressComponents = address.split(separator: ":")
+                    guard addressComponents.count == 2,
+                        let extractedIP = String(addressComponents[0]).removingPercentEncoding,
+                        let extractedPort = UInt16(String(addressComponents[1])),
+                        extractedPort > 0,
+                        extractedPort <= 65535,
+                        !extractedIP.isEmpty,
+                        extractedIP != "0.0.0.0"
+                    else {
+                        print("[SyncEngine] ⚠️ [DEBUG] performSync: 跳过无效地址: \(address)")
+                        continue
+                    }
+                    validAddresses.append(address)
+                }
+                
+                guard !validAddresses.isEmpty else {
+                    print("[SyncEngine] ❌ [DEBUG] performSync: 所有地址格式验证失败")
                     throw NSError(
                         domain: "SyncEngine", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
+                        userInfo: [NSLocalizedDescriptionKey: "所有地址格式无效"])
                 }
 
-                // 验证IP地址格式
-                if extractedIP.isEmpty || extractedIP == "0.0.0.0" {
-                    print("[SyncEngine] ❌ [DEBUG] performSync: IP地址无效: '\(extractedIP)'")
-                    throw NSError(
+                // 尝试每个地址（按优先级），如果失败则尝试下一个
+                var lastError: Error?
+                
+                for (index, address) in validAddresses.enumerated() {
+                    do {
+                        print("[SyncEngine] 📡 [DEBUG] 尝试连接地址 \(index + 1)/\(validAddresses.count): \(address)")
+                        rootRes =
+                            try await syncManager.p2pNode.nativeNetwork.sendRequest(
+                                .getMST(syncID: syncID),
+                                to: address,
+                                timeout: 15.0,  // 增加超时时间从10秒到15秒
+                                maxRetries: 3    // 增加重试次数从2次到3次
+                            ) as SyncResponse
+                        print("[SyncEngine] ✅ [DEBUG] 收到 getMST 响应: syncID=\(syncID), 地址=\(address), 响应类型=\(String(describing: rootRes))")
+                        break  // 成功，退出循环
+                    } catch {
+                        lastError = error
+                        let errorString = String(describing: error)
+                        print("[SyncEngine] ⚠️ [DEBUG] 地址 \(address) 连接失败: \(errorString)")
+                        
+                        // 如果不是最后一个地址，继续尝试下一个
+                        if index < validAddresses.count - 1 {
+                            print("[SyncEngine] 🔄 [DEBUG] 尝试下一个地址...")
+                            continue
+                        }
+                    }
+                }
+                
+                // 如果所有地址都失败了
+                guard rootRes != nil else {
+                    throw lastError ?? NSError(
                         domain: "SyncEngine", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "IP地址无效: \(extractedIP)"])
+                        userInfo: [NSLocalizedDescriptionKey: "所有地址连接失败（共尝试 \(validAddresses.count) 个地址）"])
                 }
-
-                // 使用原生网络服务发送请求
-                print("[SyncEngine] 📡 [DEBUG] 发送 getMST 请求: syncID=\(syncID), 地址=\(address)")
-                rootRes =
-                    try await syncManager.p2pNode.nativeNetwork.sendRequest(
-                        .getMST(syncID: syncID),
-                        to: address,
-                        timeout: 10.0,
-                        maxRetries: 2
-                    ) as SyncResponse
-                print("[SyncEngine] ✅ [DEBUG] 收到 getMST 响应: syncID=\(syncID), 响应类型=\(String(describing: rootRes))")
             } catch {
                 let errorString = String(describing: error)
                 print("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
@@ -272,6 +301,11 @@ class SyncEngine {
             }
 
             // 条件2：验证同步ID是否匹配（通过检查远程是否有该syncID）
+            guard let rootRes = rootRes else {
+                print("[SyncEngine] ❌ [DEBUG] performSync: rootRes 为 nil")
+                return
+            }
+            
             if case .error = rootRes {
                 // 远程没有这个syncID，说明该设备不需要同步此文件夹
                 // 这是正常情况：不同设备可能有不同的文件夹配置

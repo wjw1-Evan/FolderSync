@@ -59,18 +59,81 @@ public struct AddressConverter {
         return "\(ip):\(port)"
     }
     
-    /// 从地址字符串数组提取第一个有效地址
+    /// 获取 IP 地址的优先级（数字越小优先级越高）
+    /// - 优先级 1: 局域网地址 (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    /// - 优先级 2: 链路本地地址 (169.254.x.x) - 通常不可靠
+    /// - 优先级 3: 其他地址
+    private static func addressPriority(ip: String) -> Int {
+        let parts = ip.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return 3 }
+        
+        // 局域网地址优先级最高
+        if parts[0] == 192 && parts[1] == 168 {
+            return 1  // 192.168.x.x
+        }
+        if parts[0] == 10 {
+            return 1  // 10.x.x.x
+        }
+        if parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31 {
+            return 1  // 172.16-31.x.x
+        }
+        
+        // 链路本地地址优先级最低（通常不可靠）
+        if parts[0] == 169 && parts[1] == 254 {
+            return 2  // 169.254.x.x
+        }
+        
+        // 其他地址
+        return 3
+    }
+    
+    /// 从地址字符串数组提取第一个有效地址（按优先级排序）
+    /// 优先选择局域网地址，避免选择链路本地地址
     /// 注意：会跳过端口为0的地址（0表示自动分配，不能用于连接）
     public static func extractFirstAddress(from addresses: [String]) -> String? {
+        // 提取所有有效地址并计算优先级
+        var validAddresses: [(address: String, ip: String, port: UInt16, priority: Int)] = []
+        
         for addr in addresses {
             if let (ip, port) = extractIPPort(from: addr), port > 0 {
-                return makeAddress(ip: ip, port: port)
+                let priority = addressPriority(ip: ip)
+                validAddresses.append((address: makeAddress(ip: ip, port: port), ip: ip, port: port, priority: priority))
             }
         }
+        
+        // 按优先级排序（优先级数字越小越好）
+        validAddresses.sort { $0.priority < $1.priority }
+        
+        if let bestAddress = validAddresses.first {
+            if validAddresses.count > 1 && bestAddress.priority == 2 {
+                // 如果最佳地址是链路本地地址，但还有其他地址，给出警告
+                print("[AddressConverter] ⚠️ 选择链路本地地址 \(bestAddress.ip)，但存在 \(validAddresses.count - 1) 个其他地址")
+            }
+            return bestAddress.address
+        }
+        
         // 只有在所有地址都无效时才输出错误日志
         if !addresses.isEmpty {
             print("[AddressConverter] ❌ 没有找到有效地址（共检查 \(addresses.count) 个地址）")
         }
         return nil
+    }
+    
+    /// 获取所有有效地址（按优先级排序）
+    /// 用于地址回退机制：如果第一个地址失败，可以尝试其他地址
+    public static func extractAllAddresses(from addresses: [String]) -> [String] {
+        var validAddresses: [(address: String, ip: String, port: UInt16, priority: Int)] = []
+        
+        for addr in addresses {
+            if let (ip, port) = extractIPPort(from: addr), port > 0 {
+                let priority = addressPriority(ip: ip)
+                validAddresses.append((address: makeAddress(ip: ip, port: port), ip: ip, port: port, priority: priority))
+            }
+        }
+        
+        // 按优先级排序
+        validAddresses.sort { $0.priority < $1.priority }
+        
+        return validAddresses.map { $0.address }
     }
 }

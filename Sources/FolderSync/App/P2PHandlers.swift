@@ -31,64 +31,62 @@ class P2PHandlers {
         
         switch syncReq {
         case .getMST(let syncID):
-            let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-            if let folder = folder {
-                let (mst, _, _, _) = await folderStatistics.calculateFullState(for: folder)
-                return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
+            guard let folder = await syncManager.findFolder(by: syncID) else {
+                return .error("Folder not found")
             }
-            return .error("Folder not found")
+            let (mst, _, _, _) = await folderStatistics.calculateFullState(for: folder)
+            return .mstRoot(syncID: syncID, rootHash: mst.rootHash ?? "empty")
             
         case .getFiles(let syncID):
-            let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-            if let folder = folder {
-                let (_, metadataRaw, _, _) = await folderStatistics.calculateFullState(for: folder)
-                // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
-                let metadata = ConflictFileFilter.filterConflictFiles(metadataRaw)
-                
-                // 获取文件状态存储
-                let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
-                
-                // 构建统一的状态表示
-                var fileStates: [String: FileState] = [:]
-                
-                // 添加存在的文件
-                for (path, meta) in metadata {
-                    fileStates[path] = .exists(meta)
+            guard let folder = await syncManager.findFolder(by: syncID) else {
+                return .error("Folder not found")
+            }
+            let (_, metadataRaw, _, _) = await folderStatistics.calculateFullState(for: folder)
+            // 过滤掉冲突文件（冲突文件不应该被同步，避免无限循环）
+            let metadata = ConflictFileFilter.filterConflictFiles(metadataRaw)
+            
+            // 获取文件状态存储
+            let stateStore = await MainActor.run { syncManager.getFileStateStore(for: syncID) }
+            
+            // 构建统一的状态表示
+            var fileStates: [String: FileState] = [:]
+            
+            // 添加存在的文件
+            for (path, meta) in metadata {
+                fileStates[path] = .exists(meta)
+            }
+            
+            // 添加删除记录
+            let deletedPaths = stateStore.getDeletedPaths()
+            for path in deletedPaths {
+                if let state = stateStore.getState(for: path),
+                   case .deleted(let record) = state {
+                    fileStates[path] = .deleted(record)
                 }
-                
-                // 添加删除记录
-                let deletedPaths = stateStore.getDeletedPaths()
-                for path in deletedPaths {
-                    if let state = stateStore.getState(for: path),
-                       case .deleted(let record) = state {
-                        fileStates[path] = .deleted(record)
-                    }
-                }
-                
-                // 优先返回新的统一状态格式（filesV2）
-                // 如果远程客户端支持 filesV2，使用新格式；否则使用旧格式（兼容性）
-                // TODO: 可以通过协议协商来确定是否支持 filesV2
-                // 目前先同时支持两种格式，优先使用新格式
-                // 重要：即使 fileStates 为空，也要返回新格式，确保删除记录能传播
-                // 如果只有删除记录没有文件，fileStates 不为空（包含删除记录）
-                // 如果只有文件没有删除记录，fileStates 不为空（包含文件）
-                // 如果两者都没有，fileStates 为空，但这种情况很少见
-                if !fileStates.isEmpty || !deletedPaths.isEmpty {
-                    // 如果有删除记录但没有文件，确保删除记录包含在 fileStates 中
-                    if fileStates.isEmpty && !deletedPaths.isEmpty {
-                        for path in deletedPaths {
-                            if let state = stateStore.getState(for: path) {
-                                fileStates[path] = state
-                            }
+            }
+            
+            // 优先返回新的统一状态格式（filesV2）
+            // 如果远程客户端支持 filesV2，使用新格式；否则使用旧格式（兼容性）
+            // TODO: 可以通过协议协商来确定是否支持 filesV2
+            // 目前先同时支持两种格式，优先使用新格式
+            // 重要：即使 fileStates 为空，也要返回新格式，确保删除记录能传播
+            // 如果只有删除记录没有文件，fileStates 不为空（包含删除记录）
+            // 如果只有文件没有删除记录，fileStates 不为空（包含文件）
+            // 如果两者都没有，fileStates 为空，但这种情况很少见
+            if !fileStates.isEmpty || !deletedPaths.isEmpty {
+                // 如果有删除记录但没有文件，确保删除记录包含在 fileStates 中
+                if fileStates.isEmpty && !deletedPaths.isEmpty {
+                    for path in deletedPaths {
+                        if let state = stateStore.getState(for: path) {
+                            fileStates[path] = state
                         }
                     }
-                    return .filesV2(syncID: syncID, states: fileStates)
                 }
-                
-                // 兼容旧格式（如果没有删除记录也没有文件）
-                return .files(syncID: syncID, entries: metadata, deletedPaths: [])
+                return .filesV2(syncID: syncID, states: fileStates)
             }
-            return .error("Folder not found")
+            
+            // 兼容旧格式（如果没有删除记录也没有文件）
+            return .files(syncID: syncID, entries: metadata, deletedPaths: [])
             
         case .getFileData(let syncID, let relativePath):
             return await handleGetFileData(syncID: syncID, relativePath: relativePath)
@@ -118,8 +116,7 @@ class P2PHandlers {
             return .error("Manager deallocated")
         }
         
-        let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-        guard let folder = folder else {
+        guard let folder = await syncManager.findFolder(by: syncID) else {
             return .error("Folder not found")
         }
         
@@ -161,8 +158,7 @@ class P2PHandlers {
             return .error("Manager deallocated")
         }
         
-        let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-        guard let folder = folder else {
+        guard let folder = await syncManager.findFolder(by: syncID) else {
             return .error("Folder not found")
         }
         
@@ -244,8 +240,7 @@ class P2PHandlers {
             return .error("Manager deallocated")
         }
         
-        let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-        guard let folder = folder else {
+        guard let folder = await syncManager.findFolder(by: syncID) else {
             return .error("Folder not found")
         }
         
@@ -290,8 +285,7 @@ class P2PHandlers {
             return .error("Manager deallocated")
         }
         
-        let folder = await MainActor.run { syncManager.folders.first(where: { $0.syncID == syncID }) }
-        guard let folder = folder else {
+        guard let folder = await syncManager.findFolder(by: syncID) else {
             return .error("Folder not found")
         }
         

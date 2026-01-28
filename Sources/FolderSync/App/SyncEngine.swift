@@ -50,6 +50,15 @@ class SyncEngine {
                 return
             }
 
+            // 检查远程设备是否有匹配的 syncID（从广播消息中获取）
+            let remoteSyncIDs = Set(peerInfo.syncIDs)
+            if !remoteSyncIDs.contains(folder.syncID) {
+                print("[SyncEngine] ⏭️ [syncWithPeer] 远程设备没有匹配的 syncID，跳过同步: peer=\(peerID.prefix(12))..., 本地syncID=\(folder.syncID), 远程syncIDs=\(peerInfo.syncIDs)")
+                // 从该文件夹的 peer 列表中移除，避免重复尝试
+                syncManager.removeFolderPeer(folder.syncID, peerID: peerID)
+                return
+            }
+
             // 检查是否正在同步
             if syncManager.syncInProgress.contains(syncKey) {
                 return

@@ -315,6 +315,21 @@ public class PeerManager: ObservableObject {
         savePeersDebounced()
     }
     
+    /// 更新 Peer 的 syncIDs（从广播消息中获取）
+    public func updateSyncIDs(_ peerIDString: String, syncIDs: [String]) {
+        guard var peer = peers[peerIDString] else {
+            print("[PeerManager] ⚠️ [DEBUG] 尝试更新不存在的 Peer syncIDs: \(peerIDString.prefix(12))...")
+            return
+        }
+        let oldSyncIDs = Set(peer.syncIDs)
+        let newSyncIDs = Set(syncIDs)
+        if oldSyncIDs != newSyncIDs {
+            peer.syncIDs = syncIDs
+            peers[peerIDString] = peer
+            print("[PeerManager] 🔄 [DEBUG] Peer syncIDs 已更新: \(peerIDString.prefix(12))..., 旧数量=\(oldSyncIDs.count), 新数量=\(newSyncIDs.count)")
+        }
+    }
+    
     /// 更新 Peer 在线状态
     public func updateOnlineStatus(_ peerIDString: String, isOnline: Bool) {
         guard var peer = peers[peerIDString] else {

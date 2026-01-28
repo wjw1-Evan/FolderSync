@@ -130,7 +130,7 @@ struct MainDashboard: View {
                 } header: {
                     Text(LocalizedString.status)
                 }
-                Section(LocalizedString.syncFolders) {
+                Section {
                     ForEach(syncManager.folders) { folder in
                         FolderRow(
                             folderID: folder.id,
@@ -159,6 +159,13 @@ struct MainDashboard: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 40)
+                    }
+                } header: {
+                    HStack {
+                        Text(LocalizedString.syncFolders)
+                        Spacer()
+                        Text("\(syncManager.folders.count)")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }

@@ -120,6 +120,12 @@ public class P2PNode {
                 return
             }
             
+            // 关键修复：确保不会处理自己的广播
+            guard discoveredPeerID != peerID else {
+                // 忽略自己的广播
+                return
+            }
+            
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 await self.handleDiscoveredPeer(peerID: discoveredPeerID, discoveryAddress: address, listenAddresses: peerAddresses)
@@ -132,7 +138,11 @@ public class P2PNode {
     /// 处理发现的 peer（新的统一入口）
     @MainActor
     private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String]) async {
-        // 减少日志输出
+        // 关键修复：确保不会处理自己的广播
+        guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else {
+            // 忽略自己的广播
+            return
+        }
         
         // 解析 PeerID
         guard let peerIDObj = PeerID(cid: peerID) else {
@@ -175,7 +185,7 @@ public class P2PNode {
                 // 只在首次注册时输出日志
                 print("[P2PNode] ✅ 已注册 peer: \(peerID.prefix(12))...")
                 
-                // 更新设备状态为在线
+                // 更新设备状态为在线（只有真正收到有效广播时才标记为在线）
                 peerManager.updateDeviceStatus(peerID, status: .online)
                 
                 // 通知 SyncManager
@@ -196,7 +206,7 @@ public class P2PNode {
             // 这表示设备仍然在线，只是地址没有变化
             peerManager.updateLastSeen(peerID)
             
-            // 更新设备状态为在线
+            // 更新设备状态为在线（只有真正收到有效广播时才标记为在线）
             peerManager.updateDeviceStatus(peerID, status: .online)
             
             // 即使已注册，也通知 SyncManager（可能状态有变化）

@@ -1554,6 +1554,14 @@ class SyncEngine {
                                 return nil
                             }
 
+                            // 检查是否为目录，如果是目录则跳过（目录不应该被上传）
+                            var isDirectory: ObjCBool = false
+                            if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+                               isDirectory.boolValue {
+                                print("[SyncEngine] ⏭️ 跳过目录上传: \(path)")
+                                return nil
+                            }
+
                             guard fileManager.isReadableFile(atPath: fileURL.path) else {
                                 print("[SyncEngine] ⚠️ 文件无读取权限（跳过上传）: \(fileURL.path)")
                                 return nil

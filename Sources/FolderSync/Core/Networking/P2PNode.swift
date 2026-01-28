@@ -138,36 +138,45 @@ public class P2PNode {
     /// 处理发现的 peer（新的统一入口）
     @MainActor
     private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String]) async {
+        print("[P2PNode] 🔍 [DEBUG] 处理发现的 peer: peerID=\(peerID.prefix(12))..., 发现地址=\(discoveryAddress), 监听地址数=\(listenAddresses.count)")
+        
         // 关键修复：确保不会处理自己的广播
         guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else {
             // 忽略自己的广播
+            print("[P2PNode] ⏭️ [DEBUG] 忽略自己的广播: peerID=\(peerID.prefix(12))...")
             return
         }
         
         // 解析 PeerID
         guard let peerIDObj = PeerID(cid: peerID) else {
-            print("[P2PNode] ❌ 无法解析 PeerID: \(peerID.prefix(12))...")
+            print("[P2PNode] ❌ [DEBUG] 无法解析 PeerID: \(peerID.prefix(12))...")
             return
         }
         
         // 生成可连接地址
         let connectableStrs = Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
+        print("[P2PNode] 🔗 [DEBUG] 生成可连接地址: 原始地址数=\(listenAddresses.count), 可连接地址数=\(connectableStrs.count)")
         
         // 解析地址
         var parsedAddresses: [Multiaddr] = []
         for addrStr in connectableStrs {
             if let addr = try? Multiaddr(addrStr) {
                 parsedAddresses.append(addr)
+            } else {
+                print("[P2PNode] ⚠️ [DEBUG] 无法解析地址: \(addrStr)")
             }
         }
         
         guard !parsedAddresses.isEmpty else {
-            print("[P2PNode] ⚠️ 无有效地址，跳过: \(peerID.prefix(12))...")
+            print("[P2PNode] ⚠️ [DEBUG] 无有效地址，跳过: \(peerID.prefix(12))..., 可连接地址数=\(connectableStrs.count)")
             return
         }
         
         // 添加到 PeerManager
+        let existingPeer = peerManager.getPeer(peerID)
+        let wasExisting = existingPeer != nil
         _ = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
+        print("[P2PNode] 📝 [DEBUG] Peer 已添加到管理器: \(peerID.prefix(12))..., 是否为新peer=\(!wasExisting)")
         
         // 更新最后可见时间（收到广播表示设备在线）
         // 注意：每次收到广播都应该更新 lastSeenTime，即使地址没有变化
@@ -178,12 +187,14 @@ public class P2PNode {
         let addressesChanged = Set(parsedAddresses.map { $0.description }) != Set(existing?.addresses.map { $0.description } ?? [])
         let needsRegistration = !registrationService.isRegistered(peerID) || addressesChanged
         
+        print("[P2PNode] 🔍 [DEBUG] 注册检查: peerID=\(peerID.prefix(12))..., 已注册=\(registrationService.isRegistered(peerID)), 地址变化=\(addressesChanged), 需要注册=\(needsRegistration)")
+        
         if needsRegistration {
             // 注册到 libp2p peer store
+            print("[P2PNode] 🔄 [DEBUG] 开始注册 peer: \(peerID.prefix(12))..., 地址数=\(parsedAddresses.count)")
             let registered = registrationService.registerPeer(peerID: peerIDObj, addresses: parsedAddresses)
             if registered {
-                // 只在首次注册时输出日志
-                print("[P2PNode] ✅ 已注册 peer: \(peerID.prefix(12))...")
+                print("[P2PNode] ✅ [DEBUG] Peer 注册成功: \(peerID.prefix(12))...")
                 
                 // 更新设备状态为在线（只有真正收到有效广播时才标记为在线）
                 peerManager.updateDeviceStatus(peerID, status: .online)
@@ -193,14 +204,14 @@ public class P2PNode {
             } else {
                 // 注册失败，检查原因
                 let state = registrationService.getRegistrationState(peerID)
-                print("[P2PNode] ⚠️ Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
+                print("[P2PNode] ⚠️ [DEBUG] Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
                 
                 // 即使注册失败，也更新设备状态并通知（让后续重试机制处理）
                 peerManager.updateDeviceStatus(peerID, status: .online)
                 self.onPeerDiscovered?(peerIDObj)
             }
         } else {
-            // 减少已注册peer的日志输出
+            print("[P2PNode] ℹ️ [DEBUG] Peer 已注册且地址未变化，跳过注册: \(peerID.prefix(12))...")
             
             // 关键：即使地址未变化，收到广播也应该更新 lastSeenTime
             // 这表示设备仍然在线，只是地址没有变化

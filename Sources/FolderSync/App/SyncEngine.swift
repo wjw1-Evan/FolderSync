@@ -18,6 +18,7 @@ class SyncEngine {
     }
 
     /// 与指定对等点同步指定文件夹
+    /// 同步条件：1. 对方客户端在线 2. 同步ID相同
     func syncWithPeer(peer: PeerID, folder: SyncFolder) {
         guard let syncManager = syncManager else { return }
 
@@ -25,9 +26,9 @@ class SyncEngine {
         let syncKey = "\(folder.syncID):\(peerID)"
 
         Task { @MainActor in
-            // 检查设备是否在线，离线设备不进行同步
+            // 条件1：检查设备是否在线，离线设备不进行同步
             if !syncManager.peerManager.isOnline(peerID) {
-                print("[SyncEngine] ⏭️ [syncWithPeer] 设备已离线，跳过同步: \(peerID.prefix(12))...")
+                print("[SyncEngine] ⏭️ [syncWithPeer] 设备已离线，跳过同步: \(peerID.prefix(12))... (syncID: \(folder.syncID))")
                 return
             }
 
@@ -126,17 +127,21 @@ class SyncEngine {
         guard let syncManager = syncManager,
             let folderStatistics = folderStatistics
         else {
+            print("[SyncEngine] ❌ [DEBUG] performSync: syncManager 或 folderStatistics 为空")
             return
         }
 
         // fileTransfer 在异步任务中使用，只需要检查是否存在
         guard fileTransfer != nil else {
+            print("[SyncEngine] ❌ [DEBUG] performSync: fileTransfer 为空")
             return
         }
 
         let startedAt = Date()
         let folderID = folder.id
         let syncID = folder.syncID
+        
+        print("[SyncEngine] 🔄 [DEBUG] 开始同步: syncID=\(syncID), peer=\(peerID.prefix(12))..., 文件夹路径=\(folder.localPath.path)")
 
         // 重要：从 syncManager 中获取最新的 folder 对象，避免使用过时的统计值
         let currentFolder = await MainActor.run {
@@ -144,14 +149,14 @@ class SyncEngine {
         }
 
         guard let currentFolder = currentFolder else {
-            print("[SyncEngine] ⚠️ [performSync] 文件夹已不存在: \(folderID)")
+            print("[SyncEngine] ⚠️ [DEBUG] performSync: 文件夹已不存在: \(folderID)")
             // 文件夹不存在，无法记录日志
             return
         }
 
         do {
             guard !peerID.isEmpty else {
-                print("[SyncEngine] ❌ [performSync] PeerID 无效")
+                print("[SyncEngine] ❌ [DEBUG] performSync: PeerID 无效")
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error, message: "PeerID 无效")
                 // 记录错误日志
@@ -169,8 +174,9 @@ class SyncEngine {
 
             // 获取远程 MST 根
             let peerAddresses = syncManager.p2pNode.peerManager.getAddresses(for: peer.b58String)
+            print("[SyncEngine] 📍 [DEBUG] 获取对等点地址: peer=\(peerID.prefix(12))..., 地址数=\(peerAddresses.count)")
             if peerAddresses.isEmpty {
-                print("[SyncEngine] ⚠️ [performSync] 警告: 对等点没有可用地址")
+                print("[SyncEngine] ⚠️ [DEBUG] performSync: 警告: 对等点没有可用地址")
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error, message: "对等点无可用地址", progress: 0.0)
                 // 记录错误日志
@@ -186,11 +192,12 @@ class SyncEngine {
             let rootRes: SyncResponse
             do {
                 let addressStrings = peerAddresses.map { $0.description }
+                print("[SyncEngine] 🔗 [DEBUG] 准备连接: syncID=\(syncID), 地址列表=\(addressStrings.joined(separator: ", "))")
 
                 guard let address = AddressConverter.extractFirstAddress(from: addressStrings)
                 else {
                     let errorMsg = "无法从地址中提取 IP:Port（地址数: \(addressStrings.count)）"
-                    print("[SyncEngine] ❌ [performSync] \(errorMsg)")
+                    print("[SyncEngine] ❌ [DEBUG] performSync: \(errorMsg)")
                     throw NSError(
                         domain: "SyncEngine", code: -1,
                         userInfo: [NSLocalizedDescriptionKey: errorMsg])
@@ -204,7 +211,7 @@ class SyncEngine {
                     extractedPort > 0,
                     extractedPort <= 65535
                 else {
-                    print("[SyncEngine] ❌ [performSync] 地址格式验证失败: \(address)")
+                    print("[SyncEngine] ❌ [DEBUG] performSync: 地址格式验证失败: \(address)")
                     throw NSError(
                         domain: "SyncEngine", code: -1,
                         userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
@@ -212,13 +219,14 @@ class SyncEngine {
 
                 // 验证IP地址格式
                 if extractedIP.isEmpty || extractedIP == "0.0.0.0" {
-                    print("[SyncEngine] ❌ [performSync] IP地址无效: '\(extractedIP)'")
+                    print("[SyncEngine] ❌ [DEBUG] performSync: IP地址无效: '\(extractedIP)'")
                     throw NSError(
                         domain: "SyncEngine", code: -1,
                         userInfo: [NSLocalizedDescriptionKey: "IP地址无效: \(extractedIP)"])
                 }
 
                 // 使用原生网络服务发送请求
+                print("[SyncEngine] 📡 [DEBUG] 发送 getMST 请求: syncID=\(syncID), 地址=\(address)")
                 rootRes =
                     try await syncManager.p2pNode.nativeNetwork.sendRequest(
                         .getMST(syncID: syncID),
@@ -226,6 +234,7 @@ class SyncEngine {
                         timeout: 10.0,
                         maxRetries: 2
                     ) as SyncResponse
+                print("[SyncEngine] ✅ [DEBUG] 收到 getMST 响应: syncID=\(syncID), 响应类型=\(String(describing: rootRes))")
             } catch {
                 let errorString = String(describing: error)
                 print("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
@@ -255,20 +264,24 @@ class SyncEngine {
                 return
             }
 
+            // 条件2：验证同步ID是否匹配（通过检查远程是否有该syncID）
             if case .error = rootRes {
-                // Remote doesn't have this folder
+                // 远程没有这个syncID，说明同步ID不匹配，跳过同步
+                print("[SyncEngine] ⏭️ [DEBUG] performSync: 同步ID不匹配（远程没有该syncID），跳过同步: syncID=\(syncID), peer=\(peerID.prefix(12))...")
                 syncManager.removeFolderPeer(syncID, peerID: peerID)
                 return
             }
 
-            // Peer confirmed to have this folder
+            // 同步条件满足：1. 对方在线 ✓ 2. 同步ID匹配 ✓
+            // Peer confirmed to have this folder (syncID matches)
+            print("[SyncEngine] ✅ [DEBUG] performSync: 同步条件满足: 对方在线且syncID匹配 (syncID=\(syncID), peer=\(peerID.prefix(12))...))")
             syncManager.addFolderPeer(syncID, peerID: peerID)
             syncManager.syncIDManager.updateLastSyncedAt(syncID)
             syncManager.peerManager.updateOnlineStatus(peerID, isOnline: true)
             syncManager.updateDeviceCounts()
 
             guard case .mstRoot(_, let remoteHash) = rootRes else {
-                print("[SyncEngine] ❌ [performSync] rootRes 不是 mstRoot 类型")
+                print("[SyncEngine] ❌ [DEBUG] performSync: rootRes 不是 mstRoot 类型，实际类型=\(String(describing: rootRes))")
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -277,14 +290,18 @@ class SyncEngine {
                 try? StorageManager.shared.addSyncLog(log)
                 return
             }
+            
+            print("[SyncEngine] 📊 [DEBUG] 获取远程MST根: syncID=\(syncID), 远程哈希=\(remoteHash.prefix(16))...")
 
             // 重要：使用最新的 folder 对象计算状态，而不是传入的旧对象
             // calculateFullState 已经排除了冲突文件，所以 localMetadata 不包含冲突文件
+            print("[SyncEngine] 📊 [DEBUG] 计算本地状态: syncID=\(syncID)")
             let (localMST, localMetadataRaw, _, _) = await folderStatistics.calculateFullState(
                 for: currentFolder)
             
             // 再次过滤冲突文件（双重保险，确保冲突文件不会被同步）
             let localMetadata = ConflictFileFilter.filterConflictFiles(localMetadataRaw)
+            print("[SyncEngine] 📊 [DEBUG] 本地状态计算完成: syncID=\(syncID), 文件数=\(localMetadata.count), 本地哈希=\(localMST.rootHash?.prefix(16) ?? "empty")...")
 
             let currentPaths = Set(localMetadata.keys)
             let lastKnown = syncManager.lastKnownLocalPaths[syncID] ?? []
@@ -381,6 +398,7 @@ class SyncEngine {
 
             if localMST.rootHash == remoteHash && locallyDeleted.isEmpty {
                 // 本地和远程已经同步
+                print("[SyncEngine] ✅ [DEBUG] 本地和远程已同步: syncID=\(syncID), 哈希=\(localMST.rootHash?.prefix(16) ?? "empty")...")
                 syncManager.lastKnownLocalPaths[syncID] = currentPaths
                 syncManager.lastKnownMetadata[syncID] = localMetadata  // 保存当前元数据用于下次重命名检测
                 
@@ -410,11 +428,13 @@ class SyncEngine {
             }
 
             // 2. Roots differ, get remote file list
+            print("[SyncEngine] 🔄 [DEBUG] 本地和远程哈希不同，需要同步: syncID=\(syncID), 本地哈希=\(localMST.rootHash?.prefix(16) ?? "empty")..., 远程哈希=\(remoteHash.prefix(16))...")
             syncManager.updateFolderStatus(
                 currentFolder.id, status: .syncing, message: "正在获取远程文件列表...", progress: 0.1)
 
             let filesRes: SyncResponse
             do {
+                print("[SyncEngine] 📡 [DEBUG] 发送 getFiles 请求: syncID=\(syncID)")
                 filesRes = try await syncManager.sendSyncRequest(
                     .getFiles(syncID: syncID),
                     to: peer,
@@ -423,6 +443,7 @@ class SyncEngine {
                     maxRetries: 3,
                     folder: currentFolder
                 )
+                print("[SyncEngine] ✅ [DEBUG] 收到 getFiles 响应: syncID=\(syncID), 响应类型=\(String(describing: filesRes))")
             } catch {
                 print("[SyncEngine] ❌ [performSync] 获取远程文件列表失败: \(error)")
                 syncManager.updateFolderStatus(
@@ -934,6 +955,7 @@ class SyncEngine {
                 }
             }
             totalOps += changedFiles.count + conflictFiles.count
+            print("[SyncEngine] 📊 [DEBUG] 下载阶段统计: syncID=\(syncID), 需要下载=\(changedFiles.count), 冲突文件=\(conflictFiles.count), 总操作数=\(totalOps)")
 
             // 4. Upload phase - 检测上传冲突
             var filesToUploadSet: Set<String> = []
@@ -1058,6 +1080,7 @@ class SyncEngine {
                 }
             }
             totalOps += filesToUpload.count + uploadConflictFiles.count
+            print("[SyncEngine] 📊 [DEBUG] 上传阶段统计: syncID=\(syncID), 需要上传=\(filesToUpload.count), 上传冲突=\(uploadConflictFiles.count), 总操作数=\(totalOps)")
 
             // 处理删除和重命名：重命名需要先在远程删除旧路径，然后上传新路径
             var toDelete = (mode == .twoWay || mode == .uploadOnly) ? locallyDeleted : []
@@ -1069,9 +1092,11 @@ class SyncEngine {
             }
             if !toDelete.isEmpty {
                 totalOps += toDelete.count
+                print("[SyncEngine] 🗑️ [DEBUG] 删除操作统计: syncID=\(syncID), 需要删除=\(toDelete.count), 重命名=\(renamedFiles.count)")
             }
 
             if totalOps > 0 {
+                print("[SyncEngine] 🔄 [DEBUG] 准备执行同步操作: syncID=\(syncID), 总操作数=\(totalOps)")
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .syncing, message: "准备同步 \(totalOps) 个操作...",
                     progress: 0.2)
@@ -1662,6 +1687,7 @@ class SyncEngine {
             }
 
             let totalBytes = totalDownloadBytes + totalUploadBytes
+            print("[SyncEngine] ✅ [DEBUG] 同步完成: syncID=\(syncID), peer=\(peerID.prefix(12))..., 下载=\(totalDownloadBytes) bytes, 上传=\(totalUploadBytes) bytes, 总操作=\(totalOps)")
 
             syncManager.updateFolderStatus(
                 currentFolder.id, status: .synced, message: "同步完成", progress: 1.0)
@@ -1670,6 +1696,7 @@ class SyncEngine {
             syncManager.updateDeviceCounts()
             let cooldownKey = "\(peerID):\(syncID)"
             syncManager.peerSyncCooldown[cooldownKey] = Date()
+            print("[SyncEngine] ✅ [DEBUG] 同步冷却期已设置: syncID=\(syncID), peer=\(peerID.prefix(12))...")
 
             let direction: SyncLog.Direction =
                 mode == .uploadOnly ? .upload : (mode == .downloadOnly ? .download : .bidirectional)

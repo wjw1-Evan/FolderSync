@@ -161,6 +161,7 @@ public class LANDiscovery {
         // 检查是否是发现请求
         if message.contains("\"type\":\"discovery_request\"") {
             // 收到发现请求，立即广播自己的信息作为响应
+            print("[LANDiscovery] 🔍 [DEBUG] 收到发现请求，来自: \(address)")
             sendBroadcast(peerID: myPeerID, listenAddresses: currentListenAddresses)
             return
         }
@@ -169,9 +170,14 @@ public class LANDiscovery {
         if let peerInfo = parseDiscoveryMessage(message) {
             // Ignore our own broadcasts
             if peerInfo.peerID != myPeerID {
+                print("[LANDiscovery] 📨 [DEBUG] 收到广播消息: peerID=\(peerInfo.peerID.prefix(12))..., 地址=\(address), 监听地址数=\(peerInfo.addresses.count)")
                 // 每次收到广播都触发回调，确保 lastSeenTime 被更新
                 onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses)
+            } else {
+                print("[LANDiscovery] ⏭️ [DEBUG] 忽略自己的广播: peerID=\(peerInfo.peerID.prefix(12))...")
             }
+        } else {
+            print("[LANDiscovery] ⚠️ [DEBUG] 无法解析广播消息: 消息长度=\(message.count), 前100字符=\(message.prefix(100))")
         }
     }
     
@@ -430,7 +436,7 @@ public class LANDiscovery {
     
     private func sendBroadcast(peerID: String, listenAddresses: [String]) {
         guard isRunning else {
-            print("[LANDiscovery] ⚠️ 广播已停止，跳过发送")
+            print("[LANDiscovery] ⚠️ [DEBUG] 广播已停止，跳过发送")
             return
         }
         
@@ -443,19 +449,20 @@ public class LANDiscovery {
         }
         
         if validAddresses.isEmpty && !listenAddresses.isEmpty {
-            print("[LANDiscovery] ⚠️ 警告: 没有有效地址可广播（所有地址端口为0或格式错误）")
+            print("[LANDiscovery] ⚠️ [DEBUG] 警告: 没有有效地址可广播（所有地址端口为0或格式错误），原始地址数=\(listenAddresses.count)")
             // 仍然发送广播，但地址列表为空，让接收方知道设备存在但地址无效
         }
         
         let message = createDiscoveryMessage(peerID: peerID, listenAddresses: validAddresses)
         guard let data = message.data(using: .utf8) else {
-            print("[LANDiscovery] ⚠️ 无法创建广播消息数据")
+            print("[LANDiscovery] ⚠️ [DEBUG] 无法创建广播消息数据")
             return
         }
         
-        // 每100次广播输出一次详细日志，减少日志输出
-        if Int.random(in: 0..<100) == 0 {
-            print("[LANDiscovery] 📡 发送广播: peerID=\(peerID.prefix(12))..., 地址数=\(validAddresses.count)")
+        // 添加调试日志（每次广播都记录）
+        print("[LANDiscovery] 📡 [DEBUG] 发送广播: peerID=\(peerID.prefix(12))..., 有效地址数=\(validAddresses.count), 消息大小=\(data.count) bytes")
+        if !validAddresses.isEmpty {
+            print("[LANDiscovery] 📡 [DEBUG] 广播地址列表: \(validAddresses.joined(separator: ", "))")
         }
         
         let parameters = NWParameters.udp
@@ -470,21 +477,26 @@ public class LANDiscovery {
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                print("[LANDiscovery] ✅ [DEBUG] 广播连接就绪，开始发送数据")
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
-                        print("[LANDiscovery] ⚠️ 广播发送错误: \(error)")
+                        print("[LANDiscovery] ❌ [DEBUG] 广播发送错误: \(error)")
                     } else {
-                        // 日志已在 sendBroadcast 开始处输出，这里不需要重复
+                        print("[LANDiscovery] ✅ [DEBUG] 广播发送成功: peerID=\(peerID.prefix(12))..., 数据大小=\(data.count) bytes")
                     }
                     connection.cancel()
                 })
             case .failed(let error):
-                print("[LANDiscovery] ⚠️ 广播连接失败: \(error)")
+                print("[LANDiscovery] ❌ [DEBUG] 广播连接失败: \(error)")
                 connection.cancel()
             case .cancelled:
-                // 正常取消，不需要日志
+                print("[LANDiscovery] ℹ️ [DEBUG] 广播连接已取消")
+                break
+            case .waiting(let nwError):
+                print("[LANDiscovery] ⏳ [DEBUG] 广播连接等待中: \(nwError)")
                 break
             default:
+                print("[LANDiscovery] ℹ️ [DEBUG] 广播连接状态变化: \(state)")
                 break
             }
         }

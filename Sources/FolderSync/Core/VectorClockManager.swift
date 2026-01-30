@@ -73,7 +73,7 @@ class VectorClockManager {
         case .equal:
             // Vector Clock 相同但哈希不同，说明在某处没有正确更新 VC
             // 这种情况应该极少发生，视为冲突并记录详细日志以便排查
-            print(
+            AppLogger.syncPrint(
                 "[VectorClockManager] ⚠️ VectorClock 相等但哈希不同，视为冲突。" +
                 " localHash=\(localHash), remoteHash=\(remoteHash), direction=\(direction)"
             )
@@ -160,7 +160,7 @@ class VectorClockManager {
             try? StorageManager.shared.deleteVectorClock(folderID: folderID, syncID: syncID, path: oldPath)
             return true
         } catch {
-            print("[VectorClockManager] ⚠️ 迁移 Vector Clock 失败: \(oldPath) -> \(newPath), 错误: \(error)")
+            AppLogger.syncPrint("[VectorClockManager] ⚠️ 迁移 Vector Clock 失败: \(oldPath) -> \(newPath), 错误: \(error)")
             return false
         }
     }
@@ -182,7 +182,7 @@ class VectorClockManager {
         do {
             try StorageManager.shared.setVectorClock(folderID: folderID, syncID: syncID, path: path, vc)
         } catch {
-            print("[VectorClockManager] ⚠️ 保存 Vector Clock 失败: \(path), 错误: \(error)")
+            AppLogger.syncPrint("[VectorClockManager] ⚠️ 保存 Vector Clock 失败: \(path), 错误: \(error)")
         }
     }
     

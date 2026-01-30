@@ -32,7 +32,7 @@ public class NativeNetworkService {
         }
         self.tcpServer = server
         self.listeningPort = actualPort
-        print("[NativeNetworkService] ✅ TCP 服务器已启动，端口: \(actualPort)")
+        AppLogger.syncPrint("[NativeNetworkService] ✅ TCP 服务器已启动，端口: \(actualPort)")
         return actualPort
     }
     
@@ -41,7 +41,7 @@ public class NativeNetworkService {
         tcpServer?.stop()
         tcpServer = nil
         listeningPort = nil
-        print("[NativeNetworkService] ✅ TCP 服务器已停止")
+        AppLogger.syncPrint("[NativeNetworkService] ✅ TCP 服务器已停止")
     }
     
     /// 获取监听端口
@@ -80,7 +80,7 @@ public class NativeNetworkService {
                 
                 if isTimeout && attempt < maxRetries {
                     let backoffDelay = Double(attempt) * 2.0
-                    print("[NativeNetworkService] ⚠️ 请求超时（尝试 \(attempt)/\(maxRetries)），等待 \(String(format: "%.1f", backoffDelay)) 秒后重试...")
+                    AppLogger.syncPrint("[NativeNetworkService] ⚠️ 请求超时（尝试 \(attempt)/\(maxRetries)），等待 \(String(format: "%.1f", backoffDelay)) 秒后重试...")
                     try? await Task.sleep(nanoseconds: UInt64(backoffDelay * 1_000_000_000))
                     continue
                 }

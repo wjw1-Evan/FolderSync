@@ -204,7 +204,7 @@ struct LocalChangeHistoryView: View {
                 changes = loadedChanges
             }
         } catch {
-            print("[LocalChangeHistoryView] ⚠️ 加载历史变更失败: \(error)")
+            AppLogger.syncPrint("[LocalChangeHistoryView] ⚠️ 加载历史变更失败: \(error)")
             await MainActor.run {
                 changes = []
             }

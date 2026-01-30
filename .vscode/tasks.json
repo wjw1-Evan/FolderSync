@@ -1,0 +1,44 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "swift: Run All Tests",
+            "type": "shell",
+            "command": "swift test",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {}
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "swift: Run Tests (filter)",
+            "type": "shell",
+            "command": "swift test --filter ${input:testFilter}",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "testFilter",
+            "type": "promptString",
+            "description": "测试名称或类名（如 ConflictResolutionTests 或 testConcurrentModify_RapidChanges）",
+            "default": "ConflictResolutionTests"
+        }
+    ]
+}

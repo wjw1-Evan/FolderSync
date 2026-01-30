@@ -21,7 +21,7 @@ public struct AddressConverter {
                 if let portNum = UInt16(portStr) {
                     port = portNum
                 } else {
-                    print("[AddressConverter] ⚠️ 无法解析端口: '\(portStr)' (来源: \(multiaddr))")
+                    AppLogger.syncPrint("[AddressConverter] ⚠️ 无法解析端口: '\(portStr)' (来源: \(multiaddr))")
                 }
                 i += 2
             } else {
@@ -32,22 +32,22 @@ public struct AddressConverter {
         guard let ipValue = ip, let portValue = port, portValue > 0 else {
             // 端口为0或无效，拒绝此地址
             if let ipValue = ip {
-                print("[AddressConverter] ⚠️ 地址无效: IP=\(ipValue), 端口=\(port?.description ?? "nil"), 原始=\(multiaddr)")
+                AppLogger.syncPrint("[AddressConverter] ⚠️ 地址无效: IP=\(ipValue), 端口=\(port?.description ?? "nil"), 原始=\(multiaddr)")
             } else {
-                print("[AddressConverter] ⚠️ 地址无效: 无法提取IP或端口, 原始=\(multiaddr)")
+                AppLogger.syncPrint("[AddressConverter] ⚠️ 地址无效: 无法提取IP或端口, 原始=\(multiaddr)")
             }
             return nil
         }
         
         // 验证IP地址格式
         if ipValue.isEmpty || ipValue == "0.0.0.0" {
-            print("[AddressConverter] ⚠️ IP地址无效: '\(ipValue)' (来源: \(multiaddr))")
+            AppLogger.syncPrint("[AddressConverter] ⚠️ IP地址无效: '\(ipValue)' (来源: \(multiaddr))")
             return nil
         }
         
         // 验证端口范围（1-65535）
         if portValue == 0 || portValue > 65535 {
-            print("[AddressConverter] ⚠️ 端口超出范围: \(portValue) (来源: \(multiaddr))")
+            AppLogger.syncPrint("[AddressConverter] ⚠️ 端口超出范围: \(portValue) (来源: \(multiaddr))")
             return nil
         }
         
@@ -107,14 +107,14 @@ public struct AddressConverter {
         if let bestAddress = validAddresses.first {
             if validAddresses.count > 1 && bestAddress.priority == 2 {
                 // 如果最佳地址是链路本地地址，但还有其他地址，给出警告
-                print("[AddressConverter] ⚠️ 选择链路本地地址 \(bestAddress.ip)，但存在 \(validAddresses.count - 1) 个其他地址")
+                AppLogger.syncPrint("[AddressConverter] ⚠️ 选择链路本地地址 \(bestAddress.ip)，但存在 \(validAddresses.count - 1) 个其他地址")
             }
             return bestAddress.address
         }
         
         // 只有在所有地址都无效时才输出错误日志
         if !addresses.isEmpty {
-            print("[AddressConverter] ❌ 没有找到有效地址（共检查 \(addresses.count) 个地址）")
+            AppLogger.syncPrint("[AddressConverter] ❌ 没有找到有效地址（共检查 \(addresses.count) 个地址）")
         }
         return nil
     }

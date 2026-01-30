@@ -77,7 +77,7 @@ public class SyncManager: ObservableObject {
 
         if !AppPaths.isRunningTests {
             // 运行环境检测（测试环境跳过，避免噪音/污染用户数据目录）
-            print("\n[EnvironmentCheck] 开始环境检测...")
+            AppLogger.syncPrint("\n[EnvironmentCheck] 开始环境检测...")
             let reports = EnvironmentChecker.runAllChecks()
             EnvironmentChecker.printReport(reports)
 
@@ -96,7 +96,7 @@ public class SyncManager: ObservableObject {
                             do {
                                 try StorageManager.shared.saveFolder(folder)
                             } catch {
-                                print("[SyncManager] ⚠️ 无法保存同步状态修正: \(error)")
+                                AppLogger.syncPrint("[SyncManager] ⚠️ 无法保存同步状态修正: \(error)")
                             }
                         }
                         normalized.append(folder)
@@ -108,25 +108,25 @@ public class SyncManager: ObservableObject {
                             if let existingInfo = syncIDManager.getSyncIDInfo(folder.syncID) {
                                 if existingInfo.folderID == folder.id {
                                     // 同一个文件夹，syncID 已存在（可能是重复加载）
-                                    print("[SyncManager] ℹ️ syncID 已注册（同一文件夹）: \(folder.syncID)")
+                                    AppLogger.syncPrint("[SyncManager] ℹ️ syncID 已注册（同一文件夹）: \(folder.syncID)")
                                 } else {
                                     // syncID 被其他文件夹使用
-                                    print("[SyncManager] ⚠️ 警告: syncID 已被其他文件夹使用: \(folder.syncID)")
-                                    print("[SyncManager]   当前文件夹 ID: \(folder.id)")
-                                    print("[SyncManager]   已注册文件夹 ID: \(existingInfo.folderID)")
+                                    AppLogger.syncPrint("[SyncManager] ⚠️ 警告: syncID 已被其他文件夹使用: \(folder.syncID)")
+                                    AppLogger.syncPrint("[SyncManager]   当前文件夹 ID: \(folder.id)")
+                                    AppLogger.syncPrint("[SyncManager]   已注册文件夹 ID: \(existingInfo.folderID)")
                                 }
                             } else if let existingSyncID = syncIDManager.getSyncID(for: folder.id) {
                                 // folderID 已关联其他 syncID
-                                print("[SyncManager] ⚠️ 警告: 文件夹已关联其他 syncID")
-                                print("[SyncManager]   文件夹 ID: \(folder.id)")
-                                print("[SyncManager]   当前 syncID: \(folder.syncID)")
-                                print("[SyncManager]   已关联 syncID: \(existingSyncID)")
+                                AppLogger.syncPrint("[SyncManager] ⚠️ 警告: 文件夹已关联其他 syncID")
+                                AppLogger.syncPrint("[SyncManager]   文件夹 ID: \(folder.id)")
+                                AppLogger.syncPrint("[SyncManager]   当前 syncID: \(folder.syncID)")
+                                AppLogger.syncPrint("[SyncManager]   已关联 syncID: \(existingSyncID)")
                             } else {
                                 // 未知原因（理论上不应该发生）
-                                print("[SyncManager] ⚠️ 警告: syncID 注册失败（未知原因）: \(folder.syncID)")
+                                AppLogger.syncPrint("[SyncManager] ⚠️ 警告: syncID 注册失败（未知原因）: \(folder.syncID)")
                             }
                         }
-                        print(
+                        AppLogger.syncPrint(
                             "[SyncManager]   - 文件夹: \(folder.localPath.path) (syncID: \(folder.syncID))"
                         )
                     }
@@ -135,8 +135,8 @@ public class SyncManager: ObservableObject {
                 // 加载持久化的删除记录（tombstones），防止重启后丢失删除信息导致文件被重新拉回
                 self.deletedRecords = (try? StorageManager.shared.getDeletedRecords()) ?? [:]
             } catch {
-                print("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
-                print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                AppLogger.syncPrint("[SyncManager] ❌ 加载文件夹配置失败: \(error)")
+                AppLogger.syncPrint("[SyncManager] 错误详情: \(error.localizedDescription)")
                 self.folders = []
                 self.deletedRecords = [:]
             }
@@ -212,7 +212,7 @@ public class SyncManager: ObservableObject {
                     if let peerInfo = self.peerManager.getPeer(peerIDString) {
                         let timeSinceUpdate = Date().timeIntervalSince(peerInfo.lastSeenTime)
                         if timeSinceUpdate > 1.0 {
-                            print("[SyncManager] ⚠️ 警告: lastSeenTime 更新后时间差异常: \(timeSinceUpdate)秒")
+                            AppLogger.syncPrint("[SyncManager] ⚠️ 警告: lastSeenTime 更新后时间差异常: \(timeSinceUpdate)秒")
                         }
                     }
 
@@ -230,9 +230,9 @@ public class SyncManager: ObservableObject {
                     }
                     
                     if !matchingFolders.isEmpty {
-                        print("[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)")
+                        AppLogger.syncPrint("[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)")
                     } else if !remoteSyncIDs.isEmpty {
-                        print("[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)")
+                        AppLogger.syncPrint("[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)")
                     }
 
                     // 对于新对等点，只同步匹配的文件夹
@@ -260,11 +260,11 @@ public class SyncManager: ObservableObject {
             do {
                 try await p2pNode.start()
             } catch {
-                print("[SyncManager] ❌ P2P 节点启动失败: \(error)")
-                print("[SyncManager] 错误详情: \(error.localizedDescription)")
+                AppLogger.syncPrint("[SyncManager] ❌ P2P 节点启动失败: \(error)")
+                AppLogger.syncPrint("[SyncManager] 错误详情: \(error.localizedDescription)")
                 if let nsError = error as NSError? {
-                    print("[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
-                    print("[SyncManager] 用户信息: \(nsError.userInfo)")
+                    AppLogger.syncPrint("[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
+                    AppLogger.syncPrint("[SyncManager] 用户信息: \(nsError.userInfo)")
                 }
                 // 继续执行，但 P2P 功能将不可用
                 await MainActor.run {
@@ -333,7 +333,7 @@ public class SyncManager: ObservableObject {
     func updateBroadcastSyncIDs() {
         let syncIDs = folders.map { $0.syncID }
         p2pNode.updateBroadcastSyncIDs(syncIDs)
-        print("[SyncManager] 📡 已更新广播 syncID: \(syncIDs.count) 个")
+        AppLogger.syncPrint("[SyncManager] 📡 已更新广播 syncID: \(syncIDs.count) 个")
     }
 
     func setupP2PHandlers() {
@@ -372,10 +372,10 @@ public class SyncManager: ObservableObject {
                         }
                         self.lastKnownMetadata[snapshot.syncID] = metadata
                     }
-                    print("[SyncManager] ✅ 已从快照恢复 \(snapshots.count) 个文件夹的状态")
+                    AppLogger.syncPrint("[SyncManager] ✅ 已从快照恢复 \(snapshots.count) 个文件夹的状态")
                 }
             } catch {
-                print("[SyncManager] ⚠️ 从快照恢复状态失败: \(error)")
+                AppLogger.syncPrint("[SyncManager] ⚠️ 从快照恢复状态失败: \(error)")
             }
         }
     }

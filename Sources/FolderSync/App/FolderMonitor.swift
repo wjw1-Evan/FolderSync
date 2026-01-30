@@ -174,11 +174,11 @@ class FolderMonitor {
             }
 
             if hasSyncInProgress {
-                print("[FolderMonitor] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
+                AppLogger.syncPrint("[FolderMonitor] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
                 return
             }
 
-            print("[FolderMonitor] 🔄 防抖延迟结束，开始同步: \(syncID)")
+            AppLogger.syncPrint("[FolderMonitor] 🔄 防抖延迟结束，开始同步: \(syncID)")
             syncManager.triggerSync(for: folder)
         }
 

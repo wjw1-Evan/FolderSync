@@ -10,6 +10,7 @@
 - **重新上线测试** (`ReconnectSyncTests.swift`)
 - **冲突处理测试** (`ConflictResolutionTests.swift`)
 - **边界情况测试** (`EdgeCasesTests.swift`)
+- **同步逻辑优化测试** (`SyncOptimizationTests.swift`)：`calculateFullState` 多文件防死锁、`triggerSync` 预计算状态多 peer、块级同步 FastCDC 复用等
 
 ## 测试覆盖范围
 
@@ -32,21 +33,31 @@
 
 ### 冲突处理
 - ✅ 并发修改冲突
-- ✅ 并发删除冲突
+- ✅ 多客户端同时删除同一文件
 - ✅ 添加-删除冲突
 - ✅ 重命名-修改冲突
 - ✅ 冲突文件不被同步
 
 ### 边界情况
-- ✅ 空文件夹同步
+- ✅ 空文件夹中添加文件
 - ✅ 大文件同步（块级增量同步）
+- ✅ 大文件修改（块级增量同步）
 - ✅ 特殊字符文件名
+- ✅ 超长文件名
 - ✅ 深层嵌套文件夹
-- ✅ 快速连续操作
+- ✅ 快速连续添加/修改
 - ✅ 零字节文件
 - ✅ 同名文件夹和文件
+- ✅ 符号链接
 
 ## 运行测试
+
+### 出现 "No matching test cases were run" / Executed 0 tests
+
+若在 IDE 中运行「选中测试」时出现上述提示，通常是因为未选中具体测试或过滤器未匹配。请改用以下方式之一：
+
+- **VS Code / Cursor**：命令面板 → **Tasks: Run Task** → 选择 **swift: Run All Tests**（运行全部测试）
+- **终端**：在项目根目录执行 `swift test` 运行全部测试
 
 ### 使用 Swift Package Manager
 
@@ -61,6 +72,7 @@ swift test --filter OfflineSyncTests
 swift test --filter ReconnectSyncTests
 swift test --filter ConflictResolutionTests
 swift test --filter EdgeCasesTests
+swift test --filter SyncOptimizationTests
 
 # 运行特定测试方法
 swift test --filter MultiPeerSyncTests.testMultipleClientsInitialization
@@ -95,12 +107,13 @@ swift test --filter MultiPeerSyncTests.testMultipleClientsInitialization
 
 `TestHelpers.swift` 提供了以下辅助功能：
 
-- 临时目录管理
-- 文件操作辅助函数
-- 同步完成等待
-- 条件等待
-- 大文件数据生成
-- 目录比较
+- 临时目录管理（`createTempDirectory`、`cleanupTempDirectory`）
+- 文件操作（`createTestFile`、`readFileContent`、`readFileData`、`fileExists`、`directoryExists`、`getAllFiles`）
+- 同步完成等待（`waitForSyncCompletion`：synced/error 时立即返回，避免无效轮询）
+- 显式触发同步并等待（`triggerSyncAndWait`）
+- 条件等待（`waitForCondition`）
+- 大文件数据生成（`generateLargeFileData`）
+- 测试用 SyncFolder 创建（`createTestSyncFolder`）
 
 ## 故障排除
 

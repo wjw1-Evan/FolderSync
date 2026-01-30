@@ -105,7 +105,7 @@ public class AutoNAT {
             connection.cancel()
         }
         
-        print("[AutoNAT] NAT 类型: \(natType), 可达性: \(isReachable)")
+        AppLogger.syncPrint("[AutoNAT] NAT 类型: \(natType), 可达性: \(isReachable)")
     }
     
     /// 获取本机公网 IP（通过 STUN 服务器）

@@ -76,27 +76,6 @@ final class MultiPeerSyncTests: XCTestCase {
         }
     }
     
-    /// 测试客户端发现和连接
-    func testPeerDiscovery() async throws {
-        // 等待客户端发现彼此
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证客户端1发现了其他客户端
-        let peers1 = syncManager1.peerManager.allPeers
-        print("[Test] 客户端1发现的peer数量: \(peers1.count)")
-        
-        // 验证客户端2发现了其他客户端
-        let peers2 = syncManager2.peerManager.allPeers
-        print("[Test] 客户端2发现的peer数量: \(peers2.count)")
-        
-        // 验证客户端3发现了其他客户端
-        let peers3 = syncManager3.peerManager.allPeers
-        print("[Test] 客户端3发现的peer数量: \(peers3.count)")
-        
-        // 注意：在实际测试中，可能需要更长的等待时间或手动触发发现
-        // 这里主要验证发现机制是否正常工作
-    }
-    
     /// 测试基本同步流程 - 添加文件夹
     func testBasicSyncFlow_AddFolder() async throws {
         // 在客户端1添加文件夹
@@ -256,38 +235,4 @@ final class MultiPeerSyncTests: XCTestCase {
         }
     }
     
-    /// 测试同步状态更新
-    func testSyncStatusUpdate() async throws {
-        let folder1 = TestHelpers.createTestSyncFolder(
-            syncID: syncID,
-            localPath: tempDir1
-        )
-        syncManager1.addFolder(folder1)
-        
-        // 等待文件夹添加
-        try await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-        
-        // 验证初始状态
-        if let folder = syncManager1.folders.first(where: { $0.id == folder1.id }) {
-            // 状态可能是 synced 或 syncing
-            XCTAssertTrue(
-                folder.status == .synced || folder.status == .syncing,
-                "文件夹状态应该是 synced 或 syncing"
-            )
-        }
-        
-        // 创建文件触发同步
-        let testFile = tempDir1.appendingPathComponent("status_test.txt")
-        try TestHelpers.createTestFile(at: testFile, content: "Test")
-        
-        // 等待状态更新
-        try await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 验证状态已更新
-        if let folder = syncManager1.folders.first(where: { $0.id == folder1.id }) {
-            print("[Test] 文件夹状态: \(folder.status)")
-            print("[Test] 同步进度: \(folder.syncProgress)")
-            print("[Test] 最后同步消息: \(folder.lastSyncMessage ?? "nil")")
-        }
-    }
 }

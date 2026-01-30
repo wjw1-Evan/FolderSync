@@ -43,7 +43,7 @@ extension SyncManager {
             // 重新获取最新的 peerInfo（可能在检查过程中收到了新广播）
             let currentPeerInfo = peerManager.getPeer(peerIDString)
             guard let currentPeer = currentPeerInfo else {
-                print("[SyncManager] ⚠️ Peer 不存在，跳过检查: \(peerIDString.prefix(12))...")
+                AppLogger.syncPrint("[SyncManager] ⚠️ Peer 不存在，跳过检查: \(peerIDString.prefix(12))...")
                 continue
             }
 
@@ -57,7 +57,7 @@ extension SyncManager {
 
             // 简化逻辑：无法访问的peer直接删除（30秒内没有收到广播）
             if !isOnline {
-                print("[SyncManager] 🗑️ [DEBUG] 删除无法访问的peer（30秒内未收到广播）: \(peerIDString.prefix(12))..., 距离上次广播=\(Int(timeSinceLastSeen))秒")
+                // 删除无法访问的 peer（30秒内未收到广播）
                 // 从所有syncID中移除该peer
                 for folder in folders {
                     removeFolderPeer(folder.syncID, peerID: peerIDString)
@@ -109,7 +109,7 @@ extension SyncManager {
 
         // 如果计数发生变化，输出日志
         if oldOnline != onlineDeviceCountValue || oldOffline != offlineDeviceCountValue {
-            print(
+            AppLogger.syncPrint(
                 "[SyncManager] 📊 设备计数已更新: 在线=\(onlineDeviceCountValue) (之前: \(oldOnline)), 离线=\(offlineDeviceCountValue) (之前: \(oldOffline))"
             )
         }

@@ -56,7 +56,7 @@ extension SyncManager {
         dp.insert(path)
         updateDeletedPaths(dp, for: syncID)
         
-        print("[SyncManager] ✅ 原子性删除文件: \(path) (syncID: \(syncID))")
+        AppLogger.syncPrint("[SyncManager] ✅ 原子性删除文件: \(path) (syncID: \(syncID))")
     }
     
     func deletedPaths(for syncID: String) -> Set<String> {
@@ -96,7 +96,7 @@ extension SyncManager {
         do {
             try StorageManager.shared.saveDeletedRecords(deletedRecords)
         } catch {
-            print("[SyncManager] ⚠️ 无法保存删除记录: \(error.localizedDescription)")
+            AppLogger.syncPrint("[SyncManager] ⚠️ 无法保存删除记录: \(error.localizedDescription)")
         }
     }
 }

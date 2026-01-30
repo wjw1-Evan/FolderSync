@@ -35,7 +35,7 @@ public enum KeychainManager {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: filePath.path)
             return true
         } catch {
-            print("[KeychainManager] 保存密码失败: \(error)")
+            AppLogger.syncPrint("[KeychainManager] 保存密码失败: \(error)")
             return false
         }
     }

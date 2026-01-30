@@ -47,13 +47,13 @@ public class PeerRegistrationService: ObservableObject {
         }
         
         if isRegistering {
-            print("[PeerRegistrationService] ⏭️ Peer 正在注册中，跳过: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[PeerRegistrationService] ⏭️ Peer 正在注册中，跳过: \(peerIDString.prefix(12))...")
             return false
         }
         
         // 检查地址
         guard !addresses.isEmpty else {
-            print("[PeerRegistrationService] ⚠️ 地址列表为空，无法注册: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[PeerRegistrationService] ⚠️ 地址列表为空，无法注册: \(peerIDString.prefix(12))...")
             Task { @MainActor in
                 self.registeringPeerIDs.remove(peerIDString)
             }
@@ -72,18 +72,18 @@ public class PeerRegistrationService: ObservableObject {
             self.registeringPeerIDs.remove(peerIDString)
         }
         
-        print("[PeerRegistrationService] ✅ 已注册 peer: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
+        AppLogger.syncPrint("[PeerRegistrationService] ✅ 已注册 peer: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
         return true
     }
     
     /// 批量注册 peer（用于启动时预注册）
     public func registerPeers(_ peers: [(peerID: PeerID, addresses: [Multiaddr])]) {
         guard !peers.isEmpty else {
-            print("[PeerRegistrationService] ℹ️ 没有需要注册的 peer")
+            AppLogger.syncPrint("[PeerRegistrationService] ℹ️ 没有需要注册的 peer")
             return
         }
         
-        print("[PeerRegistrationService] 🔄 开始批量注册 \(peers.count) 个 peer...")
+        AppLogger.syncPrint("[PeerRegistrationService] 🔄 开始批量注册 \(peers.count) 个 peer...")
         
         for (peerID, addresses) in peers {
             let peerIDString = peerID.b58String
@@ -99,7 +99,7 @@ public class PeerRegistrationService: ObservableObject {
             
             // 检查地址
             guard !addresses.isEmpty else {
-                print("[PeerRegistrationService] ⚠️ 跳过无地址的 peer: \(peerIDString.prefix(12))...")
+                AppLogger.syncPrint("[PeerRegistrationService] ⚠️ 跳过无地址的 peer: \(peerIDString.prefix(12))...")
                 continue
             }
             
@@ -117,10 +117,10 @@ public class PeerRegistrationService: ObservableObject {
                 self.registeringPeerIDs.remove(peerIDString)
             }
             
-            print("[PeerRegistrationService] ✅ 已注册 peer: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
+            AppLogger.syncPrint("[PeerRegistrationService] ✅ 已注册 peer: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
         }
         
-        print("[PeerRegistrationService] ✅ 完成批量注册 \(peers.count) 个 peer")
+        AppLogger.syncPrint("[PeerRegistrationService] ✅ 完成批量注册 \(peers.count) 个 peer")
     }
     
     /// 重试注册（用于 peerNotFound 错误后）
@@ -129,7 +129,7 @@ public class PeerRegistrationService: ObservableObject {
         
         // 如果已经注册，直接返回成功
         if isRegistered(peerIDString) {
-            print("[PeerRegistrationService] ✅ Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[PeerRegistrationService] ✅ Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
             return true
         }
         

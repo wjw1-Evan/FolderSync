@@ -145,28 +145,28 @@ class FolderStatistics {
                     }
                 }
             } catch {
-                print("[FolderStatistics] ⚠️ 无法读取文件属性: \(fileURL.path) - \(error)")
+                AppLogger.syncPrint("[FolderStatistics] ⚠️ 无法读取文件属性: \(fileURL.path) - \(error)")
                 continue
             }
         }
         
         // 第二阶段：并行处理文件（使用任务组）
         let indexingBatchSize = 50
-        let maxConcurrentFileProcessing = 4 // 最大并发文件处理数
+        let maxConcurrentFileProcessing = 8  // 与传输并发数一致，提升索引吞吐
         
         await withTaskGroup(of: (String, FileMetadata, Int64)?.self) { group in
             var activeTasks = 0
             var processedCount = 0
             
             for (fileURL, relativePath) in filePaths {
-                // 控制并发数
+                // 控制并发数：等待一个槽位空出（每消费一个完成信号即释放槽位，无论结果是否有效）
                 if activeTasks >= maxConcurrentFileProcessing {
-                    // 等待一个任务完成
-                    if let result = await group.next(), let (path, meta, size) = result {
+                    let result = await group.next()
+                    activeTasks -= 1
+                    if let unpacked = result, let (path, meta, size) = unpacked {
                         metadata[path] = meta
                         mst.insert(key: path, value: meta.hash)
                         totalSize += size
-                        activeTasks -= 1
                         processedCount += 1
                         if processedCount % indexingBatchSize == 0 {
                             await Task.yield()
@@ -198,7 +198,7 @@ class FolderStatistics {
                         
                         return (relativePath, FileMetadata(hash: hash, mtime: mtime, vectorClock: vc), fileSize)
                     } catch {
-                        print("[FolderStatistics] ⚠️ 无法处理文件（跳过）: \(fileURL.path) - \(error.localizedDescription)")
+                        AppLogger.syncPrint("[FolderStatistics] ⚠️ 无法处理文件（跳过）: \(fileURL.path) - \(error.localizedDescription)")
                         return nil
                     }
                 }

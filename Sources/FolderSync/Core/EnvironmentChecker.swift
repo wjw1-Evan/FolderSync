@@ -34,9 +34,9 @@ public class EnvironmentChecker {
 
     /// 打印检测报告到控制台
     public static func printReport(_ reports: [CheckReport]) {
-        print("\n" + "=".repeating(60))
-        print("🔍 FolderSync 环境检测报告")
-        print("=".repeating(60))
+        AppLogger.syncPrint("\n" + "=".repeating(60))
+        AppLogger.syncPrint("🔍 FolderSync 环境检测报告")
+        AppLogger.syncPrint("=".repeating(60))
 
         var successCount = 0
         var warningCount = 0
@@ -61,23 +61,23 @@ public class EnvironmentChecker {
                 errorCount += 1
             }
 
-            print("\n\(icon) [\(status)] \(report.name)")
+            AppLogger.syncPrint("\n\(icon) [\(status)] \(report.name)")
 
             let message: String
             switch report.result {
             case .success(let msg), .warning(let msg), .error(let msg):
                 message = msg
             }
-            print("   \(message)")
+            AppLogger.syncPrint("   \(message)")
 
             if let details = report.details {
-                print("   详情: \(details)")
+                AppLogger.syncPrint("   详情: \(details)")
             }
         }
 
-        print("\n" + "-".repeating(60))
-        print("📊 统计: ✅ \(successCount) 通过 | ⚠️ \(warningCount) 警告 | ❌ \(errorCount) 失败")
-        print("=".repeating(60) + "\n")
+        AppLogger.syncPrint("\n" + "-".repeating(60))
+        AppLogger.syncPrint("📊 统计: ✅ \(successCount) 通过 | ⚠️ \(warningCount) 警告 | ❌ \(errorCount) 失败")
+        AppLogger.syncPrint("=".repeating(60) + "\n")
     }
 
     // MARK: - 具体检测方法

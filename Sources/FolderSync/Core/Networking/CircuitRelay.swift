@@ -19,7 +19,7 @@ public class CircuitRelay {
         let server = RelayServer(peerID: peerID, address: address, isPublic: isPublic)
         if !relayServers.contains(where: { $0.peerID == peerID }) {
             relayServers.append(server)
-            print("[CircuitRelay] ✅ 注册中继服务器: \(peerID.prefix(12))... @ \(address)")
+            AppLogger.syncPrint("[CircuitRelay] ✅ 注册中继服务器: \(peerID.prefix(12))... @ \(address)")
         }
     }
     

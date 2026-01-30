@@ -47,60 +47,60 @@ public class P2PNode {
         let peersToRegister = peerManager.getPeersForPreRegistration()
         
         guard !peersToRegister.isEmpty else {
-            print("[P2PNode] ℹ️ 没有需要预注册的 peer")
+            AppLogger.syncPrint("[P2PNode] ℹ️ 没有需要预注册的 peer")
             return
         }
         
-        print("[P2PNode] 🔄 开始预注册 \(peersToRegister.count) 个持久化的 peer...")
+        AppLogger.syncPrint("[P2PNode] 🔄 开始预注册 \(peersToRegister.count) 个持久化的 peer...")
         
         registrationService.registerPeers(peersToRegister)
         
-        print("[P2PNode] ✅ 完成预注册 \(peersToRegister.count) 个 peer")
+        AppLogger.syncPrint("[P2PNode] ✅ 完成预注册 \(peersToRegister.count) 个 peer")
     }
     
     /// 重新触发对等点注册（用于 peerNotFound 错误后的重试）
     @MainActor
     func retryPeerRegistration(peer: PeerID) async {
         let peerIDString = peer.b58String
-        print("[P2PNode] 🔄 [retryPeerRegistration] 开始重试注册: \(peerIDString.prefix(12))...")
+        AppLogger.syncPrint("[P2PNode] 🔄 [retryPeerRegistration] 开始重试注册: \(peerIDString.prefix(12))...")
         
         // 检查是否已经注册
         if registrationService.isRegistered(peerIDString) {
-            print("[P2PNode] ✅ [retryPeerRegistration] Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ✅ [retryPeerRegistration] Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
             return
         }
         
         let addresses = peerManager.getAddresses(for: peerIDString)
         
-        print("[P2PNode] 📍 [retryPeerRegistration] 获取到的地址数量: \(addresses.count)")
+        AppLogger.syncPrint("[P2PNode] 📍 [retryPeerRegistration] 获取到的地址数量: \(addresses.count)")
         if !addresses.isEmpty {
             for (idx, addr) in addresses.enumerated() {
-                print("[P2PNode]   [\(idx + 1)] \(addr)")
+                AppLogger.syncPrint("[P2PNode]   [\(idx + 1)] \(addr)")
             }
         }
         
         guard !addresses.isEmpty else {
-            print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))...")
-            print("[P2PNode] 💡 [retryPeerRegistration] 提示: 对等点可能还未被发现或地址信息丢失")
-            print("[P2PNode] 💡 [retryPeerRegistration] 建议: 等待 LAN Discovery 重新发现该对等点")
+            AppLogger.syncPrint("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 提示: 对等点可能还未被发现或地址信息丢失")
+            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 建议: 等待 LAN Discovery 重新发现该对等点")
             return
         }
         
         guard registrationService.isReady else {
-            print("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: registrationService 未就绪: \(peerIDString.prefix(12))...")
-            print("[P2PNode] 💡 [retryPeerRegistration] 提示: 等待 P2P 节点完全启动")
+            AppLogger.syncPrint("[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: registrationService 未就绪: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 提示: 等待 P2P 节点完全启动")
             return
         }
         
         // 使用 registrationService 重试注册
         let registered = registrationService.retryRegistration(peerID: peer, addresses: addresses)
         if registered {
-            print("[P2PNode] ✅ [retryPeerRegistration] 重试注册成功: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
+            AppLogger.syncPrint("[P2PNode] ✅ [retryPeerRegistration] 重试注册成功: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)")
         } else {
-            print("[P2PNode] ⚠️ [retryPeerRegistration] 重试注册失败（可能正在注册中）: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ⚠️ [retryPeerRegistration] 重试注册失败（可能正在注册中）: \(peerIDString.prefix(12))...")
             // 检查注册状态
             let state = registrationService.getRegistrationState(peerIDString)
-            print("[P2PNode] 📊 [retryPeerRegistration] 当前注册状态: \(state)")
+            AppLogger.syncPrint("[P2PNode] 📊 [retryPeerRegistration] 当前注册状态: \(state)")
         }
     }
     
@@ -116,7 +116,7 @@ public class P2PNode {
         let discovery = LANDiscovery()
         discovery.onPeerDiscovered = { [weak self] discoveredPeerID, address, peerAddresses, syncIDs in
             guard !discoveredPeerID.isEmpty else {
-                print("[P2PNode] ⚠️ 收到空的 peerID，忽略")
+                AppLogger.syncPrint("[P2PNode] ⚠️ 收到空的 peerID，忽略")
                 return
             }
             
@@ -138,45 +138,27 @@ public class P2PNode {
     /// 处理发现的 peer（新的统一入口）
     @MainActor
     private func handleDiscoveredPeer(peerID: String, discoveryAddress: String, listenAddresses: [String], syncIDs: [String]) async {
-        print("[P2PNode] 🔍 [DEBUG] 处理发现的 peer: peerID=\(peerID.prefix(12))..., 发现地址=\(discoveryAddress), 监听地址数=\(listenAddresses.count), syncID数=\(syncIDs.count)")
+        guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else { return }
         
-        // 关键修复：确保不会处理自己的广播
-        guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else {
-            // 忽略自己的广播
-            print("[P2PNode] ⏭️ [DEBUG] 忽略自己的广播: peerID=\(peerID.prefix(12))...")
-            return
-        }
-        
-        // 解析 PeerID
         guard let peerIDObj = PeerID(cid: peerID) else {
-            print("[P2PNode] ❌ [DEBUG] 无法解析 PeerID: \(peerID.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ❌ 无法解析 PeerID: \(peerID.prefix(12))...")
             return
         }
         
-        // 生成可连接地址
         let connectableStrs = Self.buildConnectableAddresses(listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
-        print("[P2PNode] 🔗 [DEBUG] 生成可连接地址: 原始地址数=\(listenAddresses.count), 可连接地址数=\(connectableStrs.count)")
-        
-        // 解析地址
         var parsedAddresses: [Multiaddr] = []
         for addrStr in connectableStrs {
             if let addr = try? Multiaddr(addrStr) {
                 parsedAddresses.append(addr)
-            } else {
-                print("[P2PNode] ⚠️ [DEBUG] 无法解析地址: \(addrStr)")
             }
         }
         
         guard !parsedAddresses.isEmpty else {
-            print("[P2PNode] ⚠️ [DEBUG] 无有效地址，跳过: \(peerID.prefix(12))..., 可连接地址数=\(connectableStrs.count)")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 无有效地址，跳过: \(peerID.prefix(12))...")
             return
         }
         
-        // 添加到 PeerManager
-        let existingPeer = peerManager.getPeer(peerID)
-        let wasExisting = existingPeer != nil
         _ = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
-        print("[P2PNode] 📝 [DEBUG] Peer 已添加到管理器: \(peerID.prefix(12))..., 是否为新peer=\(!wasExisting)")
         
         // 更新 syncIDs（从广播消息中获取）
         peerManager.updateSyncIDs(peerID, syncIDs: syncIDs)
@@ -190,33 +172,18 @@ public class P2PNode {
         let addressesChanged = Set(parsedAddresses.map { $0.description }) != Set(existing?.addresses.map { $0.description } ?? [])
         let needsRegistration = !registrationService.isRegistered(peerID) || addressesChanged
         
-        print("[P2PNode] 🔍 [DEBUG] 注册检查: peerID=\(peerID.prefix(12))..., 已注册=\(registrationService.isRegistered(peerID)), 地址变化=\(addressesChanged), 需要注册=\(needsRegistration)")
-        
         if needsRegistration {
-            // 注册到 libp2p peer store
-            print("[P2PNode] 🔄 [DEBUG] 开始注册 peer: \(peerID.prefix(12))..., 地址数=\(parsedAddresses.count)")
             let registered = registrationService.registerPeer(peerID: peerIDObj, addresses: parsedAddresses)
             if registered {
-                print("[P2PNode] ✅ [DEBUG] Peer 注册成功: \(peerID.prefix(12))...")
-                
-                // 更新设备状态为在线（只有真正收到有效广播时才标记为在线）
                 peerManager.updateDeviceStatus(peerID, status: .online)
-                
-                // 通知 SyncManager
                 self.onPeerDiscovered?(peerIDObj, syncIDs)
             } else {
-                // 注册失败，检查原因
                 let state = registrationService.getRegistrationState(peerID)
-                print("[P2PNode] ⚠️ [DEBUG] Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
-                
-                // 即使注册失败，也更新设备状态并通知（让后续重试机制处理）
+                AppLogger.syncPrint("[P2PNode] ⚠️ Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
                 peerManager.updateDeviceStatus(peerID, status: .online)
                 self.onPeerDiscovered?(peerIDObj, syncIDs)
             }
         } else {
-            print("[P2PNode] ℹ️ [DEBUG] Peer 已注册且地址未变化，跳过注册: \(peerID.prefix(12))...")
-            
-            // 关键：即使地址未变化，收到广播也应该更新 lastSeenTime
             // 这表示设备仍然在线，只是地址没有变化
             peerManager.updateLastSeen(peerID)
             
@@ -242,7 +209,7 @@ public class P2PNode {
         return listenAddresses.compactMap { addr in
             // 跳过端口为0的地址（0表示自动分配，不能用于连接）
             if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") {
-                print("[P2PNode] ⚠️ 跳过端口为0的地址: \(addr)")
+                AppLogger.syncPrint("[P2PNode] ⚠️ 跳过端口为0的地址: \(addr)")
                 return nil
             }
             if addr.contains("/ip4/0.0.0.0/") {
@@ -264,15 +231,15 @@ public class P2PNode {
         if AppPaths.isRunningTests {
             // 测试场景通常会在同一台机器/同一进程里模拟多个“设备”，需要每个节点有唯一 PeerID
             peerID = PeerID.generate()
-            print("[P2PNode] ✅ 测试模式：已生成临时 PeerID: \(peerID.b58String.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ✅ 测试模式：已生成临时 PeerID: \(peerID.b58String.prefix(12))...")
         } else if let savedPeerID = PeerID.load(from: peerIDFile, password: password) {
             peerID = savedPeerID
-            print("[P2PNode] ✅ 已加载现有 PeerID: \(peerID.b58String.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ✅ 已加载现有 PeerID: \(peerID.b58String.prefix(12))...")
         } else {
             // 生产模式：生成并持久化 PeerID
             peerID = PeerID.generate()
             try? peerID.save(to: peerIDFile, password: password)
-            print("[P2PNode] ✅ 已生成新 PeerID: \(peerID.b58String.prefix(12))...")
+            AppLogger.syncPrint("[P2PNode] ✅ 已生成新 PeerID: \(peerID.b58String.prefix(12))...")
         }
         
         self.myPeerID = peerID
@@ -280,7 +247,7 @@ public class P2PNode {
         // 获取本机真实 IP 地址用于监听
         let localIP = getLocalIPAddress()
         lastKnownIP = localIP
-        print("[P2PNode] 📍 检测到本机 IP 地址: \(localIP)")
+        AppLogger.syncPrint("[P2PNode] 📍 检测到本机 IP 地址: \(localIP)")
         
         // 启动原生 TCP 服务器
         do {
@@ -288,9 +255,9 @@ public class P2PNode {
             guard nativePort > 0 else {
                 throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "TCP 服务器启动失败：无法获取有效端口"])
             }
-            print("[P2PNode] ✅ 原生 TCP 服务器已启动，端口: \(nativePort)")
+            AppLogger.syncPrint("[P2PNode] ✅ 原生 TCP 服务器已启动，端口: \(nativePort)")
         } catch {
-            print("[P2PNode] ⚠️ 原生 TCP 服务器启动失败: \(error)")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器启动失败: \(error)")
             throw error
         }
 
@@ -317,25 +284,25 @@ public class P2PNode {
         if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
             let nativeAddress = "/ip4/\(localIP)/tcp/\(nativePort)"
             addresses.append(nativeAddress)
-            print("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
-            print("[P2PNode] 📋 地址详情: IP=\(localIP), 端口=\(nativePort), 格式验证: ✅")
+            AppLogger.syncPrint("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
+            AppLogger.syncPrint("[P2PNode] 📋 地址详情: IP=\(localIP), 端口=\(nativePort), 格式验证: ✅")
             
             // 验证地址格式
             if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(from: nativeAddress) {
                 if extractedIP == localIP && extractedPort == nativePort {
-                    print("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
+                    AppLogger.syncPrint("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
                 } else {
-                    print("[P2PNode] ⚠️ 警告: 地址格式验证失败: 期望 \(localIP):\(nativePort), 实际 \(extractedIP):\(extractedPort)")
+                    AppLogger.syncPrint("[P2PNode] ⚠️ 警告: 地址格式验证失败: 期望 \(localIP):\(nativePort), 实际 \(extractedIP):\(extractedPort)")
                 }
             } else {
-                print("[P2PNode] ❌ 错误: 无法从广播地址中提取 IP:Port: \(nativeAddress)")
+                AppLogger.syncPrint("[P2PNode] ❌ 错误: 无法从广播地址中提取 IP:Port: \(nativeAddress)")
             }
         } else {
-            print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法添加到广播")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法添加到广播")
             if let port = nativeNetwork.serverPort {
-                print("[P2PNode]   当前端口值: \(port) (无效)")
+                AppLogger.syncPrint("[P2PNode]   当前端口值: \(port) (无效)")
             } else {
-                print("[P2PNode]   当前端口值: nil (未启动)")
+                AppLogger.syncPrint("[P2PNode]   当前端口值: nil (未启动)")
             }
         }
         
@@ -353,21 +320,21 @@ public class P2PNode {
         }
 
         // 输出启动状态
-        print("\n[P2PNode] ========== P2P 节点启动状态 ==========")
-        print("[P2PNode] PeerID: \(peerID.b58String)")
+        AppLogger.syncPrint("\n[P2PNode] ========== P2P 节点启动状态 ==========")
+        AppLogger.syncPrint("[P2PNode] PeerID: \(peerID.b58String)")
         
         if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
-            print("[P2PNode] 监听地址: /ip4/\(localIP)/tcp/\(nativePort)")
+            AppLogger.syncPrint("[P2PNode] 监听地址: /ip4/\(localIP)/tcp/\(nativePort)")
         }
-        print("[P2PNode] ✅ Ready for connections")
+        AppLogger.syncPrint("[P2PNode] ✅ Ready for connections")
         
         if lanDiscovery != nil {
-            print("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
+            AppLogger.syncPrint("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
         } else {
-            print("[P2PNode] ❌ LAN Discovery 未启用")
+            AppLogger.syncPrint("[P2PNode] ❌ LAN Discovery 未启用")
         }
         
-        print("[P2PNode] ======================================\n")
+        AppLogger.syncPrint("[P2PNode] ======================================\n")
     }
     
     /// 获取本机的局域网 IP 地址
@@ -425,7 +392,7 @@ public class P2PNode {
             
             // 检查网络是否可用
             guard path.status == .satisfied else {
-                print("[P2PNode] ⚠️ 网络路径不可用")
+                AppLogger.syncPrint("[P2PNode] ⚠️ 网络路径不可用")
                 return
             }
             
@@ -438,7 +405,7 @@ public class P2PNode {
                 
                 // 如果 IP 地址发生变化（排除初始状态和回环地址）
                 if !self.lastKnownIP.isEmpty && newIP != self.lastKnownIP && newIP != "127.0.0.1" {
-                    print("[P2PNode] 🔄 检测到 IP 地址变化: \(self.lastKnownIP) -> \(newIP)")
+                    AppLogger.syncPrint("[P2PNode] 🔄 检测到 IP 地址变化: \(self.lastKnownIP) -> \(newIP)")
                     let oldIP = self.lastKnownIP
                     self.lastKnownIP = newIP
                     
@@ -456,7 +423,7 @@ public class P2PNode {
         monitor.start(queue: queue)
         self.pathMonitor = monitor
         self.pathMonitorQueue = queue
-        print("[P2PNode] ✅ 网络路径监控已启动")
+        AppLogger.syncPrint("[P2PNode] ✅ 网络路径监控已启动")
     }
     
     /// 停止网络路径监控
@@ -464,16 +431,16 @@ public class P2PNode {
         pathMonitor?.cancel()
         pathMonitor = nil
         pathMonitorQueue = nil
-        print("[P2PNode] ✅ 网络路径监控已停止")
+        AppLogger.syncPrint("[P2PNode] ✅ 网络路径监控已停止")
     }
     
     /// 当 IP 地址改变时，更新监听地址和广播地址
     private func updateListenAddressForIPChange(newIP: String, oldIP: String) async {
-        print("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
+        AppLogger.syncPrint("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
         
         // 获取当前原生 TCP 服务器的端口
         guard let currentPort = nativeNetwork.serverPort, currentPort > 0 else {
-            print("[P2PNode] ⚠️ 当前没有有效的监听端口，无法更新")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 当前没有有效的监听端口，无法更新")
             return
         }
         
@@ -486,18 +453,18 @@ public class P2PNode {
             guard newPort > 0 else {
                 throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：端口无效"])
             }
-            print("[P2PNode] 🔌 使用新 IP 和端口重新监听: \(newIP):\(newPort)")
+            AppLogger.syncPrint("[P2PNode] 🔌 使用新 IP 和端口重新监听: \(newIP):\(newPort)")
         } catch {
-            print("[P2PNode] ⚠️ 重新启动服务器失败: \(error)")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 重新启动服务器失败: \(error)")
             // 尝试使用自动分配的端口
             do {
                 let newPort = try nativeNetwork.startServer(port: 0)
                 guard newPort > 0 else {
                     throw NSError(domain: "P2PNode", code: -1, userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：无法获取有效端口"])
                 }
-                print("[P2PNode] 🔌 使用新 IP 和自动分配端口重新监听: \(newIP):\(newPort)")
+                AppLogger.syncPrint("[P2PNode] 🔌 使用新 IP 和自动分配端口重新监听: \(newIP):\(newPort)")
             } catch {
-                print("[P2PNode] ❌ 无法重新启动服务器: \(error)")
+                AppLogger.syncPrint("[P2PNode] ❌ 无法重新启动服务器: \(error)")
                 return
             }
         }
@@ -510,27 +477,27 @@ public class P2PNode {
         if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
             let nativeAddress = "/ip4/\(newIP)/tcp/\(nativePort)"
             newAddresses.append(nativeAddress)
-            print("[P2PNode] ✅ 已更新广播地址: \(nativeAddress)")
-            print("[P2PNode] 📋 地址详情: IP=\(newIP), 端口=\(nativePort)")
+            AppLogger.syncPrint("[P2PNode] ✅ 已更新广播地址: \(nativeAddress)")
+            AppLogger.syncPrint("[P2PNode] 📋 地址详情: IP=\(newIP), 端口=\(nativePort)")
             
             // 验证地址格式
             if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(from: nativeAddress) {
                 if extractedIP == newIP && extractedPort == nativePort {
-                    print("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
+                    AppLogger.syncPrint("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
                 } else {
-                    print("[P2PNode] ⚠️ 警告: 地址格式验证失败")
+                    AppLogger.syncPrint("[P2PNode] ⚠️ 警告: 地址格式验证失败")
                 }
             }
         } else {
-            print("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法更新广播地址")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法更新广播地址")
         }
         
         lanDiscovery?.updateListenAddresses(newAddresses)
-        print("[P2PNode] ✅ 已更新监听和广播地址: \(newAddresses)")
+        AppLogger.syncPrint("[P2PNode] ✅ 已更新监听和广播地址: \(newAddresses)")
         
         // 立即发送一次广播，通知其他设备 IP 地址已改变
         lanDiscovery?.sendDiscoveryRequest()
-        print("[P2PNode] 📡 已发送广播通知 IP 地址变化")
+        AppLogger.syncPrint("[P2PNode] 📡 已发送广播通知 IP 地址变化")
     }
     
     /// 更新广播中的 syncID 列表
@@ -558,7 +525,7 @@ public class P2PNode {
 
     public var listenAddresses: [String] {
         guard let nativePort = nativeNetwork.serverPort, nativePort > 0 else {
-            print("[P2PNode] ⚠️ 无法获取有效的监听端口")
+            AppLogger.syncPrint("[P2PNode] ⚠️ 无法获取有效的监听端口")
             return []
         }
         let localIP = getLocalIPAddress()

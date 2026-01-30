@@ -122,7 +122,7 @@ public class StorageManager {
             }
 
             guard let data = try? Data(contentsOf: foldersFile) else {
-                print("[StorageManager] ❌ 无法读取文件夹配置文件: \(foldersFile.path)")
+                AppLogger.syncPrint("[StorageManager] ❌ 无法读取文件夹配置文件: \(foldersFile.path)")
                 let empty: [SyncFolder] = []
                 foldersCache = empty
                 return empty
@@ -134,19 +134,19 @@ public class StorageManager {
                 // 成功加载，不输出日志
                 return folders
             } catch {
-                print("[StorageManager] ❌ 解析文件夹配置失败: \(error)")
-                print("[StorageManager] 错误详情: \(error.localizedDescription)")
+                AppLogger.syncPrint("[StorageManager] ❌ 解析文件夹配置失败: \(error)")
+                AppLogger.syncPrint("[StorageManager] 错误详情: \(error.localizedDescription)")
 
                 // 备份损坏的文件，以便后续恢复
                 let backupFile = foldersFile.appendingPathExtension(
                     "corrupted.\(Int(Date().timeIntervalSince1970)).backup")
                 do {
                     try data.write(to: backupFile, options: [.atomic])
-                    print("[StorageManager] 💾 已备份损坏的配置文件到: \(backupFile.lastPathComponent)")
-                    print("[StorageManager] ⚠️ 警告: 文件夹配置解析失败，已备份损坏的文件")
-                    print("[StorageManager]   如果这是重要数据，请尝试手动修复或从备份恢复")
+                    AppLogger.syncPrint("[StorageManager] 💾 已备份损坏的配置文件到: \(backupFile.lastPathComponent)")
+                    AppLogger.syncPrint("[StorageManager] ⚠️ 警告: 文件夹配置解析失败，已备份损坏的文件")
+                    AppLogger.syncPrint("[StorageManager]   如果这是重要数据，请尝试手动修复或从备份恢复")
                 } catch {
-                    print("[StorageManager] ⚠️ 无法备份损坏的配置文件: \(error.localizedDescription)")
+                    AppLogger.syncPrint("[StorageManager] ⚠️ 无法备份损坏的配置文件: \(error.localizedDescription)")
                 }
 
                 // 如果解析失败，返回空数组而不是抛出错误，避免应用启动失败
@@ -170,7 +170,7 @@ public class StorageManager {
                     try? oldData.write(to: backupFile, options: [.atomic])
                 } catch {
                     // 备份失败不影响主流程，只记录警告
-                    print("[StorageManager] ⚠️ 无法备份旧配置文件: \(error.localizedDescription)")
+                    AppLogger.syncPrint("[StorageManager] ⚠️ 无法备份旧配置文件: \(error.localizedDescription)")
                 }
             }
 
@@ -187,9 +187,9 @@ public class StorageManager {
 
             // 成功保存，不输出日志
         } catch {
-            print("[StorageManager] ❌ 保存文件夹配置失败: \(error)")
-            print("[StorageManager] 错误详情: \(error.localizedDescription)")
-            print("[StorageManager] 文件路径: \(foldersFile.path)")
+            AppLogger.syncPrint("[StorageManager] ❌ 保存文件夹配置失败: \(error)")
+            AppLogger.syncPrint("[StorageManager] 错误详情: \(error.localizedDescription)")
+            AppLogger.syncPrint("[StorageManager] 文件路径: \(foldersFile.path)")
 
             // 如果写入失败，尝试从备份恢复
             let backupFile = foldersFile.appendingPathExtension("backup")
@@ -199,7 +199,7 @@ public class StorageManager {
                     try? backupData.write(to: foldersFile, options: [.atomic])
                     // 恢复成功，不输出日志
                 } catch {
-                    print("[StorageManager] ❌ 从备份恢复失败: \(error.localizedDescription)")
+                    AppLogger.syncPrint("[StorageManager] ❌ 从备份恢复失败: \(error.localizedDescription)")
                 }
             }
 
@@ -616,7 +616,7 @@ public class StorageManager {
                 let snapshot = try decoder.decode(FolderSnapshot.self, from: data)
                 snapshots.append(snapshot)
             } catch {
-                print("[StorageManager] ⚠️ 无法加载快照 \(file.lastPathComponent): \(error)")
+                AppLogger.syncPrint("[StorageManager] ⚠️ 无法加载快照 \(file.lastPathComponent): \(error)")
                 // 继续处理其他文件
             }
         }

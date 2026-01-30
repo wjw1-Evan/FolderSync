@@ -6,6 +6,14 @@ import os.log
 public struct AppLogger {
     private static let subsystem = "com.FolderSync.App"
     private static var loggers: [String: Logger] = [:]
+    private static let logLock = NSLock()
+
+    /// 线程安全的控制台输出，避免多线程并发打印时输出交错
+    public static func syncPrint(_ message: String) {
+        logLock.lock()
+        defer { logLock.unlock() }
+        Swift.print(message)
+    }
     
     /// 获取指定类别的日志记录器
     public static func logger(for category: String) -> Logger {

@@ -46,10 +46,10 @@ public class NativeTCPServer {
             switch state {
             case .ready:
                 if let port = listener.port {
-                    print("[NativeTCPServer] ✅ 服务器已启动，监听端口: \(port.rawValue)")
+                    AppLogger.syncPrint("[NativeTCPServer] ✅ 服务器已启动，监听端口: \(port.rawValue)")
                 }
             case .failed(let error):
-                print("[NativeTCPServer] ❌ 服务器失败: \(error)")
+                AppLogger.syncPrint("[NativeTCPServer] ❌ 服务器失败: \(error)")
             default:
                 break
             }
@@ -96,7 +96,7 @@ public class NativeTCPServer {
             case .ready:
                 self.receiveRequest(from: connection)
             case .failed(let error):
-                print("[NativeTCPServer] 连接失败: \(error)")
+                AppLogger.syncPrint("[NativeTCPServer] 连接失败: \(error)")
                 connection.cancel()
             case .cancelled:
                 break
@@ -117,13 +117,13 @@ public class NativeTCPServer {
             }
             
             if let error = error {
-                print("[NativeTCPServer] 接收长度失败: \(error)")
+                AppLogger.syncPrint("[NativeTCPServer] 接收长度失败: \(error)")
                 connection.cancel()
                 return
             }
             
             guard let lengthData = data, lengthData.count == 4 else {
-                print("[NativeTCPServer] 无法接收长度")
+                AppLogger.syncPrint("[NativeTCPServer] 无法接收长度")
                 connection.cancel()
                 return
             }
@@ -138,13 +138,13 @@ public class NativeTCPServer {
                 }
                 
                 if let error = error {
-                    print("[NativeTCPServer] 接收数据失败: \(error)")
+                    AppLogger.syncPrint("[NativeTCPServer] 接收数据失败: \(error)")
                     connection.cancel()
                     return
                 }
                 
                 guard let requestData = data, requestData.count == Int(length) else {
-                    print("[NativeTCPServer] 无法接收完整请求")
+                    AppLogger.syncPrint("[NativeTCPServer] 无法接收完整请求")
                     connection.cancel()
                     return
                 }
@@ -165,7 +165,7 @@ public class NativeTCPServer {
             
             // 调用处理回调
             guard let handler = messageHandler else {
-                print("[NativeTCPServer] ⚠️ 消息处理器未设置")
+                AppLogger.syncPrint("[NativeTCPServer] ⚠️ 消息处理器未设置")
                 let errorResponse = SyncResponse.error("消息处理器未设置")
                 await sendResponse(errorResponse, to: connection)
                 return
@@ -177,7 +177,7 @@ public class NativeTCPServer {
             await sendResponse(response, to: connection)
             
         } catch {
-            print("[NativeTCPServer] ❌ 处理请求失败: \(error)")
+            AppLogger.syncPrint("[NativeTCPServer] ❌ 处理请求失败: \(error)")
             let errorResponse = SyncResponse.error("处理请求失败: \(error.localizedDescription)")
             await sendResponse(errorResponse, to: connection)
         }
@@ -205,7 +205,7 @@ public class NativeTCPServer {
                 })
             }
         } catch {
-            print("[NativeTCPServer] ❌ 发送响应失败: \(error)")
+            AppLogger.syncPrint("[NativeTCPServer] ❌ 发送响应失败: \(error)")
             connection.cancel()
         }
     }

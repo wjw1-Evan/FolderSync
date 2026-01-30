@@ -121,23 +121,28 @@ class P2PHandlers {
         }
         
         let fileURL = folder.localPath.appendingPathComponent(relativePath)
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
+        
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: resolvedURL.path) else {
+            return .error("文件不存在")
+        }
         
         // 检查文件是否正在写入
-        let fileManager = FileManager.default
-        if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+        if let attributes = try? fileManager.attributesOfItem(atPath: resolvedURL.path),
            let fileSize = attributes[.size] as? Int64,
            fileSize == 0 {
             // 检查文件修改时间
-            if let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+            if let resourceValues = try? resolvedURL.resourceValues(forKeys: [.contentModificationDateKey]),
                let mtime = resourceValues.contentModificationDate {
                 let timeSinceModification = Date().timeIntervalSince(mtime)
                 if timeSinceModification < 3.0 {
                     // 文件可能是0字节且刚被修改，可能还在写入，等待一下
-                    print("[P2PHandlers] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
+                    AppLogger.syncPrint("[P2PHandlers] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     
                     // 再次检查文件大小
-                    if let newAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                    if let newAttributes = try? fileManager.attributesOfItem(atPath: resolvedURL.path),
                        let newFileSize = newAttributes[.size] as? Int64,
                        newFileSize == 0 {
                         return .error("文件正在写入中，请稍后重试")
@@ -146,7 +151,7 @@ class P2PHandlers {
             }
         }
         
-        guard let data = try? Data(contentsOf: fileURL) else {
+        guard let data = try? Data(contentsOf: resolvedURL) else {
             return .error("无法读取文件")
         }
         
@@ -166,6 +171,9 @@ class P2PHandlers {
         let parentDir = fileURL.deletingLastPathComponent()
         let fileManager = FileManager.default
         
+        // 处理同名文件/目录冲突（如 same_name 同时作为文件和目录存在）
+        try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
+        
         // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
             // 计算父目录的相对路径
@@ -174,7 +182,7 @@ class P2PHandlers {
             if !parentRelativePath.isEmpty && parentRelativePath != "." {
                 let stateStore = syncManager.getFileStateStore(for: syncID)
                 if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
-                    print("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    AppLogger.syncPrint("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
                     stateStore.removeState(path: parentRelativePath)
                     // 同时从旧的删除记录格式中移除
                     var dp = syncManager.deletedPaths(for: syncID)
@@ -245,16 +253,17 @@ class P2PHandlers {
         }
         
         let fileURL = folder.localPath.appendingPathComponent(path)
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
         let fileManager = FileManager.default
         
-        guard fileManager.fileExists(atPath: fileURL.path) else {
+        guard fileManager.fileExists(atPath: resolvedURL.path) else {
             return .error("文件不存在")
         }
         
         // 使用 FastCDC 分块
         do {
             let cdc = FastCDC(min: 4096, avg: 16384, max: 65536)
-            let chunks = try cdc.chunk(fileURL: fileURL)
+            let chunks = try cdc.chunk(fileURL: resolvedURL)
             let chunkHashes = chunks.map { $0.hash }
             
             // 保存块到本地存储（用于后续去重）
@@ -294,13 +303,15 @@ class P2PHandlers {
         let missingHashes = chunkHashes.filter { !(hasBlocks[$0] ?? false) }
         
         if !missingHashes.isEmpty {
-            return .error("缺少块: \(missingHashes.count) 个")
+            return .error("缺失块: \(missingHashes.joined(separator: ","))")
         }
         
         // 从块重建文件
         let fileURL = folder.localPath.appendingPathComponent(path)
         let parentDir = fileURL.deletingLastPathComponent()
         let fileManager = FileManager.default
+        
+        try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
         
         // 如果父目录不存在，需要检查是否有删除记录，如果有则清除（因为文件的创建意味着父目录不再被删除）
         if !fileManager.fileExists(atPath: parentDir.path) {
@@ -310,7 +321,7 @@ class P2PHandlers {
             if !parentRelativePath.isEmpty && parentRelativePath != "." {
                 let stateStore = syncManager.getFileStateStore(for: syncID)
                 if stateStore.getState(for: parentRelativePath)?.isDeleted == true {
-                    print("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
+                    AppLogger.syncPrint("[P2PHandlers] 🔄 检测到需要创建父目录，清除父目录的删除记录: \(parentRelativePath)")
                     stateStore.removeState(path: parentRelativePath)
                     // 同时从旧的删除记录格式中移除
                     var dp = syncManager.deletedPaths(for: syncID)
@@ -338,7 +349,7 @@ class P2PHandlers {
                 VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: path, vc: vc)
             }
             
-            return .chunkAck(syncID: syncID, chunkHash: chunkHashes.first ?? "")
+            return .fileChunksAck(syncID: syncID, path: path)
         } catch {
             return .error("保存文件失败: \(error.localizedDescription)")
         }

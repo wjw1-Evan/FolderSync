@@ -1,6 +1,33 @@
 import Foundation
 import Crypto
 
+/// 在写入文件前准备路径，处理「同名文件/目录」冲突（如 same_name 既是文件又是目录）
+/// - 若目标路径已存在且为目录，则删除（将以文件覆盖）
+/// - 若父路径或祖先路径已存在且为文件，则删除（将创建为目录）
+func preparePathForWritingFile(fileURL: URL, baseDir: URL, fileManager: FileManager = .default) throws {
+    // 1. 目标路径已存在且为目录 → 删除
+    if fileManager.fileExists(atPath: fileURL.path) {
+        var isDir: ObjCBool = false
+        fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir)
+        if isDir.boolValue {
+            try fileManager.removeItem(at: fileURL)
+        }
+    }
+    // 2. 从直接父目录向上检查：若某祖先以文件形式存在则删除，再创建目录
+    var current = fileURL.deletingLastPathComponent()
+    let basePath = baseDir.path
+    while current.path != basePath, !current.path.isEmpty {
+        if fileManager.fileExists(atPath: current.path) {
+            var isDir: ObjCBool = false
+            fileManager.fileExists(atPath: current.path, isDirectory: &isDir)
+            if !isDir.boolValue {
+                try fileManager.removeItem(at: current)
+            }
+        }
+        current = current.deletingLastPathComponent()
+    }
+}
+
 /// 工具方法扩展
 extension SyncManager {
     func isIgnored(_ path: String, folder: SyncFolder) -> Bool {

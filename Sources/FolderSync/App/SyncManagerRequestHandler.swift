@@ -43,7 +43,7 @@ extension SyncManager {
                     let stabilityDelay: TimeInterval = 3.0  // 文件大小稳定3秒后才认为写入完成
                     if timeSinceModification < stabilityDelay {
                         // 文件可能是0字节且刚被修改，可能还在写入，等待一下
-                        print("[SyncManager] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
+                        AppLogger.syncPrint("[SyncManager] ⏳ 文件可能正在写入，等待稳定: \(relativePath)")
                         try? await Task.sleep(
                             nanoseconds: UInt64(stabilityDelay * 1_000_000_000))
 
@@ -71,6 +71,7 @@ extension SyncManager {
                 let parentDir = fileURL.deletingLastPathComponent()
                 let fileManager = FileManager.default
 
+                try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
                 if !fileManager.fileExists(atPath: parentDir.path) {
                     try fileManager.createDirectory(
                         at: parentDir, withIntermediateDirectories: true)
@@ -248,7 +249,7 @@ extension SyncManager {
         let fileManager = FileManager.default
 
         do {
-            // 确保父目录存在
+            try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
             if !fileManager.fileExists(atPath: parentDir.path) {
                 try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
             }

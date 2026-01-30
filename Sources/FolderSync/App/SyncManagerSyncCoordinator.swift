@@ -3,8 +3,10 @@ import Foundation
 /// 同步协调扩展
 /// 负责同步触发、对等点同步和请求发送
 extension SyncManager {
-    func syncWithPeer(peer: PeerID, folder: SyncFolder) {
-        syncEngine.syncWithPeer(peer: peer, folder: folder)
+    /// 与指定对等点同步指定文件夹。
+    /// - Parameter precomputedState: 可选预计算状态 (MST, metadata)；若提供则 performSync 跳过初始 calculateFullState，避免重复计算。
+    func syncWithPeer(peer: PeerID, folder: SyncFolder, precomputedState: (MerkleSearchTree, [String: FileMetadata])? = nil) {
+        syncEngine.syncWithPeer(peer: peer, folder: folder, precomputedState: precomputedState)
     }
 
     /// 统一的请求函数 - 使用原生 TCP
@@ -24,7 +26,7 @@ extension SyncManager {
         // 从地址中提取第一个可用的 IP:Port 地址
         let addressStrings = peerAddresses.map { $0.description }
         guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
-            print("[SyncManager] 🗑️ [DEBUG] 删除无法访问的peer（无可用地址）: \(peerID.prefix(12))...")
+            // 删除无法访问的 peer（无可用地址）
             // 简化逻辑：无法访问的peer直接删除
             await MainActor.run {
                 // 从所有syncID中移除该peer
@@ -48,7 +50,7 @@ extension SyncManager {
             !extractedIP.isEmpty,
             extractedIP != "0.0.0.0"
         else {
-            print("[SyncManager] ❌ [sendSyncRequest] 地址格式验证失败: \(address)")
+            AppLogger.syncPrint("[SyncManager] ❌ [sendSyncRequest] 地址格式验证失败: \(address)")
             throw NSError(
                 domain: "SyncManager", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
@@ -139,44 +141,28 @@ extension SyncManager {
         updateFolderStatus(folder.id, status: .syncing, message: "Scanning local files...")
 
         Task {
-            // 1. Calculate the current state
-            // 注意：这里计算状态是为了同步，统计更新应该通过 refreshFileCount 进行
-            // 但为了同步需要，我们也需要更新统计值
-            // 注意：这里更新统计值是为了同步开始时显示最新状态
-            // SyncEngine 同步完成后也会更新统计值，但那是同步后的最终状态
-            let (_, metadata, folderCount, totalSize) = await calculateFullState(for: folder)
+            // 1. 计算当前状态（一次计算，复用给所有 peer，避免每 peer 重复 calculateFullState）
+            let (mst, metadata, folderCount, totalSize) = await calculateFullState(for: folder)
+            let precomputed = (mst, metadata)
 
             await MainActor.run {
                 if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
-                    // 创建新的文件夹对象以触发 @Published 更新
-                    // 重要：原子性更新，一次性设置所有统计值，避免中间状态
                     var updatedFolder = self.folders[index]
-
-                    // 直接使用新计算的值（即使为0也是有效值）
-                    // 原子性更新：一次性设置所有统计值，避免 UI 看到中间状态
                     updatedFolder.fileCount = metadata.count
                     updatedFolder.folderCount = folderCount
                     updatedFolder.totalSize = totalSize
-
-                    // 一次性替换，确保 UI 看到的是完整的新值
                     self.folders[index] = updatedFolder
-                    // 手动触发 objectWillChange 以确保 UI 更新
                     self.objectWillChange.send()
-                    // 持久化保存统计信息更新
                     do {
                         try StorageManager.shared.saveFolder(updatedFolder)
                     } catch {
-                        print("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
+                        AppLogger.syncPrint("[SyncManager] ⚠️ 无法保存文件夹统计信息更新: \(error)")
                     }
                 }
             }
 
-            // 2. Try sync with all registered peers (多点同步)
-            // 需要在 MainActor 上访问 peerManager 和 registrationService
             let registeredPeers = await MainActor.run {
-                let allPeers = self.peerManager.allPeers
-                // 过滤出已注册且在线的对等点（离线设备不进行同步）
-                return allPeers.filter { peerInfo in
+                self.peerManager.allPeers.filter { peerInfo in
                     self.p2pNode.registrationService.isRegistered(peerInfo.peerIDString)
                         && self.peerManager.isOnline(peerInfo.peerIDString)
                 }
@@ -188,9 +174,8 @@ extension SyncManager {
                         folder.id, status: .synced, message: "等待发现对等点...", progress: 0.0)
                 }
             } else {
-                // 多点同步：同时向所有已注册且在线的对等点同步
                 for peerInfo in registeredPeers {
-                    syncWithPeer(peer: peerInfo.peerID, folder: folder)
+                    syncWithPeer(peer: peerInfo.peerID, folder: folder, precomputedState: precomputed)
                 }
                 
                 // 定期检查同步状态，如果所有同步都完成但状态仍然是 .syncing，重置状态
@@ -215,7 +200,7 @@ extension SyncManager {
                             if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
                                 let currentFolder = self.folders[index]
                                 if currentFolder.status == .syncing {
-                                    print("[SyncManager] 🔄 所有同步已完成但状态仍为 .syncing，重置状态: \(folder.syncID)")
+                                    AppLogger.syncPrint("[SyncManager] 🔄 所有同步已完成但状态仍为 .syncing，重置状态: \(folder.syncID)")
                                     self.updateFolderStatus(
                                         folder.id, status: .synced, message: "同步完成", progress: 1.0)
                                 }

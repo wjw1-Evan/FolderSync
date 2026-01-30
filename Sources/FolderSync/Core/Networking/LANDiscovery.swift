@@ -58,13 +58,13 @@ public class LANDiscovery {
                 listener.stateUpdateHandler = { state in
                     switch state {
                     case .ready:
-                        print("[LANDiscovery] ✅ Listener ready on port \(servicePortStatic)")
+                        AppLogger.syncPrint("[LANDiscovery] ✅ Listener ready on port \(servicePortStatic)")
                     case .failed(let error):
-                        print("[LANDiscovery] ❌ Listener failed: \(error)")
+                        AppLogger.syncPrint("[LANDiscovery] ❌ Listener failed: \(error)")
                     case .waiting(let error):
-                        print("[LANDiscovery] ⚠️ Listener waiting: \(error)")
+                        AppLogger.syncPrint("[LANDiscovery] ⚠️ Listener waiting: \(error)")
                     case .cancelled:
-                        print("[LANDiscovery] ℹ️ Listener cancelled")
+                        AppLogger.syncPrint("[LANDiscovery] ℹ️ Listener cancelled")
                     default:
                         break
                     }
@@ -72,7 +72,7 @@ public class LANDiscovery {
                 listener.start(queue: sharedQueue)
                 sharedListener = listener
             } catch {
-                print("[LANDiscovery] ❌ Failed to start listener: \(error)")
+                AppLogger.syncPrint("[LANDiscovery] ❌ Failed to start listener: \(error)")
             }
         }
     }
@@ -86,7 +86,7 @@ public class LANDiscovery {
             case .ready:
                 receiveSharedMessage(from: connection)
             case .failed(let error):
-                print("[LANDiscovery] Connection failed: \(error)")
+                AppLogger.syncPrint("[LANDiscovery] Connection failed: \(error)")
                 connection.cancel()
             default:
                 break
@@ -101,7 +101,7 @@ public class LANDiscovery {
                 if case .posix(let code) = error, code == .ECANCELED {
                     // ignore
                 } else {
-                    print("[LANDiscovery] ⚠️ 接收错误: \(error)")
+                    AppLogger.syncPrint("[LANDiscovery] ⚠️ 接收错误: \(error)")
                 }
                 connection.cancel()
                 return
@@ -163,7 +163,6 @@ public class LANDiscovery {
         // 检查是否是发现请求
         if message.contains("\"type\":\"discovery_request\"") {
             // 收到发现请求，立即广播自己的信息作为响应
-            print("[LANDiscovery] 🔍 [DEBUG] 收到发现请求，来自: \(address)")
             sendBroadcast(peerID: myPeerID, listenAddresses: currentListenAddresses)
             return
         }
@@ -172,14 +171,10 @@ public class LANDiscovery {
         if let peerInfo = parseDiscoveryMessage(message) {
             // Ignore our own broadcasts
             if peerInfo.peerID != myPeerID {
-                print("[LANDiscovery] 📨 [DEBUG] 收到广播消息: peerID=\(peerInfo.peerID.prefix(12))..., 地址=\(address), 监听地址数=\(peerInfo.addresses.count), syncID数=\(peerInfo.syncIDs.count)")
-                // 每次收到广播都触发回调，确保 lastSeenTime 被更新
                 onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses, peerInfo.syncIDs)
-            } else {
-                print("[LANDiscovery] ⏭️ [DEBUG] 忽略自己的广播: peerID=\(peerInfo.peerID.prefix(12))...")
             }
         } else {
-            print("[LANDiscovery] ⚠️ [DEBUG] 无法解析广播消息: 消息长度=\(message.count), 前100字符=\(message.prefix(100))")
+            AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法解析广播消息: 消息长度=\(message.count)")
         }
     }
     
@@ -213,23 +208,23 @@ public class LANDiscovery {
                 guard let self = self else { return }
                 switch state {
                 case .ready:
-                    print("[LANDiscovery] ✅ Listener ready on port \(self.servicePort)")
+                    AppLogger.syncPrint("[LANDiscovery] ✅ Listener ready on port \(self.servicePort)")
                     // 监听器就绪后，立即发送一次广播请求，触发其他设备响应
                     self.sendDiscoveryRequest()
                 case .failed(let error):
-                    print("[LANDiscovery] ❌ Listener failed: \(error)")
+                    AppLogger.syncPrint("[LANDiscovery] ❌ Listener failed: \(error)")
                     // 监听器失败时，尝试重新启动
                     if self.isRunning {
-                        print("[LANDiscovery] 🔄 尝试重新启动监听器...")
+                        AppLogger.syncPrint("[LANDiscovery] 🔄 尝试重新启动监听器...")
                         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
                             guard let self = self, self.isRunning else { return }
                             self.startListener(peerID: peerID)
                         }
                     }
                 case .waiting(let error):
-                    print("[LANDiscovery] ⚠️ Listener waiting: \(error)")
+                    AppLogger.syncPrint("[LANDiscovery] ⚠️ Listener waiting: \(error)")
                 case .cancelled:
-                    print("[LANDiscovery] ℹ️ Listener cancelled")
+                    AppLogger.syncPrint("[LANDiscovery] ℹ️ Listener cancelled")
                 default:
                     break
                 }
@@ -238,7 +233,7 @@ public class LANDiscovery {
             listener.start(queue: DispatchQueue.global(qos: .userInitiated))
             self.listener = listener
         } catch {
-            print("[LANDiscovery] ❌ Failed to start listener: \(error)")
+            AppLogger.syncPrint("[LANDiscovery] ❌ Failed to start listener: \(error)")
         }
     }
     
@@ -276,12 +271,12 @@ public class LANDiscovery {
                     self?.removeConnection(connection)
                     
                     if let error = error {
-                        print("[LANDiscovery] Discovery request send error: \(error)")
+                        AppLogger.syncPrint("[LANDiscovery] Discovery request send error: \(error)")
                     }
                     // 减少发现请求的日志输出
                 })
             case .failed(let error):
-                print("[LANDiscovery] Discovery request connection failed: \(error)")
+                AppLogger.syncPrint("[LANDiscovery] Discovery request connection failed: \(error)")
                 connection.cancel()
                 // 连接失败后，从数组中移除
                 self.removeConnection(connection)
@@ -304,7 +299,7 @@ public class LANDiscovery {
             }
             
             if shouldCancel {
-                print("[LANDiscovery] ⚠️ Discovery request timeout, cancelling connection")
+                AppLogger.syncPrint("[LANDiscovery] ⚠️ Discovery request timeout, cancelling connection")
                 connection.cancel()
                 self?.removeConnection(connection)
             }
@@ -317,7 +312,7 @@ public class LANDiscovery {
             case .ready:
                 self?.receiveMessage(from: connection, myPeerID: myPeerID)
             case .failed(let error):
-                print("[LANDiscovery] Connection failed: \(error)")
+                AppLogger.syncPrint("[LANDiscovery] Connection failed: \(error)")
                 connection.cancel()
             default:
                 break
@@ -343,7 +338,7 @@ public class LANDiscovery {
                 if case .posix(let code) = error, code == .ECANCELED {
                     // 正常取消，不需要日志
                 } else {
-                    print("[LANDiscovery] ⚠️ 接收错误: \(error)")
+                    AppLogger.syncPrint("[LANDiscovery] ⚠️ 接收错误: \(error)")
                 }
                 connection.cancel()
                 return
@@ -371,12 +366,12 @@ public class LANDiscovery {
                             
                             // 验证 PeerID
                             if peerInfo.peerID.isEmpty {
-                                print("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空，忽略此对等点")
+                                AppLogger.syncPrint("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空，忽略此对等点")
                                 return
                             }
                             
                             if peerInfo.peerID.count < 10 {
-                                print("[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
+                                AppLogger.syncPrint("[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
                             }
                             
                             // 减少日志输出，只在首次发现或每100次输出一次
@@ -385,7 +380,7 @@ public class LANDiscovery {
                         }
                     } else {
                         // 减少解析失败的日志输出，只在真正有问题时输出
-                        // print("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
+                        // AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
                     }
                 }
             }
@@ -441,10 +436,7 @@ public class LANDiscovery {
     }
     
     private func sendBroadcast(peerID: String, listenAddresses: [String]) {
-        guard isRunning else {
-            print("[LANDiscovery] ⚠️ [DEBUG] 广播已停止，跳过发送")
-            return
-        }
+        guard isRunning else { return }
         
         // 验证地址有效性
         let validAddresses = listenAddresses.filter { addr in
@@ -455,20 +447,13 @@ public class LANDiscovery {
         }
         
         if validAddresses.isEmpty && !listenAddresses.isEmpty {
-            print("[LANDiscovery] ⚠️ [DEBUG] 警告: 没有有效地址可广播（所有地址端口为0或格式错误），原始地址数=\(listenAddresses.count)")
-            // 仍然发送广播，但地址列表为空，让接收方知道设备存在但地址无效
+            // 仍然发送广播，但地址列表为空
         }
         
         let message = createDiscoveryMessage(peerID: peerID, listenAddresses: validAddresses, syncIDs: currentSyncIDs)
         guard let data = message.data(using: .utf8) else {
-            print("[LANDiscovery] ⚠️ [DEBUG] 无法创建广播消息数据")
+            AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法创建广播消息数据")
             return
-        }
-        
-        // 添加调试日志（每次广播都记录）
-        print("[LANDiscovery] 📡 [DEBUG] 发送广播: peerID=\(peerID.prefix(12))..., 有效地址数=\(validAddresses.count), 消息大小=\(data.count) bytes")
-        if !validAddresses.isEmpty {
-            print("[LANDiscovery] 📡 [DEBUG] 广播地址列表: \(validAddresses.joined(separator: ", "))")
         }
         
         let parameters = NWParameters.udp
@@ -483,26 +468,18 @@ public class LANDiscovery {
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                print("[LANDiscovery] ✅ [DEBUG] 广播连接就绪，开始发送数据")
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
-                        print("[LANDiscovery] ❌ [DEBUG] 广播发送错误: \(error)")
-                    } else {
-                        print("[LANDiscovery] ✅ [DEBUG] 广播发送成功: peerID=\(peerID.prefix(12))..., 数据大小=\(data.count) bytes")
+                        AppLogger.syncPrint("[LANDiscovery] ❌ 广播发送错误: \(error)")
                     }
                     connection.cancel()
                 })
             case .failed(let error):
-                print("[LANDiscovery] ❌ [DEBUG] 广播连接失败: \(error)")
+                AppLogger.syncPrint("[LANDiscovery] ❌ 广播连接失败: \(error)")
                 connection.cancel()
-            case .cancelled:
-                print("[LANDiscovery] ℹ️ [DEBUG] 广播连接已取消")
-                break
-            case .waiting(let nwError):
-                print("[LANDiscovery] ⏳ [DEBUG] 广播连接等待中: \(nwError)")
+            case .cancelled, .waiting, .preparing:
                 break
             default:
-                print("[LANDiscovery] ℹ️ [DEBUG] 广播连接状态变化: \(state)")
                 break
             }
         }
@@ -528,7 +505,7 @@ public class LANDiscovery {
         
         if validAddresses.isEmpty && !listenAddresses.isEmpty {
             // 只在真正有问题时输出警告
-            print("[LANDiscovery] ⚠️ 警告: 所有地址都被过滤，没有有效地址可广播")
+            AppLogger.syncPrint("[LANDiscovery] ⚠️ 警告: 所有地址都被过滤，没有有效地址可广播")
         }
         
         // 限制 syncID 数量，最多 20 个（避免消息过大）
@@ -541,23 +518,23 @@ public class LANDiscovery {
     
     private func parseDiscoveryMessage(_ message: String) -> (peerID: String, service: String, addresses: [String], syncIDs: [String])? {
         guard let data = message.data(using: .utf8) else {
-            print("[LANDiscovery] ❌ 无法将消息转换为 UTF-8 数据")
+            AppLogger.syncPrint("[LANDiscovery] ❌ 无法将消息转换为 UTF-8 数据")
             return nil
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            print("[LANDiscovery] ❌ 无法解析 JSON: \(message.prefix(100))...")
+            AppLogger.syncPrint("[LANDiscovery] ❌ 无法解析 JSON: \(message.prefix(100))...")
             return nil
         }
         
         guard let peerID = json["peerID"] as? String else {
-            print("[LANDiscovery] ❌ JSON 中缺少 'peerID' 字段")
-            print("[LANDiscovery]   JSON 键: \(json.keys.joined(separator: ", "))")
+            AppLogger.syncPrint("[LANDiscovery] ❌ JSON 中缺少 'peerID' 字段")
+            AppLogger.syncPrint("[LANDiscovery]   JSON 键: \(json.keys.joined(separator: ", "))")
             return nil
         }
         
         guard let service = json["service"] as? String, service == "foldersync" else {
-            print("[LANDiscovery] ⚠️ 服务不匹配或缺失: \(json["service"] ?? "nil")")
+            AppLogger.syncPrint("[LANDiscovery] ⚠️ 服务不匹配或缺失: \(json["service"] ?? "nil")")
             return nil
         }
         
@@ -566,7 +543,7 @@ public class LANDiscovery {
         
         // 验证解析结果
         if peerID.isEmpty {
-            print("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空")
+            AppLogger.syncPrint("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空")
             return nil
         }
         

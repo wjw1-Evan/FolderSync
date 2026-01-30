@@ -103,14 +103,14 @@ public class PeerManager: ObservableObject {
                     peers[peerIDString] = peerInfo
                     // 初始化设备状态为离线（等待状态检查）
                     deviceStatuses[peerIDString] = .offline
-                    print("[PeerManager] ✅ 已恢复 peer: \(peerIDString.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
+                    AppLogger.syncPrint("[PeerManager] ✅ 已恢复 peer: \(peerIDString.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
                 }
             }
             if !persistentPeers.isEmpty {
-                print("[PeerManager] ✅ 成功从持久化存储恢复 \(persistentPeers.count) 个 peer")
+                AppLogger.syncPrint("[PeerManager] ✅ 成功从持久化存储恢复 \(persistentPeers.count) 个 peer")
             }
         } catch {
-            print("[PeerManager] ❌ 加载持久化 peer 失败: \(error)")
+            AppLogger.syncPrint("[PeerManager] ❌ 加载持久化 peer 失败: \(error)")
         }
     }
     
@@ -136,7 +136,7 @@ public class PeerManager: ObservableObject {
         do {
             try persistentStore.savePeers(peers)
         } catch {
-            print("[PeerManager] ❌ 保存 peer 到持久化存储失败: \(error)")
+            AppLogger.syncPrint("[PeerManager] ❌ 保存 peer 到持久化存储失败: \(error)")
         }
     }
     
@@ -246,14 +246,10 @@ public class PeerManager: ObservableObject {
         
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
-            let oldAddressCount = existing.addresses.count
             // 只有当新地址不为空时才更新地址，避免用空数组覆盖已有地址
             if !addresses.isEmpty {
                 existing.updateAddresses(addresses)
                 shouldSave = true
-                print("[PeerManager] 🔄 [DEBUG] 更新现有 Peer: \(peerIDString.prefix(12))..., 旧地址数=\(oldAddressCount), 新地址数=\(addresses.count)")
-            } else {
-                print("[PeerManager] ℹ️ [DEBUG] Peer 已存在但地址为空，跳过更新: \(peerIDString.prefix(12))...")
             }
             // 注意：即使地址为空，收到广播也应该更新 lastSeenTime
             // 这表示设备仍然在线，只是地址可能暂时不可用
@@ -269,7 +265,6 @@ public class PeerManager: ObservableObject {
                 deviceStatuses[peerIDString] = .offline
             }
             shouldSave = true
-            print("[PeerManager] ➕ [DEBUG] 添加新 Peer: \(peerIDString.prefix(12))..., 地址数=\(addresses.count), 初始状态=离线")
         }
         
         // 保存到持久化存储（带防抖）
@@ -282,70 +277,44 @@ public class PeerManager: ObservableObject {
     
     /// 更新 Peer 地址
     public func updateAddresses(_ peerIDString: String, addresses: [Multiaddr]) {
-        guard var peer = peers[peerIDString] else {
-            print("[PeerManager] ⚠️ [DEBUG] 尝试更新不存在的 Peer 地址: \(peerIDString.prefix(12))...")
-            return
-        }
+        guard var peer = peers[peerIDString] else { return }
         let oldAddressSet = Set(peer.addresses.map { $0.description })
-        let oldCount = peer.addresses.count
         peer.updateAddresses(addresses)
         peers[peerIDString] = peer
         
         // 如果地址发生变化，保存到持久化存储（带防抖）
         let newAddressSet = Set(peer.addresses.map { $0.description })
         if oldAddressSet != newAddressSet {
-            print("[PeerManager] 🔄 [DEBUG] Peer 地址已更新: \(peerIDString.prefix(12))..., 旧地址数=\(oldCount), 新地址数=\(addresses.count)")
             savePeersDebounced()
-        } else {
-            print("[PeerManager] ℹ️ [DEBUG] Peer 地址未变化: \(peerIDString.prefix(12))...")
         }
     }
     
     /// 标记 Peer 为已注册
     public func markAsRegistered(_ peerIDString: String) {
-        guard var peer = peers[peerIDString] else {
-            print("[PeerManager] ⚠️ [DEBUG] 尝试标记不存在的 Peer 为已注册: \(peerIDString.prefix(12))...")
-            return
-        }
-        let wasRegistered = peer.isRegistered
+        guard var peer = peers[peerIDString] else { return }
         peer.markAsRegistered()
         peers[peerIDString] = peer
-        print("[PeerManager] ✅ [DEBUG] Peer 标记为已注册: \(peerIDString.prefix(12))..., 之前状态=\(wasRegistered ? "已注册" : "未注册")")
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }
     
     /// 更新 Peer 的 syncIDs（从广播消息中获取）
     public func updateSyncIDs(_ peerIDString: String, syncIDs: [String]) {
-        guard var peer = peers[peerIDString] else {
-            print("[PeerManager] ⚠️ [DEBUG] 尝试更新不存在的 Peer syncIDs: \(peerIDString.prefix(12))...")
-            return
-        }
+        guard var peer = peers[peerIDString] else { return }
         let oldSyncIDs = Set(peer.syncIDs)
         let newSyncIDs = Set(syncIDs)
         if oldSyncIDs != newSyncIDs {
             peer.syncIDs = syncIDs
             peers[peerIDString] = peer
-            print("[PeerManager] 🔄 [DEBUG] Peer syncIDs 已更新: \(peerIDString.prefix(12))..., 旧数量=\(oldSyncIDs.count), 新数量=\(newSyncIDs.count)")
         }
     }
     
     /// 更新 Peer 在线状态
     public func updateOnlineStatus(_ peerIDString: String, isOnline: Bool) {
-        guard var peer = peers[peerIDString] else {
-            print("[PeerManager] ⚠️ [DEBUG] 尝试更新不存在的 Peer 在线状态: \(peerIDString.prefix(12))...")
-            return
-        }
-        let oldStatus = peer.isOnline
+        guard var peer = peers[peerIDString] else { return }
         peer.updateOnlineStatus(isOnline)
         peers[peerIDString] = peer
-        
-        // 同步更新设备状态
         deviceStatuses[peerIDString] = isOnline ? .online : .offline
-        
-        if oldStatus != isOnline {
-            print("[PeerManager] 🔄 [DEBUG] Peer 在线状态已更新: \(peerIDString.prefix(12))..., \(oldStatus ? "在线" : "离线") -> \(isOnline ? "在线" : "离线")")
-        }
         
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
@@ -353,7 +322,6 @@ public class PeerManager: ObservableObject {
     
     /// 更新设备状态
     public func updateDeviceStatus(_ peerIDString: String, status: DeviceStatus) {
-        let oldStatus = deviceStatuses[peerIDString]
         deviceStatuses[peerIDString] = status
         
         // 同步更新 PeerInfo 的在线状态
@@ -361,34 +329,15 @@ public class PeerManager: ObservableObject {
             let isOnline = (status == .online)
             peer.updateOnlineStatus(isOnline)
             peers[peerIDString] = peer
-            
-            if oldStatus != status {
-                let statusStr = {
-                    switch status {
-                    case .online: return "在线"
-                    case .offline: return "离线"
-                    case .connecting: return "连接中"
-                    case .disconnected: return "已断开"
-                    }
-                }()
-                print("[PeerManager] 🔄 [DEBUG] 设备状态已更新: \(peerIDString.prefix(12))..., \(oldStatus.map { "\($0)" } ?? "nil") -> \(statusStr)")
-            }
-        } else {
-            print("[PeerManager] ⚠️ [DEBUG] 尝试更新不存在的设备状态: \(peerIDString.prefix(12))...")
         }
         
-        // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }
     
     /// 移除 Peer
     public func removePeer(_ peerIDString: String) {
-        let existed = peers[peerIDString] != nil
         peers.removeValue(forKey: peerIDString)
         deviceStatuses.removeValue(forKey: peerIDString)
-        if existed {
-            print("[PeerManager] 🗑️ [DEBUG] 已删除peer: \(peerIDString.prefix(12))...")
-        }
         // 保存到持久化存储
         Task {
             await savePeers()
@@ -408,7 +357,7 @@ public class PeerManager: ObservableObject {
     /// 更新所有 Peer 的最后可见时间
     public func updateLastSeen(_ peerIDString: String) {
         guard var peer = peers[peerIDString] else {
-            print("[PeerManager] ⚠️ 尝试更新不存在的 peer 的 lastSeenTime: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint("[PeerManager] ⚠️ 尝试更新不存在的 peer 的 lastSeenTime: \(peerIDString.prefix(12))...")
             return
         }
         let oldTime = peer.lastSeenTime
@@ -416,7 +365,7 @@ public class PeerManager: ObservableObject {
         peers[peerIDString] = peer
         let timeDiff = Date().timeIntervalSince(oldTime)
         if timeDiff > 5.0 {
-            print("[PeerManager] ✅ 更新 lastSeenTime: \(peerIDString.prefix(12))... (距离上次: \(Int(timeDiff))秒)")
+            AppLogger.syncPrint("[PeerManager] ✅ 更新 lastSeenTime: \(peerIDString.prefix(12))... (距离上次: \(Int(timeDiff))秒)")
         }
         // 保存到持久化存储（带防抖）
         savePeersDebounced()

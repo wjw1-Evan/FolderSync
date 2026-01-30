@@ -32,36 +32,35 @@ public class PersistentPeerStore {
         try? fileManager.createDirectory(at: folderSyncDir, withIntermediateDirectories: true)
     }
     
-    /// 保存 peer 信息到文件
+    /// 保存 peer 信息到文件（不打印每次保存，避免刷屏）
     func savePeers(_ peers: [String: PeerInfo]) throws {
         let persistentPeers = peers.values.map { PersistentPeerInfo(from: $0) }
         let data = try JSONEncoder().encode(persistentPeers)
         try data.write(to: peersFile, options: [.atomic])
-        print("[PersistentPeerStore] ✅ 已保存 \(persistentPeers.count) 个 peer 到文件")
     }
     
     /// 从文件加载 peer 信息
     func loadPeers() throws -> [PersistentPeerInfo] {
         guard fileManager.fileExists(atPath: peersFile.path) else {
-            print("[PersistentPeerStore] ℹ️ Peer 存储文件不存在，返回空列表")
+            AppLogger.syncPrint("[PersistentPeerStore] ℹ️ Peer 存储文件不存在，返回空列表")
             return []
         }
         
         guard let data = try? Data(contentsOf: peersFile) else {
-            print("[PersistentPeerStore] ⚠️ 无法读取 peer 存储文件")
+            AppLogger.syncPrint("[PersistentPeerStore] ⚠️ 无法读取 peer 存储文件")
             return []
         }
         
         do {
             let peers = try JSONDecoder().decode([PersistentPeerInfo].self, from: data)
-            print("[PersistentPeerStore] ✅ 成功加载 \(peers.count) 个 peer")
+            AppLogger.syncPrint("[PersistentPeerStore] ✅ 成功加载 \(peers.count) 个 peer")
             return peers
         } catch {
-            print("[PersistentPeerStore] ❌ 解析 peer 存储文件失败: \(error)")
+            AppLogger.syncPrint("[PersistentPeerStore] ❌ 解析 peer 存储文件失败: \(error)")
             // 备份损坏的文件
             let backupFile = peersFile.appendingPathExtension("corrupted.\(Int(Date().timeIntervalSince1970)).backup")
             try? data.write(to: backupFile, options: [.atomic])
-            print("[PersistentPeerStore] 💾 已备份损坏的文件到: \(backupFile.lastPathComponent)")
+            AppLogger.syncPrint("[PersistentPeerStore] 💾 已备份损坏的文件到: \(backupFile.lastPathComponent)")
             return []
         }
     }
@@ -70,7 +69,7 @@ public class PersistentPeerStore {
     func convertToPeerInfo(_ persistent: PersistentPeerInfo) -> (peerID: PeerID, addresses: [Multiaddr], isRegistered: Bool)? {
         // 解析 PeerID
         guard let peerID = PeerID(cid: persistent.peerIDString) else {
-            print("[PersistentPeerStore] ⚠️ 无法解析 PeerID: \(persistent.peerIDString)")
+            AppLogger.syncPrint("[PersistentPeerStore] ⚠️ 无法解析 PeerID: \(persistent.peerIDString)")
             return nil
         }
         
@@ -80,7 +79,7 @@ public class PersistentPeerStore {
             if let addr = try? Multiaddr(addrStr) {
                 addresses.append(addr)
             } else {
-                print("[PersistentPeerStore] ⚠️ 无法解析地址: \(addrStr)")
+                AppLogger.syncPrint("[PersistentPeerStore] ⚠️ 无法解析地址: \(addrStr)")
             }
         }
         

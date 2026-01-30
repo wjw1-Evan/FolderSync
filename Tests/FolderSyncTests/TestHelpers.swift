@@ -1,5 +1,4 @@
 import Foundation
-import XCTest
 @testable import FolderSync
 
 /// 测试辅助工具类
@@ -27,17 +26,6 @@ class TestHelpers {
         try data.write(to: url)
     }
     
-    /// 创建测试文件夹及其内容
-    static func createTestFolder(at url: URL, files: [String: String]) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        for (relativePath, content) in files {
-            let fileURL = url.appendingPathComponent(relativePath)
-            let parentDir = fileURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-            try createTestFile(at: fileURL, content: content)
-        }
-    }
-    
     /// 读取文件内容
     static func readFileContent(at url: URL) throws -> String {
         return try String(contentsOf: url, encoding: .utf8)
@@ -51,6 +39,29 @@ class TestHelpers {
     /// 检查文件是否存在
     static func fileExists(at url: URL) -> Bool {
         return FileManager.default.fileExists(atPath: url.path)
+    }
+    
+    /// 在目录下用文件名或 NFD 形式查找文件并读取内容（macOS 文件名常为 NFD，与字面量 NFC 可能不一致）
+    static func readFileContent(in directory: URL, filename: String) -> String? {
+        let variants = [filename, filename.decomposedStringWithCanonicalMapping, filename.precomposedStringWithCanonicalMapping]
+        for name in variants {
+            let url = directory.appendingPathComponent(name)
+            guard fileExists(at: url), let content = try? readFileContent(at: url) else { continue }
+            return content
+        }
+        return nil
+    }
+    
+    /// 在目录下是否存在内容为指定字符串的文件（不依赖路径，用于特殊字符文件名同步校验）
+    static func hasFileWithContent(in directory: URL, content expectedContent: String) -> Bool {
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: .skipsHiddenFiles) else { return false }
+        for url in urls {
+            var isRegular = false
+            _ = (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile.map { isRegular = $0 }
+            guard isRegular, let content = try? readFileContent(at: url) else { continue }
+            if content == expectedContent { return true }
+        }
+        return false
     }
     
     /// 检查目录是否存在
@@ -95,30 +106,7 @@ class TestHelpers {
         return false
     }
     
-    /// 等待 P2P 节点启动（检查节点是否已准备好）
-    @MainActor
-    static func waitForP2PNodeReady(
-        syncManager: SyncManager,
-        timeout: TimeInterval = 10.0
-    ) async -> Bool {
-        return await waitForCondition(timeout: timeout) {
-            syncManager.p2pNode.peerID != nil
-        }
-    }
-    
-    /// 等待 peer 发现（检查是否有其他 peer）
-    @MainActor
-    static func waitForPeerDiscovery(
-        syncManager: SyncManager,
-        expectedCount: Int = 1,
-        timeout: TimeInterval = 15.0
-    ) async -> Bool {
-        return await waitForCondition(timeout: timeout) {
-            syncManager.peerManager.allPeers.count >= expectedCount
-        }
-    }
-    
-    /// 等待同步完成
+    /// 等待同步完成（synced 或 error 时立即返回，否则轮询直至超时）
     static func waitForSyncCompletion(
         syncManager: SyncManager,
         folderID: UUID,
@@ -126,25 +114,33 @@ class TestHelpers {
     ) async -> Bool {
         let startTime = Date()
         while Date().timeIntervalSince(startTime) < timeout {
-            await MainActor.run {
-                if let folder = syncManager.folders.first(where: { $0.id == folderID }) {
-                    if folder.status == .synced || folder.status == .error {
-                        return
-                    }
+            let done = await MainActor.run {
+                guard let folder = syncManager.folders.first(where: { $0.id == folderID }) else { return false }
+                return folder.status == .synced || folder.status == .error
+            }
+            if done {
+                return await MainActor.run {
+                    (syncManager.folders.first(where: { $0.id == folderID })).map { $0.status == .synced } ?? false
                 }
             }
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
         }
-        
-        // 最后检查一次状态
         return await MainActor.run {
-            if let folder = syncManager.folders.first(where: { $0.id == folderID }) {
-                return folder.status == .synced
-            }
-            return false
+            (syncManager.folders.first(where: { $0.id == folderID })).map { $0.status == .synced } ?? false
         }
     }
     
+    /// 显式触发同步并等待完成（用于不依赖 FSEvents 的测试）
+    @MainActor
+    static func triggerSyncAndWait(
+        syncManager: SyncManager,
+        folder: SyncFolder,
+        timeout: TimeInterval = 30.0
+    ) async -> Bool {
+        syncManager.triggerSync(for: folder)
+        return await waitForSyncCompletion(syncManager: syncManager, folderID: folder.id, timeout: timeout)
+    }
+
     /// 创建测试用的 SyncFolder
     static func createTestSyncFolder(
         syncID: String = "test\(UUID().uuidString.prefix(8))",
@@ -178,128 +174,5 @@ class TestHelpers {
         }
         
         return data
-    }
-    
-    /// 比较两个目录的内容是否一致
-    static func compareDirectories(_ dir1: URL, _ dir2: URL) -> Bool {
-        let files1 = getAllFiles(in: dir1)
-        let files2 = getAllFiles(in: dir2)
-        
-        guard files1.count == files2.count else {
-            return false
-        }
-        
-        for file1 in files1 {
-            let relativePath = file1.path.replacingOccurrences(of: dir1.path + "/", with: "")
-            let file2 = dir2.appendingPathComponent(relativePath)
-            
-            guard fileExists(at: file2) else {
-                return false
-            }
-            
-            do {
-                let data1 = try readFileData(at: file1)
-                let data2 = try readFileData(at: file2)
-                guard data1 == data2 else {
-                    return false
-                }
-            } catch {
-                return false
-            }
-        }
-        
-        return true
-    }
-    
-    /// 获取文件的相对路径（相对于基础目录）
-    static func getRelativePath(_ fileURL: URL, baseDirectory: URL) -> String {
-        let basePath = baseDirectory.path
-        let filePath = fileURL.path
-        guard filePath.hasPrefix(basePath) else {
-            return filePath
-        }
-        var relativePath = String(filePath.dropFirst(basePath.count))
-        if relativePath.hasPrefix("/") {
-            relativePath = String(relativePath.dropFirst())
-        }
-        return relativePath
-    }
-}
-
-/// Mock P2P 节点 - 用于测试
-class MockP2PNode {
-    var peerID: PeerID?
-    var isOnline: Bool = true
-    var shouldFailRequests: Bool = false
-    var requestDelay: TimeInterval = 0.0
-    
-    init(peerID: PeerID? = nil) {
-        self.peerID = peerID ?? PeerID.generate()
-    }
-    
-    func setOnline(_ online: Bool) {
-        isOnline = online
-    }
-    
-    func setRequestFailure(_ shouldFail: Bool) {
-        shouldFailRequests = shouldFail
-    }
-    
-    func setRequestDelay(_ delay: TimeInterval) {
-        requestDelay = delay
-    }
-}
-
-/// 测试用的网络服务 Mock
-class MockNetworkService {
-    var isConnected: Bool = true
-    var shouldSimulateNetworkFailure: Bool = false
-    var networkDelay: TimeInterval = 0.0
-    
-    func setConnected(_ connected: Bool) {
-        isConnected = connected
-    }
-    
-    func simulateNetworkFailure(_ shouldFail: Bool) {
-        shouldSimulateNetworkFailure = shouldFail
-    }
-    
-    func setNetworkDelay(_ delay: TimeInterval) {
-        networkDelay = delay
-    }
-}
-
-/// 测试扩展 - 用于 XCTest
-extension XCTestCase {
-    /// 创建临时目录并在测试后清理
-    func withTempDirectory(_ block: (URL) throws -> Void) rethrows {
-        let tempDir = try! TestHelpers.createTempDirectory()
-        defer {
-            TestHelpers.cleanupTempDirectory(tempDir)
-        }
-        try block(tempDir)
-    }
-    
-    /// 等待异步操作完成
-    func waitForAsync(timeout: TimeInterval = 10.0, _ block: @escaping () async -> Bool) async throws {
-        let expectation = expectation(description: "Async operation")
-        var result = false
-        
-        Task {
-            result = await block()
-            expectation.fulfill()
-        }
-        
-        await fulfillment(of: [expectation], timeout: timeout)
-        XCTAssertTrue(result, "异步操作未在超时时间内完成")
-    }
-    
-    /// 等待条件满足
-    func waitForCondition(
-        timeout: TimeInterval = 10.0,
-        condition: @escaping () -> Bool
-    ) async throws {
-        let satisfied = await TestHelpers.waitForCondition(timeout: timeout, condition: condition)
-        XCTAssertTrue(satisfied, "条件未在超时时间内满足")
     }
 }

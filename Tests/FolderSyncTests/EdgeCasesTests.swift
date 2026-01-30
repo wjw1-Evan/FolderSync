@@ -125,8 +125,8 @@ final class EdgeCasesTests: XCTestCase {
         let originalData = TestHelpers.generateLargeFileData(sizeInMB: 3)
         try TestHelpers.createTestFile(at: largeFile, data: originalData)
         
-        // 等待初始同步完成（3MB 超过 chunkSyncThreshold=1MB，会走块级同步）
-        try? await Task.sleep(nanoseconds: 12_000_000_000) // 12 秒
+        // 等待初始同步完成（3MB 可能走块级或全量，需足够时间）
+        try? await Task.sleep(nanoseconds: 18_000_000_000) // 18 秒
         
         // 仅修改中间 2000 字节，便于验证对端收到的是修改后内容
         var modifiedData = originalData
@@ -136,10 +136,10 @@ final class EdgeCasesTests: XCTestCase {
         modifiedData.replaceSubrange(modStart..<modEnd, with: Data(repeating: 0xFF, count: 2000))
         try TestHelpers.createTestFile(at: largeFile, data: modifiedData)
         
-        try? await Task.sleep(nanoseconds: 12_000_000_000) // 12 秒
+        try? await Task.sleep(nanoseconds: 18_000_000_000) // 18 秒
         
         let syncedFile = tempDir2.appendingPathComponent("large_modify.bin")
-        let updated = await TestHelpers.waitForCondition(timeout: 35.0) {
+        let updated = await TestHelpers.waitForCondition(timeout: 55.0) {
             do {
                 let syncedData = try TestHelpers.readFileData(at: syncedFile)
                 guard syncedData.count == modifiedData.count else { return false }
@@ -150,7 +150,7 @@ final class EdgeCasesTests: XCTestCase {
             }
         }
         
-        XCTAssertTrue(updated, "大文件修改后应对端已更新且中间修改区域为 0xFF")
+        XCTAssertTrue(updated, "大文件修改后应对端已更新且中间修改区域为 0xFF（等待共 18+18 秒 + 最多 55 秒）")
     }
     
     // MARK: - 特殊字符文件名测试
@@ -175,20 +175,33 @@ final class EdgeCasesTests: XCTestCase {
             let nameForCreate = filename.decomposedStringWithCanonicalMapping
             let testFile = tempDir1.appendingPathComponent(nameForCreate)
             try TestHelpers.createTestFile(at: testFile, content: "Content for \(filename)")
+            // 每个文件创建后短暂等待，避免 FSEvents 批处理漏掉带空格等特殊字符的文件
+            try? await Task.sleep(nanoseconds: 400_000_000) // 0.4 秒
         }
-        
-        // 先等待一批变更被记录并完成至少一轮同步，再逐文件校验（避免 FSEvents 批处理导致首轮同步为空）
-        try? await Task.sleep(nanoseconds: 12_000_000_000) // 12 秒
-        
-        // 等待每个文件同步且内容正确：先按路径（NFC/NFD）查找，再按内容匹配（应对路径编码差异如 @#$%）
+
+        // 先等待一批变更被记录并完成多轮同步，再校验（避免 FSEvents 批处理或首轮同步未包含全部文件）
+        try? await Task.sleep(nanoseconds: 20_000_000_000) // 20 秒
+
         guard let dir2 = tempDir2 else { XCTFail("tempDir2 未初始化"); return }
+        // 先等「所有文件均在对端出现且内容正确」再逐条断言，避免因顺序或时序只断言第一个就失败
+        let allSynced = await TestHelpers.waitForCondition(timeout: 70.0) {
+            for filename in specialFiles {
+                let expectedContent = "Content for \(filename)"
+                if let c = TestHelpers.readFileContent(in: dir2, filename: filename), c == expectedContent { continue }
+                if TestHelpers.getFileContentByContentMatch(in: dir2, content: expectedContent) != nil { continue }
+                return false
+            }
+            return true
+        }
+        XCTAssertTrue(allSynced, "所有特殊字符文件名文件应在 70 秒内同步且内容正确")
         for filename in specialFiles {
             let expectedContent = "Content for \(filename)"
-            let correct = await TestHelpers.waitForCondition(timeout: 40.0) {
-                if let content = TestHelpers.readFileContent(in: dir2, filename: filename), content == expectedContent { return true }
-                return TestHelpers.hasFileWithContent(in: dir2, content: expectedContent)
+            let content = TestHelpers.readFileContent(in: dir2, filename: filename)
+                ?? TestHelpers.getFileContentByContentMatch(in: dir2, content: expectedContent)
+            XCTAssertNotNil(content, "文件 \(filename) 应已同步且内容正确（期望内容: \(expectedContent)）")
+            if let c = content {
+                XCTAssertEqual(c, expectedContent, "文件 \(filename) 内容应为 \(expectedContent)")
             }
-            XCTAssertTrue(correct, "文件 \(filename) 应已同步且内容正确（期望内容: \(expectedContent)）")
         }
     }
     

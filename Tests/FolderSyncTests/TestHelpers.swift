@@ -54,14 +54,19 @@ class TestHelpers {
     
     /// 在目录下是否存在内容为指定字符串的文件（不依赖路径，用于特殊字符文件名同步校验）
     static func hasFileWithContent(in directory: URL, content expectedContent: String) -> Bool {
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: .skipsHiddenFiles) else { return false }
+        getFileContentByContentMatch(in: directory, content: expectedContent) != nil
+    }
+
+    /// 在目录下按内容查找文件并返回其内容（用于文件名编码不一致时的校验）
+    static func getFileContentByContentMatch(in directory: URL, content expectedContent: String) -> String? {
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: .skipsHiddenFiles) else { return nil }
         for url in urls {
             var isRegular = false
             _ = (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile.map { isRegular = $0 }
             guard isRegular, let content = try? readFileContent(at: url) else { continue }
-            if content == expectedContent { return true }
+            if content == expectedContent { return content }
         }
-        return false
+        return nil
     }
     
     /// 检查目录是否存在

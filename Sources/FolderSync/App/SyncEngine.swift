@@ -1224,11 +1224,8 @@ class SyncEngine {
 
                     case .upload:
                         // 上传文件（覆盖远程）
-                        // 检查删除记录（双重保险），但允许冲突情况通过
-                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
-                            AppLogger.syncPrint("[SyncEngine] ⏭️ [upload] 文件已删除，跳过上传: 路径=\(path)")
-                            continue
-                        }
+                        // 注意：不再检查 deletedSet，因为 SyncDecisionEngine 已经根据 mtime 判定为复活
+                        // 如果 deletedSet 中包含该路径，说明是残留的删除记录，应当忽略，优先上传现有的本地文件
                         if let localMeta = localState?.metadata {
                             filesToUploadSet.insert(path)
                             filesToUpload.append((path, localMeta))
@@ -1240,7 +1237,7 @@ class SyncEngine {
                         break
 
                     case .conflict:
-                        // 冲突：需要先保存远程版本为冲突文件，然后再上传本地版本
+                        // 冲突：需要先保存远程版本为冲突文件，然后上传本地版本
                         // 重要：对于删除-修改冲突，即使文件在 deletedSet 中，也应该生成冲突文件
                         // 因为 SyncDecisionEngine 已经检测到并发冲突（删除记录的 VC 和文件的 VC 并发）
                         if let localMeta = localState?.metadata {
@@ -1257,12 +1254,6 @@ class SyncEngine {
                                 }
                                 filesToUploadSet.insert(path)
                                 filesToUpload.append((path, localMeta))
-                            } else if deletedSet.contains(path) || remoteDeletedPaths.contains(path)
-                            {
-                                // 其他冲突但文件已删除，跳过
-                                AppLogger.syncPrint(
-                                    "[SyncEngine] ⏭️ [upload] 冲突但文件已删除，跳过: 路径=\(path)")
-                                continue
                             } else {
                                 // 普通冲突（双方都修改），先保存远程版本为冲突文件，然后上传本地版本
                                 if let remoteMeta = remoteState?.metadata {
@@ -1275,11 +1266,9 @@ class SyncEngine {
 
                     case .uncertain:
                         // 无法确定：检查删除记录后再决定
-                        // 如果文件已删除，不应该上传
-                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
-                            AppLogger.syncPrint("[SyncEngine] ⏭️ [upload] 不确定但文件已删除，跳过: 路径=\(path)")
-                            continue
-                        }
+                        // 注意：如果文件在 deletedSet 中，但在本地存在（localState != nil），可能是复活
+                        // 这种情况下应该允许上传
+
                         // 如果本地有文件，但远程没有状态，且不在删除记录中，可能是新文件，应该上传
                         if let localMeta = localState?.metadata {
                             AppLogger.syncPrint(

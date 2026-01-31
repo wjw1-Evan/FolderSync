@@ -660,4 +660,13 @@ extension P2PNode: WebRTCManagerDelegate {
             }
         }
     }
+    // MARK: - Testing Helpers
+
+    /// 手动连接到指定对等点（仅用于测试或强制重连）
+    public func connect(to peerID: PeerID) async throws {
+        await ensureConnected(to: peerID.b58String)
+
+        // 不需要等待 DataChannel 就绪，ensureConnected 会启动连接过程
+        // 实际的连接完成通过 onPeerConnected 回调通知
+    }
 }

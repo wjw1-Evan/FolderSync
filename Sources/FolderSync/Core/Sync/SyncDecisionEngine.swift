@@ -72,7 +72,14 @@ class SyncDecisionEngine {
                 // 删除记录的 VC 更旧且时间差较大，下载远程文件（删除被覆盖）
                 return .download
             case .concurrent:
-                // 并发冲突，保守处理：保持删除，但记录冲突
+                // 并发冲突：如果远程文件明显比删除记录新，视为远程复活/新建，应该下载
+                let timeDiff = remoteMeta.mtime.timeIntervalSince(localDel.deletedAt)
+                if timeDiff > 1.0 {
+                    AppLogger.syncPrint(
+                        "[SyncDecisionEngine] 🔄 删除记录并发但远程文件更新（复活）: 路径=\(path), diff=\(timeDiff)s")
+                    return .download
+                }
+                // 否则保守处理：保持删除，但记录冲突
                 return .conflict
             }
         }

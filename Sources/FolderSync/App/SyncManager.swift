@@ -239,6 +239,7 @@ public class SyncManager: ObservableObject {
                         remoteSyncIDSet.contains(folder.syncID)
                     }
 
+                    /*
                     if !matchingFolders.isEmpty {
                         AppLogger.syncPrint(
                             "[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)"
@@ -248,6 +249,7 @@ public class SyncManager: ObservableObject {
                             "[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)"
                         )
                     }
+                    */
 
                     // 对于新对等点，只同步匹配的文件夹
                     // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹

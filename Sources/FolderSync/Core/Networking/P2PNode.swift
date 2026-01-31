@@ -604,6 +604,9 @@ extension P2PNode: WebRTCManagerDelegate {
                             "[P2PNode] 📡 Sending large response: \(responseFrameData.count / 1024) KB (id: \(frame.id))"
                         )
                     }
+
+                    // 确保 DataChannel 就绪后再发送响应
+                    _ = await self.webRTC.waitForDataChannelReady(for: peerID, timeout: 5.0)
                     try await self.webRTC.sendData(responseFrameData, to: peerID)
                 } catch {
                     AppLogger.syncPrint("[P2PNode] ❌ Handler error for req \(frame.id): \(error)")

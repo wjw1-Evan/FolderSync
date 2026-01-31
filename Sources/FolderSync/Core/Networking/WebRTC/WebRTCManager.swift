@@ -22,6 +22,13 @@ public class WebRTCManager: NSObject {
     private var peerConnections: [String: RTCPeerConnection] = [:]
     // peerID -> RTCDataChannel
     private var dataChannels: [String: RTCDataChannel] = [:]
+
+    // For reassembling incoming chunks: peerID -> [messageID: [index: data]]
+    private var chunkBuffers: [String: [String: [Int: Data]]] = [:]
+    // For tracking total chunks: peerID -> [messageID: totalCount]
+    private var chunkTotals: [String: [String: Int]] = [:]
+
+    private let maxChunkSize = 64 * 1024  // 64KB
     // Waiter class to allow reference comparison for CheckedContinuation
     // 包含线程安全的 resume 逻辑，确保 continuation 只被 resume 一次
     private class Waiter {
@@ -385,6 +392,45 @@ public class WebRTCManager: NSObject {
                 userInfo: [NSLocalizedDescriptionKey: "DataChannel not found for \(peerID)"])
         }
 
+        if data.count <= maxChunkSize {
+            // Send as a single complete message
+            var packet = Data([0])  // Type 0: Full message
+            packet.append(data)
+            try await sendRawData(packet, to: dc, peerID: peerID)
+        } else {
+            // Send in chunks
+            let messageID = UUID().uuidString
+            let totalChunks = Int(ceil(Double(data.count) / Double(maxChunkSize)))
+
+            AppLogger.syncPrint(
+                "[WebRTC] 📤 Sending large message to \(peerID.prefix(8)): \(data.count / 1024) KB, \(totalChunks) chunks"
+            )
+
+            for i in 0..<totalChunks {
+                let start = i * maxChunkSize
+                let end = min(start + maxChunkSize, data.count)
+                let chunkData = data.subdata(in: start..<end)
+
+                var packet = Data([1])  // Type 1: Chunk
+                // Message ID (use first 8 chars for brevity, or full string)
+                if let idData = messageID.data(using: .utf8) {
+                    let idLen = UInt8(idData.count)
+                    packet.append(Data([idLen]))
+                    packet.append(idData)
+                }
+
+                var index = Int32(i).bigEndian
+                var total = Int32(totalChunks).bigEndian
+                packet.append(Data(bytes: &index, count: MemoryLayout<Int32>.size))
+                packet.append(Data(bytes: &total, count: MemoryLayout<Int32>.size))
+                packet.append(chunkData)
+
+                try await sendRawData(packet, to: dc, peerID: peerID)
+            }
+        }
+    }
+
+    private func sendRawData(_ data: Data, to dc: RTCDataChannel, peerID: String) async throws {
         guard dc.readyState == .open else {
             throw NSError(
                 domain: "WebRTCManager", code: -1,
@@ -393,26 +439,27 @@ public class WebRTCManager: NSObject {
                 ])
         }
 
-        // Flow control: If buffer is too full (> 512KB), wait until it's sent
+        // Flow control: If buffer is too full (> 1MB), wait until it's sent
+        // For chunks, we allow a bit more buffer but still wait
         var waitCount = 0
-        while dc.bufferedAmount > 512 * 1024 {
+        while dc.bufferedAmount > 1024 * 1024 {
             try await Task.sleep(nanoseconds: 50 * 1_000_000)  // 50ms
             waitCount += 1
-            if waitCount > 100 {  // 5s timeout for flow control
+            if waitCount > 200 {  // 10s timeout for flow control
                 AppLogger.syncPrint(
                     "[WebRTC] ⚠️ Flow control timeout, buffer still full (\(dc.bufferedAmount) bytes) for \(peerID.prefix(8))"
                 )
                 break
             }
-        }
-
-        guard dc.readyState == .open else {
-            throw NSError(
-                domain: "WebRTCManager", code: -1,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "DataChannel closed during wait: \(dc.readyState.rawValue)"
-                ])
+            // Check state again during wait
+            if dc.readyState != .open {
+                throw NSError(
+                    domain: "WebRTCManager", code: -1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "DataChannel closed during wait: \(dc.readyState.rawValue)"
+                    ])
+            }
         }
 
         let buffer = RTCDataBuffer(data: data, isBinary: true)
@@ -425,7 +472,7 @@ public class WebRTCManager: NSObject {
                 domain: "WebRTCManager", code: -2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Failed to send data via DataChannel (buffer full or channel closed). Size: \(data.count)"
+                        "Failed to send raw data via DataChannel. Size: \(data.count)"
                 ])
         }
     }
@@ -448,6 +495,9 @@ public class WebRTCManager: NSObject {
 
         dc?.close()
         pc?.close()
+
+        chunkBuffers.removeValue(forKey: peerID)
+        chunkTotals.removeValue(forKey: peerID)
 
         resumeContinuations(for: peerID, result: false)
     }
@@ -573,9 +623,79 @@ extension WebRTCManager: @preconcurrency RTCDataChannelDelegate {
         }
 
         if let peerID = peerID {
+            handleReceivedRawData(buffer.data, from: peerID)
+        }
+    }
+
+    private func handleReceivedRawData(_ data: Data, from peerID: String) {
+        guard !data.isEmpty else { return }
+
+        let type = data[0]
+        if type == 0 {
+            // Full message
+            let payload = data.subdata(in: 1..<data.count)
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                self.delegate?.webRTCManager(self, didReceiveData: buffer.data, from: peerID)
+                self.delegate?.webRTCManager(self, didReceiveData: payload, from: peerID)
+            }
+        } else if type == 1 {
+            // Chunked message
+            var offset = 1
+            guard data.count > offset + 1 else { return }
+
+            let idLen = Int(data[offset])
+            offset += 1
+            guard data.count > offset + idLen + 8 else { return }
+
+            let idData = data.subdata(in: offset..<offset + idLen)
+            guard let messageID = String(data: idData, encoding: .utf8) else { return }
+            offset += idLen
+
+            let indexData = data.subdata(in: offset..<offset + 4)
+            let index = Int(Int32(bigEndian: indexData.withUnsafeBytes { $0.load(as: Int32.self) }))
+            offset += 4
+
+            let totalData = data.subdata(in: offset..<offset + 4)
+            let total = Int(Int32(bigEndian: totalData.withUnsafeBytes { $0.load(as: Int32.self) }))
+            offset += 4
+
+            let chunkData = data.subdata(in: offset..<data.count)
+
+            // Store chunk
+            var peerBuffers = chunkBuffers[peerID] ?? [:]
+            var msgBuffers = peerBuffers[messageID] ?? [:]
+            msgBuffers[index] = chunkData
+            peerBuffers[messageID] = msgBuffers
+            chunkBuffers[peerID] = peerBuffers
+
+            var peerTotals = chunkTotals[peerID] ?? [:]
+            peerTotals[messageID] = total
+            chunkTotals[peerID] = peerTotals
+
+            // Check if complete
+            if msgBuffers.count == total {
+                // Reassemble
+                var fullData = Data()
+                for i in 0..<total {
+                    if let part = msgBuffers[i] {
+                        fullData.append(part)
+                    } else {
+                        // Missing chunk?! Should not happen with reliable ordered channel
+                        AppLogger.syncPrint(
+                            "[WebRTC] ❌ Missing chunk \(i) for message \(messageID)")
+                        return
+                    }
+                }
+
+                // Cleanup
+                chunkBuffers[peerID]?[messageID] = nil
+                chunkTotals[peerID]?[messageID] = nil
+
+                // Deliver
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.delegate?.webRTCManager(self, didReceiveData: fullData, from: peerID)
+                }
             }
         }
     }

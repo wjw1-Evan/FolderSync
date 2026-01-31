@@ -25,7 +25,7 @@ public class EnvironmentChecker {
         reports.append(checkKeychainAccess())
         reports.append(checkNetworkPermissions())
         reports.append(checkApplicationSupportDirectory())
-        reports.append(checkDatabaseAccess())
+        reports.append(checkStorageAccess())
         reports.append(checkUDPPortAvailability())
         reports.append(checkSystemResources())
 
@@ -76,7 +76,8 @@ public class EnvironmentChecker {
         }
 
         AppLogger.syncPrint("\n" + "-".repeating(60))
-        AppLogger.syncPrint("📊 统计: ✅ \(successCount) 通过 | ⚠️ \(warningCount) 警告 | ❌ \(errorCount) 失败")
+        AppLogger.syncPrint(
+            "📊 统计: ✅ \(successCount) 通过 | ⚠️ \(warningCount) 警告 | ❌ \(errorCount) 失败")
         AppLogger.syncPrint("=".repeating(60) + "\n")
     }
 
@@ -235,22 +236,22 @@ public class EnvironmentChecker {
         )
     }
 
-    /// 检测数据库访问
-    private static func checkDatabaseAccess() -> CheckReport {
-        // 尝试访问 StorageManager（这会创建数据库连接）
+    /// 检测存储访问
+    private static func checkStorageAccess() -> CheckReport {
+        // 尝试访问 StorageManager（这会初始化存储目录）
         let manager = StorageManager.shared
-        // 尝试执行一个简单的查询来验证数据库连接
+        // 尝试执行一个简单的查询来验证存储访问
         do {
             let _ = try manager.getAllFolders()
             return CheckReport(
-                name: "数据库访问",
-                result: .success("SQLite 数据库连接正常"),
-                details: nil
+                name: "数据存储访问",
+                result: .success("配置文件访问正常"),
+                details: "模式: JSON 文件存储"
             )
         } catch {
             return CheckReport(
-                name: "数据库访问",
-                result: .error("无法访问数据库: \(error.localizedDescription)"),
+                name: "数据存储访问",
+                result: .error("无法访问存储: \(error.localizedDescription)"),
                 details: nil
             )
         }

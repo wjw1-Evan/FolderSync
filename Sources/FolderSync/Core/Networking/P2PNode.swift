@@ -46,9 +46,9 @@ public class P2PNode: NSObject {
     // 改进：保存完整的连接信息，支持自动重试
     struct PendingConnectionInfo: Sendable {
         let peerID: String
-        let targetIP: String
-        let targetPort: UInt16
-        let startTime: Date
+        var targetIP: String
+        var targetPort: UInt16
+        var startTime: Date
         var retryCount: Int = 0
         static let maxRetries = 3
         static let connectionTimeout: TimeInterval = 20.0  // 单次连接超时
@@ -61,23 +61,51 @@ public class P2PNode: NSObject {
             return pendingConnections[peerID]
         }
 
-        func set(peerID: String, info: PendingConnectionInfo) {
-            pendingConnections[peerID] = info
-        }
-
         func remove(peerID: String) -> PendingConnectionInfo? {
             return pendingConnections.removeValue(forKey: peerID)
         }
 
-        func update(peerID: String, transform: (inout PendingConnectionInfo) -> Void)
-            -> PendingConnectionInfo?
+        enum ConnectionAction {
+            case startNew
+            case retry(retryCount: Int)
+            case wait
+            case fail
+        }
+
+        func tryStartConnection(peerID: String, targetIP: String, targetPort: UInt16)
+            -> ConnectionAction
         {
-            if var info = pendingConnections[peerID] {
-                transform(&info)
+            if let existing = pendingConnections[peerID] {
+                // Check timeout
+                let elapsed = Date().timeIntervalSince(existing.startTime)
+                if elapsed > PendingConnectionInfo.connectionTimeout {
+                    // Timed out
+                    if existing.retryCount < PendingConnectionInfo.maxRetries {
+                        var newInfo = existing
+                        newInfo.retryCount += 1
+                        newInfo.startTime = Date()
+                        newInfo.targetIP = targetIP
+                        newInfo.targetPort = targetPort
+                        pendingConnections[peerID] = newInfo
+                        return .retry(retryCount: newInfo.retryCount)
+                    } else {
+                        pendingConnections.removeValue(forKey: peerID)
+                        return .fail
+                    }
+                } else {
+                    return .wait
+                }
+            } else {
+                // New connection
+                let info = PendingConnectionInfo(
+                    peerID: peerID,
+                    targetIP: targetIP,
+                    targetPort: targetPort,
+                    startTime: Date()
+                )
                 pendingConnections[peerID] = info
-                return info
+                return .startNew
             }
-            return nil
         }
     }
     private let connectionTracker = ConnectionTracker()
@@ -200,52 +228,29 @@ public class P2PNode: NSObject {
 
         // Initiate connection if I am larger ID
         if myPeerID > peerID {
-            var shouldConnect = false
-
             // 检查是否有活跃连接
             if webRTC.hasConnection(for: peerID) {
                 // 已有连接，不需要重新建立
-            } else if let existingInfo = await connectionTracker.get(peerID: peerID) {
-                // 检查是否超时
-                let elapsed = Date().timeIntervalSince(existingInfo.startTime)
-                if elapsed > PendingConnectionInfo.connectionTimeout {
-                    // 超时，如果还有重试次数则重试
-                    if existingInfo.retryCount < PendingConnectionInfo.maxRetries {
-                        let newInfo = PendingConnectionInfo(
-                            peerID: peerID,
-                            targetIP: targetIP,
-                            targetPort: targetPort,
-                            startTime: Date(),
-                            retryCount: existingInfo.retryCount + 1
-                        )
-                        await connectionTracker.set(peerID: peerID, info: newInfo)
-                        shouldConnect = true
-                        AppLogger.syncPrint(
-                            "[P2PNode] ⏳ Connection attempt to \(peerID.prefix(8)) timed out, retrying (\(newInfo.retryCount)/\(PendingConnectionInfo.maxRetries))"
-                        )
-                    } else {
-                        // 达到最大重试次数，放弃
-                        _ = await connectionTracker.remove(peerID: peerID)
-                        AppLogger.syncPrint(
-                            "[P2PNode] ❌ Connection to \(peerID.prefix(8)) failed after \(PendingConnectionInfo.maxRetries) retries"
-                        )
-                    }
-                }
-                // 否则正在连接中，跳过
             } else {
-                // 没有活跃连接也没有待处理连接，开始新连接
-                let info = PendingConnectionInfo(
-                    peerID: peerID,
-                    targetIP: targetIP,
-                    targetPort: targetPort,
-                    startTime: Date()
-                )
-                await connectionTracker.set(peerID: peerID, info: info)
-                shouldConnect = true
-            }
+                let action = await connectionTracker.tryStartConnection(
+                    peerID: peerID, targetIP: targetIP, targetPort: targetPort)
 
-            if shouldConnect {
-                initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+                switch action {
+                case .startNew:
+                    initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+                case .retry(let retryCount):
+                    AppLogger.syncPrint(
+                        "[P2PNode] ⏳ Connection attempt to \(peerID.prefix(8)) timed out, retrying (\(retryCount)/\(PendingConnectionInfo.maxRetries))"
+                    )
+                    initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+                case .fail:
+                    AppLogger.syncPrint(
+                        "[P2PNode] ❌ Connection to \(peerID.prefix(8)) failed after \(PendingConnectionInfo.maxRetries) retries"
+                    )
+                case .wait:
+                    // 正在连接中，等待
+                    break
+                }
             }
         }
 
@@ -297,6 +302,16 @@ public class P2PNode: NSObject {
             return
         }
 
+        // 检查 ID 大小，防止 Glare (双方同时发起连接)
+        // 只有 ID 较大的一方可以主动发起连接
+        guard let myPeerID = self.peerID?.b58String else { return }
+        if myPeerID <= peerID {
+            AppLogger.syncPrint(
+                "[P2PNode] ⏳ ensureConnected: Waiting for \(peerID.prefix(8)) to initiate (Remote ID > Local ID)"
+            )
+            return
+        }
+
         // 获取地址信息
         let addresses = peerManager.getAddresses(for: peerID)
         var signalingIP: String?
@@ -316,64 +331,71 @@ public class P2PNode: NSObject {
             return
         }
 
-        var shouldConnect = false
-
         // 如果已有连接（即使 DataChannel 还没ready），等待即可
         if webRTC.hasConnection(for: peerID) {
             return
         }
 
-        if let existingInfo = await connectionTracker.get(peerID: peerID) {
-            // 检查是否超时
-            let elapsed = Date().timeIntervalSince(existingInfo.startTime)
-            if elapsed > PendingConnectionInfo.connectionTimeout {
-                // 超时，清除旧连接并重试
-                webRTC.removeConnection(for: peerID)
-                if existingInfo.retryCount < PendingConnectionInfo.maxRetries {
-                    let newInfo = PendingConnectionInfo(
-                        peerID: peerID,
-                        targetIP: targetIP,
-                        targetPort: targetPort,
-                        startTime: Date(),
-                        retryCount: existingInfo.retryCount + 1
-                    )
-                    await connectionTracker.set(peerID: peerID, info: newInfo)
-                    shouldConnect = true
-                    AppLogger.syncPrint(
-                        "[P2PNode] ⏳ ensureConnected: Connection attempt to \(peerID.prefix(8)) timed out, retrying (\(newInfo.retryCount)/\(PendingConnectionInfo.maxRetries))"
-                    )
-                } else {
-                    _ = await connectionTracker.remove(peerID: peerID)
-                    AppLogger.syncPrint(
-                        "[P2PNode] ❌ ensureConnected: Connection to \(peerID.prefix(8)) failed after max retries"
-                    )
-                }
-            } else {
-                // 正在连接中，等待即可
-            }
-        } else {
-            // 没有待处理连接，开始新连接
-            let info = PendingConnectionInfo(
-                peerID: peerID,
-                targetIP: targetIP,
-                targetPort: targetPort,
-                startTime: Date()
-            )
-            await connectionTracker.set(peerID: peerID, info: info)
-            shouldConnect = true
+        let action = await connectionTracker.tryStartConnection(
+            peerID: peerID, targetIP: targetIP, targetPort: targetPort)
 
+        switch action {
+        case .startNew:
             AppLogger.syncPrint(
                 "[P2PNode] 🔗 ensureConnected: Starting new connection to \(peerID.prefix(8))"
             )
-        }
-
-        if shouldConnect {
             initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+        case .retry(let retryCount):
+            //超时重试前清理旧连接
+            webRTC.removeConnection(for: peerID)
+
+            AppLogger.syncPrint(
+                "[P2PNode] ⏳ ensureConnected: Connection attempt to \(peerID.prefix(8)) timed out, retrying (\(retryCount)/\(PendingConnectionInfo.maxRetries))"
+            )
+            initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+        case .fail:
+            _ = await connectionTracker.remove(peerID: peerID)
+            AppLogger.syncPrint(
+                "[P2PNode] ❌ ensureConnected: Connection to \(peerID.prefix(8)) failed after max retries"
+            )
+        case .wait:
+            // 正在连接中，等待即可
+            break
         }
     }
 
     private func handleSignalingMessage(_ msg: SignalingMessage) {
         if let sdp = msg.sdp {
+            // Glare Handling (RFC 5245 - 简化版)
+            // 检查即使我们正在连接（have-local-offer），是否收到对方的 Offer
+            if sdp.type == "offer",
+                let pc = webRTC.getPeerConnection(for: msg.senderPeerID),
+                pc.signalingState == .haveLocalOffer
+            {
+                let myPeerID = self.peerID?.b58String ?? ""
+                let remotePeerID = msg.senderPeerID
+
+                // Determine roles based on PeerID
+                // Lower ID = "Polite" (Yields)
+                // Higher ID = "Impolite" (Wins)
+                if myPeerID < remotePeerID {
+                    AppLogger.syncPrint(
+                        "[P2PNode] 🎭 Glare detected. I am polite (Lower ID). Yielding to \(remotePeerID.prefix(8)). Resetting my connection."
+                    )
+                    // Reset connection to accept theirs
+                    // webRTC.removeConnection will clear the PeerConnection
+                    webRTC.removeConnection(for: remotePeerID)
+
+                    // 注意：handleRemoteSdp 下一步将使用新的 PeerConnection 处理此 Offer
+                } else {
+                    AppLogger.syncPrint(
+                        "[P2PNode] 🎭 Glare detected. I am impolite (Higher ID). Ignoring offer from \(remotePeerID.prefix(8))."
+                    )
+                    // Ignore incoming offer, persist with our own
+                    return
+                }
+            }
+
             webRTC.handleRemoteSdp(sdp, from: msg.senderPeerID) { [weak self] answerSdp in
                 guard let self = self, let answer = answerSdp else { return }
 

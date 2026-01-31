@@ -30,6 +30,15 @@ class SyncEngine {
         let syncKey = "\(folder.syncID):\(peerID)"
 
         Task { @MainActor in
+            // 标记为正在同步
+            // 注意：SyncManager 可能已经在外部设置了此标记，但为了安全和统一，这里再次确认
+            syncManager.syncInProgress.insert(syncKey)
+
+            // 使用 defer 确保在函数返回时移除同步标记（无论是因为 guard 返回还是执行完成）
+            defer {
+                syncManager.syncInProgress.remove(syncKey)
+            }
+
             // 条件1：检查设备是否在线（简化：仅使用广播判断）
             // 检查最近是否收到过广播（30秒内）
             guard let peerInfo = syncManager.peerManager.getPeer(peerID) else {
@@ -81,14 +90,6 @@ class SyncEngine {
                     folder.id, status: .error, message: "对等点注册失败", progress: 0.0,
                     errorDetail: "无法在 \(peerID) 上注册对等点，可能该设备已不再在线或网络受限。")
                 return
-            }
-
-            // 标记为正在同步
-            syncManager.syncInProgress.insert(syncKey)
-
-            // 使用 defer 确保在函数返回时移除同步标记
-            defer {
-                syncManager.syncInProgress.remove(syncKey)
             }
 
             await performSync(

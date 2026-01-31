@@ -298,7 +298,7 @@ public class P2PNode: NSObject {
         }
 
         // 获取地址信息
-        let addresses = await peerManager.getAddresses(for: peerID)
+        let addresses = peerManager.getAddresses(for: peerID)
         var signalingIP: String?
         var signalingPort: UInt16?
 
@@ -381,7 +381,7 @@ public class P2PNode: NSObject {
                     // Start Answer back phase
                     // We need to know where to send it.
                     // Assuming we keep track or just use stored address in PeerManager
-                    let addresses = await self.peerManager.getAddresses(for: msg.senderPeerID)
+                    let addresses = self.peerManager.getAddresses(for: msg.senderPeerID)
                     for addr in addresses {
                         if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
                             let responseMsg = SignalingMessage(
@@ -512,7 +512,7 @@ extension P2PNode: WebRTCManagerDelegate {
         for peerID: String
     ) {
         Task {
-            let addresses = await self.peerManager.getAddresses(for: peerID)
+            let addresses = self.peerManager.getAddresses(for: peerID)
             for addr in addresses {
                 if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
                     let msg = SignalingMessage(

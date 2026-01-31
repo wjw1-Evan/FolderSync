@@ -1,6 +1,7 @@
 import Foundation
 import WebRTC
 
+@MainActor
 protocol WebRTCManagerDelegate: AnyObject {
     func webRTCManager(
         _ manager: WebRTCManager, didDiscoverLocalCandidate candidate: IceCandidate,

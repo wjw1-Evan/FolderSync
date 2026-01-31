@@ -90,7 +90,7 @@ struct ConflictCenter: View {
                     Button(LocalizedString.close) { dismiss() }
                 }
                 if !conflicts.isEmpty {
-                    ToolbarItemGroup(placement: .primaryAction) {
+                    ToolbarItem(placement: .primaryAction) {
                         Menu {
                             Button(LocalizedString.keepAllLocal) {
                                 Task {
@@ -106,17 +106,17 @@ struct ConflictCenter: View {
                                     }
                                 }
                             }
+
+                            Divider()
+
+                            Button(role: .destructive) {
+                                showClearConfirm = true
+                            } label: {
+                                Label(LocalizedString.clearAll, systemImage: "trash")
+                            }
                         } label: {
                             Label(LocalizedString.batchActions, systemImage: "ellipsis.circle")
                         }
-
-                        Button(role: .destructive) {
-                            showClearConfirm = true
-                        } label: {
-                            Label(LocalizedString.clearAll, systemImage: "trash")
-                        }
-                        .help(LocalizedString.clearAll)
-                        .foregroundStyle(.red)
                     }
                 }
             }

@@ -21,9 +21,35 @@ public class WebRTCManager: NSObject {
     // peerID -> RTCDataChannel
     private var dataChannels: [String: RTCDataChannel] = [:]
     // Waiter class to allow reference comparison for CheckedContinuation
+    // 包含线程安全的 resume 逻辑，确保 continuation 只被 resume 一次
     private class Waiter {
         let continuation: CheckedContinuation<Bool, Never>
-        init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+        private var _hasResumed = false
+        private let lock = NSLock()
+
+        init(_ continuation: CheckedContinuation<Bool, Never>) {
+            self.continuation = continuation
+        }
+
+        /// 尝试 resume continuation，如果已经 resumed 则返回 false
+        /// 这是线程安全的
+        func tryResume(returning result: Bool) -> Bool {
+            lock.lock()
+            if _hasResumed {
+                lock.unlock()
+                return false
+            }
+            _hasResumed = true
+            lock.unlock()
+            continuation.resume(returning: result)
+            return true
+        }
+
+        var hasResumed: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return _hasResumed
+        }
     }
     // peerID -> Continuations waiting for connection
     private var pendingReadyContinuations: [String: [Waiter]] = [:]
@@ -92,36 +118,74 @@ public class WebRTCManager: NSObject {
     }
 
     /// 等待 DataChannel 就绪，带超时
-    public func waitForDataChannelReady(for peerID: String, timeout: TimeInterval = 15.0) async
+    /// 使用主动轮询 + 事件驱动的混合策略，确保不会错过状态变更
+    public func waitForDataChannelReady(for peerID: String, timeout: TimeInterval = 30.0) async
         -> Bool
     {
+        let startTime = Date()
+        let pollInterval: TimeInterval = 0.5  // 每 500ms 主动检查一次
+
         // 1. 立即检查
         if isDataChannelReady(for: peerID) {
+            AppLogger.syncPrint("[WebRTC] ✅ DataChannel already ready for \(peerID.prefix(8))")
             return true
         }
 
-        // 2. 检查连接状态，如果已经处于失败状态，直接返回
+        // 2. 检查是否有对应的 PeerConnection
         lock.lock()
         let pc = peerConnections[peerID]
-        let state = pc?.iceConnectionState
+        let initialState = pc?.iceConnectionState
         lock.unlock()
 
-        if let state = state, state == .failed || state == .closed {
+        if pc == nil {
+            AppLogger.syncPrint(
+                "[WebRTC] ❌ Cannot wait for DataChannel: No PeerConnection for \(peerID.prefix(8))"
+            )
+            return false
+        }
+
+        if let state = initialState, state == .failed || state == .closed {
             AppLogger.syncPrint(
                 "[WebRTC] ❌ Cannot wait for DataChannel: Connection to \(peerID.prefix(8)) already in state \(state.rawValue)"
             )
             return false
         }
 
-        // 3. 进入等待逻辑
+        AppLogger.syncPrint(
+            "[WebRTC] ⏳ Waiting for DataChannel to \(peerID.prefix(8)), ICE state: \(initialState?.rawValue ?? -1)"
+        )
+
+        // 3. 使用主动轮询 + 事件驱动的混合策略
         return await withCheckedContinuation { continuation in
             let waiter = Waiter(continuation)
 
+            // 安全的 resume 辅助函数，使用 Waiter.tryResume() 确保只 resume 一次
+            func safeResume(result: Bool, reason: String) {
+                // 从等待列表中移除（无论是否成功 resume）
+                self.lock.lock()
+                if var currentList = self.pendingReadyContinuations[peerID],
+                    let index = currentList.firstIndex(where: { $0 === waiter })
+                {
+                    currentList.remove(at: index)
+                    self.pendingReadyContinuations[peerID] = currentList
+                }
+                self.lock.unlock()
+
+                // 尝试 resume，如果已经被 resume 过则返回 false
+                if waiter.tryResume(returning: result) {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    AppLogger.syncPrint(
+                        "[WebRTC] \(result ? "✅" : "❌") DataChannel wait \(reason) for \(peerID.prefix(8)) after \(String(format: "%.1f", elapsed))s"
+                    )
+                }
+            }
+
+            // 添加到等待列表（用于事件驱动的通知）
             lock.lock()
             // 再次检查就绪状态（在锁内检查以避免竞态）
             if let dc = dataChannels[peerID], dc.readyState == .open {
                 lock.unlock()
-                continuation.resume(returning: true)
+                safeResume(result: true, reason: "already open (rechecked)")
                 return
             }
 
@@ -130,25 +194,56 @@ public class WebRTCManager: NSObject {
             pendingReadyContinuations[peerID] = list
             lock.unlock()
 
-            // 超时处理：只负责这个特定的 continuation
+            // 启动主动轮询任务
             Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                var pollCount = 0
+                let maxPolls = Int(timeout / pollInterval)
 
-                self.lock.lock()
-                // 检查是否还在列表中（即尚未被状态变化逻辑 resume）
-                if var currentList = self.pendingReadyContinuations[peerID],
-                    let index = currentList.firstIndex(where: { $0 === waiter })
-                {
-                    currentList.remove(at: index)
-                    self.pendingReadyContinuations[peerID] = currentList
+                while pollCount < maxPolls {
+                    try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                    pollCount += 1
+
+                    // 检查是否已经被事件驱动的逻辑处理
+                    if waiter.hasResumed {
+                        return
+                    }
+
+                    // 主动检查 DataChannel 状态
+                    if self.isDataChannelReady(for: peerID) {
+                        safeResume(result: true, reason: "ready (polled)")
+                        return
+                    }
+
+                    // 检查 ICE 连接状态
+                    self.lock.lock()
+                    let currentPC = self.peerConnections[peerID]
+                    let currentState = currentPC?.iceConnectionState
+                    let dcState = self.dataChannels[peerID]?.readyState
                     self.lock.unlock()
 
-                    AppLogger.syncPrint(
-                        "[WebRTC] ⏳ waitForDataChannelReady timeout for \(peerID.prefix(8))")
-                    continuation.resume(returning: false)
-                } else {
-                    self.lock.unlock()
+                    // 如果 PeerConnection 已被移除，终止等待
+                    if currentPC == nil {
+                        safeResume(result: false, reason: "PeerConnection removed")
+                        return
+                    }
+
+                    // 如果 ICE 连接失败或关闭，终止等待
+                    if let state = currentState, state == .failed || state == .closed {
+                        safeResume(result: false, reason: "ICE state \(state.rawValue)")
+                        return
+                    }
+
+                    // 每 5 次轮询输出一次状态日志
+                    if pollCount % 5 == 0 {
+                        let sigState = currentPC?.signalingState.rawValue ?? -1
+                        AppLogger.syncPrint(
+                            "[WebRTC] ⏳ Still waiting for DataChannel to \(peerID.prefix(8)): ICE=\(currentState?.rawValue ?? -1), Sig=\(sigState), DC=\(dcState?.rawValue ?? -1)"
+                        )
+                    }
                 }
+
+                // 超时
+                safeResume(result: false, reason: "timeout")
             }
         }
     }
@@ -164,76 +259,15 @@ public class WebRTCManager: NSObject {
             let first = list.removeFirst()
             pendingReadyContinuations[peerID] = list
             lock.unlock()
-            first.continuation.resume(returning: result)
+            // 使用 tryResume 确保只 resume 一次
+            _ = first.tryResume(returning: result)
         } else {
             pendingReadyContinuations[peerID] = []
             lock.unlock()
             for waiter in list {
-                waiter.continuation.resume(returning: result)
+                // 使用 tryResume 确保只 resume 一次
+                _ = waiter.tryResume(returning: result)
             }
-        }
-    }
-
-    // MARK: - Connection Management
-
-    /// 发起连接 (Offer)
-    func connect(to peerID: String) {
-        let rtcConfig = RTCConfiguration()
-        rtcConfig.iceServers = [RTCIceServer(urlStrings: iceServers)]
-        rtcConfig.sdpSemantics = .unifiedPlan
-
-        let constraints = RTCMediaConstraints(
-            mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
-
-        guard
-            let peerConnection = factory.peerConnection(
-                with: rtcConfig, constraints: constraints, delegate: self)
-        else {
-            print("[WebRTC] Failed to create PeerConnection")
-            return
-        }
-
-        // 存储连接
-        lock.lock()
-        self.peerConnections[peerID] = peerConnection
-        lock.unlock()
-
-        // 创建 Data Channel
-        let dataChannelConfig = RTCDataChannelConfiguration()
-        dataChannelConfig.isOrdered = true
-        // dataChannelConfig.maxRetransmits = 3 // 可选：配置重传策略
-
-        if let dataChannel = peerConnection.dataChannel(
-            forLabel: "sync-data", configuration: dataChannelConfig)
-        {
-            dataChannel.delegate = self
-            lock.lock()
-            self.dataChannels[peerID] = dataChannel
-            lock.unlock()
-        }
-
-        // 创建 Offer
-        peerConnection.offer(for: constraints) { [weak self] sdp, error in
-            guard let self = self, let sdp = sdp else { return }
-
-            peerConnection.setLocalDescription(sdp) { error in
-                if let error = error {
-                    print("[WebRTC] Set Local Description Error: \(error)")
-                    return
-                }
-                // 发送 Offer
-                // 这里需要通过 SignalingClient 发送，这一层最好通过 Delegate 或 Closure 回调出去
-                // 因为 WebRTCManager 只负责 WebRTC 逻辑
-                // 但为了简化，我们在 createOffer/Answer 成功后不直接发，而是依赖 ICE Candidate 收集
-                // 下面的 sdp 需要通过信令发出去
-                self.delegate?.webRTCManager(
-                    self,
-                    didDiscoverLocalCandidate: IceCandidate(
-                        from: RTCIceCandidate(sdp: "", sdpMLineIndex: 0, sdpMid: nil)), for: peerID)  // Hack: 这里的逻辑有点乱，应该有一个明确的 delegate 方法发送 SDP
-            }
-
-            // 修正：我们需要明确的回调来发送 SDP，不能复用 Candidate 回调
-            // 实际上这里的 createOffer 是异步的，我们需要一个机制把 SDP 传出去
         }
     }
 

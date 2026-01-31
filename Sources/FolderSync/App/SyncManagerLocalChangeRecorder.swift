@@ -20,6 +20,9 @@ extension SyncManager {
         if relativePath.hasPrefix("/") { relativePath.removeFirst() }
         if relativePath.isEmpty { relativePath = "." }
 
+        // 有任何文件变更，立即使该文件夹的状态缓存失效
+        folderStatistics.invalidateCache(for: folder.syncID)
+
         // 如果该路径刚被“同步落地写入”，忽略本地事件记录，避免把“同步落地写入”误当成本地编辑
         let cooldownKey = "\(folder.syncID):\(relativePath)"
         if let lastWriteTime = syncWriteCooldown[cooldownKey],

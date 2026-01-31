@@ -239,18 +239,17 @@ public class SyncManager: ObservableObject {
 
                     // 对于新对等点，只同步匹配的文件夹
                     // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹
-                    Task { @MainActor in
-                        // 只对已存在的 peer 进行增量同步（如果连接可用）
-                        // 新 peer 的同步移至 onPeerConnected 处理
-                        if !wasNew {
-                            for folder in matchingFolders {
-                                if self.shouldSyncFolderWithPeer(
-                                    peerID: peerIDString, folder: folder)
-                                {
-                                    // 这里最好也检查一下 WebRTC 是否就绪，但目前 syncWithPeer 内部会处理（或失败）
-                                    // 对于增量更新，假设连接已建立
-                                    self.syncWithPeer(peer: peer, folder: folder)
-                                }
+                    // 只有当 DataChannel 已经就绪时才通过广播触发增量同步
+                    // 如果连接尚未建立或正在建立，同步逻辑应由 onPeerConnected 触发
+                    if !wasNew && self.p2pNode.webRTC.isDataChannelReady(for: peerIDString) {
+                        for folder in matchingFolders {
+                            if self.shouldSyncFolderWithPeer(
+                                peerID: peerIDString, folder: folder)
+                            {
+                                AppLogger.syncPrint(
+                                    "[SyncManager] 🔄 通过广播触发增量同步: \(peerIDString.prefix(8)), 文件夹: \(folder.syncID)"
+                                )
+                                self.syncWithPeer(peer: peer, folder: folder)
                             }
                         }
                     }

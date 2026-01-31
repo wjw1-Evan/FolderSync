@@ -71,6 +71,9 @@ extension SyncManager {
             let parentDir = fileURL.deletingLastPathComponent()
             let fileManager = FileManager.default
 
+            // 远端写入，立即使缓存失效
+            folderStatistics.invalidateCache(for: syncID)
+
             try? preparePathForWritingFile(
                 fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
             if !fileManager.fileExists(atPath: parentDir.path) {
@@ -109,6 +112,8 @@ extension SyncManager {
                 return .error("Folder not found")
             }
             let myPeerID = p2pNode.peerID?.b58String ?? ""
+            // 批量删除时失效一次缓存
+            folderStatistics.invalidateCache(for: syncID)
             for (rel, vc) in paths {
                 deleteFileAtomically(path: rel, syncID: syncID, peerID: myPeerID, vectorClock: vc)
             }

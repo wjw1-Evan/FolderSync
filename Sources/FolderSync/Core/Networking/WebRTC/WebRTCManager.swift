@@ -20,6 +20,13 @@ public class WebRTCManager: NSObject {
     private var peerConnections: [String: RTCPeerConnection] = [:]
     // peerID -> RTCDataChannel
     private var dataChannels: [String: RTCDataChannel] = [:]
+    // Waiter class to allow reference comparison for CheckedContinuation
+    private class Waiter {
+        let continuation: CheckedContinuation<Bool, Never>
+        init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+    }
+    // peerID -> Continuations waiting for connection
+    private var pendingReadyContinuations: [String: [Waiter]] = [:]
 
     private let lock = NSLock()
 
@@ -50,18 +57,22 @@ public class WebRTCManager: NSObject {
 
     public func stop() {
         lock.lock()
-        let pcs = Array(peerConnections.values)
-        let dcs = Array(dataChannels.values)
+        let pcValues = Array(peerConnections.values)
+        let dcValues = Array(dataChannels.values)
+        let peerIDs = Array(peerConnections.keys)
         peerConnections.removeAll()
         dataChannels.removeAll()
         pcToPeerID.removeAll()
         lock.unlock()
 
-        for dc in dcs {
-            dc.close()
-            // dc.delegate = nil // Avoid delegate calls during deinit
+        for peerID in peerIDs {
+            resumeContinuations(for: peerID, result: false)
         }
-        for pc in pcs {
+
+        for dc in dcValues {
+            dc.close()
+        }
+        for pc in pcValues {
             pc.close()
         }
     }
@@ -81,18 +92,85 @@ public class WebRTCManager: NSObject {
     }
 
     /// 等待 DataChannel 就绪，带超时
-    public func waitForDataChannelReady(for peerID: String, timeout: TimeInterval = 10.0) async
+    public func waitForDataChannelReady(for peerID: String, timeout: TimeInterval = 15.0) async
         -> Bool
     {
-        let startTime = Date()
-        while Date().timeIntervalSince(startTime) < timeout {
-            if isDataChannelReady(for: peerID) {
-                return true
-            }
-            // 等待 100ms 再检查
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        // 1. 立即检查
+        if isDataChannelReady(for: peerID) {
+            return true
         }
-        return false
+
+        // 2. 检查连接状态，如果已经处于失败状态，直接返回
+        lock.lock()
+        let pc = peerConnections[peerID]
+        let state = pc?.iceConnectionState
+        lock.unlock()
+
+        if let state = state, state == .failed || state == .closed {
+            AppLogger.syncPrint(
+                "[WebRTC] ❌ Cannot wait for DataChannel: Connection already in state \(state.rawValue)"
+            )
+            return false
+        }
+
+        return await withCheckedContinuation { continuation in
+            let waiter = Waiter(continuation)
+
+            lock.lock()
+            // 再次检查就绪状态（在锁内检查以避免竞态）
+            if let dc = dataChannels[peerID], dc.readyState == .open {
+                lock.unlock()
+                continuation.resume(returning: true)
+                return
+            }
+
+            var list = pendingReadyContinuations[peerID] ?? []
+            list.append(waiter)
+            pendingReadyContinuations[peerID] = list
+            lock.unlock()
+
+            // 超时处理：只负责这个特定的 continuation
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+
+                self.lock.lock()
+                // 检查是否还在列表中（即尚未被状态变化逻辑 resume）
+                if var currentList = self.pendingReadyContinuations[peerID],
+                    let index = currentList.firstIndex(where: { $0 === waiter })
+                {
+                    currentList.remove(at: index)
+                    self.pendingReadyContinuations[peerID] = currentList
+                    self.lock.unlock()
+
+                    AppLogger.syncPrint(
+                        "[WebRTC] ⏳ waitForDataChannelReady timeout for \(peerID.prefix(8))")
+                    continuation.resume(returning: false)
+                } else {
+                    self.lock.unlock()
+                }
+            }
+        }
+    }
+
+    private func resumeContinuations(for peerID: String, result: Bool, onlyOne: Bool = false) {
+        lock.lock()
+        guard var list = pendingReadyContinuations[peerID], !list.isEmpty else {
+            lock.unlock()
+            return
+        }
+
+        if onlyOne {
+            let first = list.removeFirst()
+            pendingReadyContinuations[peerID] = list
+            lock.unlock()
+            first.continuation.resume(returning: result)
+        } else {
+            pendingReadyContinuations[peerID] = []
+            lock.unlock()
+            for waiter in list {
+                waiter.continuation.resume(returning: result)
+            }
+        }
     }
 
     // MARK: - Connection Management
@@ -304,6 +382,21 @@ public class WebRTCManager: NSObject {
         pcToPeerID[ObjectIdentifier(peerConnection)] = peerID
     }
 
+    public func removeConnection(for peerID: String) {
+        lock.lock()
+        let pc = peerConnections.removeValue(forKey: peerID)
+        let dc = dataChannels.removeValue(forKey: peerID)
+        if let pc = pc {
+            pcToPeerID.removeValue(forKey: ObjectIdentifier(pc))
+        }
+        lock.unlock()
+
+        dc?.close()
+        pc?.close()
+
+        resumeContinuations(for: peerID, result: false)
+    }
+
     private func getPeerID(for peerConnection: RTCPeerConnection) -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -331,6 +424,14 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState
     ) {
         guard let peerID = getPeerID(for: peerConnection) else { return }
+
+        if newState == .failed || newState == .closed {
+            AppLogger.syncPrint(
+                "[WebRTC] ⚠️ Connection to \(peerID.prefix(8)) failed or closed. State: \(newState.rawValue)"
+            )
+            self.removeConnection(for: peerID)
+        }
+
         DispatchQueue.main.async {
             self.delegate?.webRTCManager(self, didChangeConnectionState: newState, for: peerID)
         }
@@ -382,6 +483,12 @@ extension WebRTCManager: RTCDataChannelDelegate {
         lock.unlock()
 
         if let peerID = peerID {
+            if dataChannel.readyState == .open {
+                resumeContinuations(for: peerID, result: true)
+            } else if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
+                resumeContinuations(for: peerID, result: false)
+            }
+
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.delegate?.webRTCManager(

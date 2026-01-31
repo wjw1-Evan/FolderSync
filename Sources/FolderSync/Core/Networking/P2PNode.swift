@@ -150,8 +150,6 @@ public class P2PNode: NSObject {
 
         // Initiate connection if I am larger ID
         if myPeerID > peerID {
-            // Check if already connected to prevent duplicate initiation (and crash)
-            // Check if already connected to prevent duplicate initiation (and crash)
             var shouldConnect = false
             pendingConnectionsLock.lock()
             if !webRTC.hasConnection(for: peerID) && !pendingConnections.contains(peerID) {
@@ -161,30 +159,7 @@ public class P2PNode: NSObject {
             pendingConnectionsLock.unlock()
 
             if shouldConnect {
-                AppLogger.syncPrint(
-                    "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
-                )
-
-                webRTC.createOffer(for: peerID) { [weak self] sdp in
-                    guard let self = self else { return }
-
-                    // Offer creation finished (success or fail), remove from pending?
-                    // Ideally we keep it pending until connection established, but createOffer registers the connection internally.
-                    // So once createOffer callback returns, hasConnection(peerID) should be true (if registered early)
-                    // or we should clear pending if it failed.
-                    // However, `webRTC.createOffer` registers the connection synchronously inside `createOffer`.
-                    // So `hasConnection` becomes true before the async callback here.
-                    // Thus we can safely remove from pending here.
-
-                    self.pendingConnectionsLock.lock()
-                    self.pendingConnections.remove(peerID)
-                    self.pendingConnectionsLock.unlock()
-
-                    let msg = SignalingMessage(
-                        type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
-                        senderPeerID: myPeerID)
-                    self.signaling.send(signal: msg, to: targetIP, port: targetPort)
-                }
+                initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
             }
         }
 
@@ -192,6 +167,63 @@ public class P2PNode: NSObject {
             peerManager.updateDeviceStatus(peerID, status: .online)
         }
         self.onPeerDiscovered?(peerIDObj, addresses, syncIDs)
+    }
+
+    /// 主动发起 WebRTC 连接
+    private func initiateConnection(peerID: String, targetIP: String, targetPort: UInt16) {
+        let myPeerID = self.peerID?.b58String ?? ""
+        AppLogger.syncPrint(
+            "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
+        )
+
+        webRTC.createOffer(for: peerID) { [weak self] sdp in
+            guard let self = self else { return }
+
+            self.pendingConnectionsLock.lock()
+            self.pendingConnections.remove(peerID)
+            self.pendingConnectionsLock.unlock()
+
+            let msg = SignalingMessage(
+                type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
+                senderPeerID: myPeerID)
+            self.signaling.send(signal: msg, to: targetIP, port: targetPort)
+        }
+    }
+
+    /// 确保已经启动连接
+    private func ensureConnected(to peerID: String) async {
+        if webRTC.hasConnection(for: peerID) { return }
+
+        // 获取地址信息
+        let addresses = await peerManager.getAddresses(for: peerID)
+        var signalingIP: String?
+        var signalingPort: UInt16?
+
+        for addr in addresses {
+            if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
+                signalingIP = ip
+                signalingPort = port
+                break
+            }
+        }
+
+        guard let targetIP = signalingIP, let targetPort = signalingPort else {
+            AppLogger.syncPrint(
+                "[P2PNode] ⚠️ Cannot ensureConnected: No signaling address for \(peerID.prefix(8))")
+            return
+        }
+
+        var shouldConnect = false
+        pendingConnectionsLock.lock()
+        if !webRTC.hasConnection(for: peerID) && !pendingConnections.contains(peerID) {
+            pendingConnections.insert(peerID)
+            shouldConnect = true
+        }
+        pendingConnectionsLock.unlock()
+
+        if shouldConnect {
+            initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
+        }
     }
 
     private func handleSignalingMessage(_ msg: SignalingMessage) {
@@ -225,12 +257,22 @@ public class P2PNode: NSObject {
 
     public func sendRequest(_ request: SyncRequest, to peerID: String) async throws -> SyncResponse
     {
+        // 确保连接已启动
+        await ensureConnected(to: peerID)
+
         // 先等待 DataChannel 就绪
-        let isReady = await webRTC.waitForDataChannelReady(for: peerID, timeout: 5.0)
+        AppLogger.syncPrint("[P2PNode] ⏳ Waiting for DataChannel to \(peerID.prefix(8))...")
+        let isReady = await webRTC.waitForDataChannelReady(for: peerID, timeout: 15.0)
         guard isReady else {
+            AppLogger.syncPrint(
+                "[P2PNode] ❌ DataChannel wait timeout for \(peerID.prefix(8)). Removing connection for retry."
+            )
+            // 失败时清除连接状态，让下一次重试（SyncEngine 层的重试）可以重新发起全新的连接
+            webRTC.removeConnection(for: peerID)
+
             throw NSError(
                 domain: "P2PNode", code: -3,
-                userInfo: [NSLocalizedDescriptionKey: "DataChannel not ready after waiting"])
+                userInfo: [NSLocalizedDescriptionKey: "DataChannel not ready after waiting 15s"])
         }
 
         let requestID = UUID().uuidString

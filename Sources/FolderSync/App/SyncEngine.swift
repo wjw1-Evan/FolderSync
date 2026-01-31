@@ -560,14 +560,39 @@ class SyncEngine {
             }
 
             /// 决定下载操作（使用 VectorClockManager 统一决策逻辑）
-            func downloadAction(remote: FileMetadata, local: FileMetadata?, path: String)
+            /// 决定下载操作（使用 VectorClockManager 统一决策逻辑）
+            func downloadAction(remote: FileMetadata, local: FileMetadata?, path: String) async
                 -> DownloadAction
             {
-                // 重要：如果文件已删除（在 deletedSet 中），直接跳过，不下载
-                // 这可以防止已删除的文件因为 Vector Clock 相等但哈希不同而被重新下载
+                // 重要：如果文件已删除（在 deletedSet 中），需要比较 Vector Clock
+                // 如果远程的 VC 比本地删除记录的 VC 更新（或无关/冲突），则可能是文件被重新创建，需要下载
                 if deletedSet.contains(path) {
-                    AppLogger.syncPrint("[SyncEngine] ⏭️ [downloadAction] 文件已删除，跳过下载: 路径=\(path)")
-                    return .skip
+                    let stateStore = await MainActor.run {
+                        syncManager.getFileStateStore(for: syncID)
+                    }
+                    if let localState = stateStore.getState(for: path),
+                        case .deleted(let deletionRecord) = localState
+                    {
+                        let comparison = remote.vectorClock?.compare(to: deletionRecord.vectorClock)
+
+                        // 如果远程 VC <= 本地删除 VC，说明远程文件是旧版本，应跳过
+                        if comparison == .antecedent || comparison == .equal {
+                            AppLogger.syncPrint(
+                                "[SyncEngine] ⏭️ [downloadAction] 文件已删除且远程版本较旧，跳过下载: 路径=\(path)")
+                            return .skip
+                        }
+
+                        // 如果远程 VC > 本地删除 VC，说明是在删除后重新创建的，应该下载
+                        // 如果是并发（concurrent），也应该作为冲突保留（下载）
+                        AppLogger.syncPrint(
+                            "[SyncEngine] 🔄 [downloadAction] 文件虽有删除记录但远程版本更新/冲突，允许下载: 路径=\(path)")
+                        // Proceed to normal decision logic below
+                    } else {
+                        // 如果没有详细删除记录（旧格式），保守策略：跳过下载
+                        AppLogger.syncPrint(
+                            "[SyncEngine] ⏭️ [downloadAction] 文件已删除（无VC记录），跳过下载: 路径=\(path)")
+                        return .skip
+                    }
                 }
 
                 let localVC = local?.vectorClock
@@ -931,12 +956,20 @@ class SyncEngine {
 
                     case .download:
                         // 下载文件（覆盖本地）
-                        // 检查删除记录（双重保险），但允许冲突情况通过
-                        if deletedSet.contains(path) || remoteDeletedPaths.contains(path) {
-                            AppLogger.syncPrint("[SyncEngine] ⏭️ [download] 文件已删除，跳过下载: 路径=\(path)")
-                            continue
-                        }
+                        // 检查删除记录，但依赖 SyncDecisionEngine 的决策
+                        // 如果 SyncDecisionEngine 决定下载，说明远程版本比本地删除记录更新（或重新创建）
+                        // 因此这里不做简单的 deletedSet 检查，而是允许下载
+
+                        // 双重检查：如果本地状态是 .deleted，且 SyncDecisionEngine 决定 .download
+                        // 这意味着远程文件的 VC > 本地删除记录的 VC -> 这是合法的重新创建/恢复
+
                         if let remoteMeta = remoteState?.metadata {
+                            if deletedSet.contains(path) {
+                                AppLogger.syncPrint(
+                                    "[SyncEngine] 🔄 [download] 从删除状态恢复文件（VC更新）: 路径=\(path)")
+                                // 从 deletedSet 中移除，防止后续误判
+                                deletedSet.remove(path)
+                            }
                             changedFilesSet.insert(path)
                             changedFiles.append((path, remoteMeta))
                         }

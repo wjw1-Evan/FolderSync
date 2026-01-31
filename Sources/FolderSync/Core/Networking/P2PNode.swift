@@ -29,6 +29,10 @@ public class P2PNode: NSObject {
     private var pendingRequests: [String: CheckedContinuation<SyncResponse, Error>] = [:]
     private let requestsQueue = DispatchQueue(label: "com.foldersync.p2p.requests")
 
+    // Connection tracking to prevent race conditions
+    private var pendingConnections: Set<String> = []
+    private let pendingConnectionsLock = NSLock()
+
     struct WebRTCFrame: Codable {
         let id: String
         let type: String  // "req" | "res"
@@ -147,16 +151,39 @@ public class P2PNode: NSObject {
         // Initiate connection if I am larger ID
         if myPeerID > peerID {
             // Check if already connected to prevent duplicate initiation (and crash)
-            if !webRTC.hasConnection(for: peerID) {
+            // Check if already connected to prevent duplicate initiation (and crash)
+            var shouldConnect = false
+            pendingConnectionsLock.lock()
+            if !webRTC.hasConnection(for: peerID) && !pendingConnections.contains(peerID) {
+                pendingConnections.insert(peerID)
+                shouldConnect = true
+            }
+            pendingConnectionsLock.unlock()
+
+            if shouldConnect {
                 AppLogger.syncPrint(
                     "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
                 )
 
                 webRTC.createOffer(for: peerID) { [weak self] sdp in
+                    guard let self = self else { return }
+
+                    // Offer creation finished (success or fail), remove from pending?
+                    // Ideally we keep it pending until connection established, but createOffer registers the connection internally.
+                    // So once createOffer callback returns, hasConnection(peerID) should be true (if registered early)
+                    // or we should clear pending if it failed.
+                    // However, `webRTC.createOffer` registers the connection synchronously inside `createOffer`.
+                    // So `hasConnection` becomes true before the async callback here.
+                    // Thus we can safely remove from pending here.
+
+                    self.pendingConnectionsLock.lock()
+                    self.pendingConnections.remove(peerID)
+                    self.pendingConnectionsLock.unlock()
+
                     let msg = SignalingMessage(
                         type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
                         senderPeerID: myPeerID)
-                    self?.signaling.send(signal: msg, to: targetIP, port: targetPort)
+                    self.signaling.send(signal: msg, to: targetIP, port: targetPort)
                 }
             }
         }

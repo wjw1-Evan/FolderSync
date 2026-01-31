@@ -51,11 +51,16 @@ public class WebRTCManager: NSObject {
     public func stop() {
         lock.lock()
         let pcs = Array(peerConnections.values)
+        let dcs = Array(dataChannels.values)
         peerConnections.removeAll()
         dataChannels.removeAll()
         pcToPeerID.removeAll()
         lock.unlock()
 
+        for dc in dcs {
+            dc.close()
+            // dc.delegate = nil // Avoid delegate calls during deinit
+        }
         for pc in pcs {
             pc.close()
         }
@@ -338,7 +343,8 @@ extension WebRTCManager: RTCDataChannelDelegate {
         lock.unlock()
 
         if let peerID = peerID {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 self.delegate?.webRTCManager(
                     self, didChangeDataChannelState: dataChannel.readyState, for: peerID)
             }
@@ -364,7 +370,8 @@ extension WebRTCManager: RTCDataChannelDelegate {
         lock.unlock()
 
         if let peerID = peerID {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 self.delegate?.webRTCManager(self, didReceiveData: buffer.data, from: peerID)
             }
         }

@@ -158,11 +158,8 @@ public class SyncManager: ObservableObject {
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
 
         // 初始化广播中的 syncID（在 P2PNode 启动后）
-        Task { @MainActor in
-            // 等待 P2PNode 启动完成
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            self.updateBroadcastSyncIDs()
-        }
+        // 逻辑已移至 p2pNode.start() 之后执行，确保时序正确
+        // Task { @MainActor ... }
 
         // 初始化模块化组件
         folderMonitor = FolderMonitor(syncManager: self)
@@ -210,6 +207,9 @@ public class SyncManager: ObservableObject {
                     let wasOnline = self.peerManager.isOnline(peerIDString)
                     self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
                     self.peerManager.updateLastSeen(peerIDString)  // 更新最后可见时间
+
+                    // 更新 Peer 的 syncIDs
+                    self.peerManager.updateSyncIDs(peerIDString, syncIDs: remoteSyncIDs)
 
                     // 验证 lastSeenTime 是否已更新
                     if let peerInfo = self.peerManager.getPeer(peerIDString) {
@@ -283,6 +283,12 @@ public class SyncManager: ObservableObject {
                             message: "P2P 节点启动失败: \(error.localizedDescription)")
                     }
                 }
+            }
+
+            // 立即广播当前的 SyncID
+            // P2PNode 启动时会将 syncIDs 重置为空，所以必须在启动后重新设置
+            await MainActor.run {
+                self.updateBroadcastSyncIDs()
             }
 
             // Register P2P handlers

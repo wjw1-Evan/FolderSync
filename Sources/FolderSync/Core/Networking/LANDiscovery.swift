@@ -14,6 +14,7 @@ public class LANDiscovery {
     private let serviceName = "_foldersync._tcp"
     private let subscriberID = UUID()
     private var currentSyncIDs: [String] = []  // 当前设备的 syncID 列表
+    private var myPeerID: String = ""  // Store peerID for re-broadcasting
 
     public var onPeerDiscovered: ((String, String, [String], [String]) -> Void)?  // (peerID, address, listenAddresses, syncIDs)
 
@@ -176,10 +177,14 @@ public class LANDiscovery {
         }
     }
 
+    // MARK: - Shared UDP listener (process-wide)
+    // ... (unchanged)
+
     public func start(peerID: String, listenAddresses: [String] = [], syncIDs: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
         currentSyncIDs = syncIDs
+        myPeerID = peerID
 
         // 注册到进程级共享 UDP 监听器，避免同一进程内多实例抢占端口导致 EADDRINUSE
         LANDiscovery.registerSharedHandler(id: subscriberID) { [weak self] message, address in
@@ -501,6 +506,13 @@ public class LANDiscovery {
 
     public func updateSyncIDs(_ syncIDs: [String]) {
         self.currentSyncIDs = syncIDs
+        // Trigger immediate broadcast with new IDs
+        if isRunning && !myPeerID.isEmpty {
+            DispatchQueue.global(qos: .utility).async {
+                self.sendBroadcast(
+                    peerID: self.myPeerID, listenAddresses: self.currentListenAddresses)
+            }
+        }
     }
 
     private func sendBroadcast(peerID: String, listenAddresses: [String]) {

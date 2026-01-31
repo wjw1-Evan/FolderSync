@@ -252,6 +252,22 @@ class SyncEngine {
                 } catch {
                     lastError = error
                     let errorString = String(describing: error)
+
+                    // 检查由 P2PNode 抛出的严重连接错误 (Code=-3: DataChannel not ready)
+                    let isCriticalError =
+                        (error as NSError).code == -3
+                        || errorString.contains("DataChannel not ready")
+
+                    if isCriticalError {
+                        AppLogger.syncPrint(
+                            "[SyncEngine] ❌ [performSync] 严重连接错误，停止重试并移除对等点等待重新发现: \(errorString)")
+                        // 移除 Peer，等待下次广播重新发现
+                        syncManager.peerManager.removePeer(peerID)
+                        // 从当前文件夹的从 peer 列表中移除
+                        syncManager.removeFolderPeer(syncID, peerID: peerID)
+                        break
+                    }
+
                     AppLogger.syncPrint(
                         "[SyncEngine] ⚠️ [performSync] 获取 MST 根尝试 \(attempt)/\(maxRetries) 失败: \(errorString)"
                     )

@@ -37,7 +37,7 @@ public class LANDiscovery {
     /// 取消注册时不再关闭共享 listener，避免下一测试重新绑定端口时出现 Address already in use（同一进程内多测试顺序执行）
     private static func unregisterSharedHandler(id: UUID) {
         sharedQueue.sync {
-            sharedHandlers.removeValue(forKey: id)
+            _ = sharedHandlers.removeValue(forKey: id)
         }
     }
 

@@ -15,7 +15,11 @@ public class P2PNode: NSObject {
     // My PeerID (Backing property)
     public private(set) var peerID: PeerID?
 
-    public var onPeerDiscovered: ((PeerID, [String]) -> Void)?
+    // PeerID, Addresses, SyncIDs
+    public var onPeerDiscovered: ((PeerID, [String], [String]) -> Void)?
+
+    // Callback when WebRTC DataChannel is ready
+    public var onPeerConnected: ((String) -> Void)?
 
     // Callback for SyncEngine to handle requests
     // Request -> Response (Async)
@@ -30,11 +34,6 @@ public class P2PNode: NSObject {
         let type: String  // "req" | "res"
         let payload: Data
     }
-
-    // Network Monitoring
-    private var pathMonitor: NWPathMonitor?
-    private var pathMonitorQueue: DispatchQueue?
-    private var lastKnownIP: String = ""
 
     public override init() {
         self.peerManager = MainActor.assumeIsolated { PeerManager() }
@@ -147,22 +146,25 @@ public class P2PNode: NSObject {
 
         // Initiate connection if I am larger ID
         if myPeerID > peerID {
-            AppLogger.syncPrint(
-                "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
-            )
+            // Check if already connected to prevent duplicate initiation (and crash)
+            if !webRTC.hasConnection(for: peerID) {
+                AppLogger.syncPrint(
+                    "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
+                )
 
-            webRTC.createOffer(for: peerID) { [weak self] sdp in
-                let msg = SignalingMessage(
-                    type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
-                    senderPeerID: myPeerID)
-                self?.signaling.send(signal: msg, to: targetIP, port: targetPort)
+                webRTC.createOffer(for: peerID) { [weak self] sdp in
+                    let msg = SignalingMessage(
+                        type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
+                        senderPeerID: myPeerID)
+                    self?.signaling.send(signal: msg, to: targetIP, port: targetPort)
+                }
             }
         }
 
         Task { @MainActor in
             peerManager.updateDeviceStatus(peerID, status: .online)
         }
-        self.onPeerDiscovered?(peerIDObj, syncIDs)
+        self.onPeerDiscovered?(peerIDObj, addresses, syncIDs)
     }
 
     private func handleSignalingMessage(_ msg: SignalingMessage) {
@@ -296,6 +298,17 @@ extension P2PNode: WebRTCManagerDelegate {
             Task { @MainActor in
                 peerManager.updateDeviceStatus(peerID, status: .online)
             }
+        }
+    }
+
+    func webRTCManager(
+        _ manager: WebRTCManager, didChangeDataChannelState state: RTCDataChannelState,
+        for peerID: String
+    ) {
+        AppLogger.syncPrint(
+            "[P2PNode] DataChannel State for \(peerID.prefix(8)): \(state.rawValue)")
+        if state == .open {
+            self.onPeerConnected?(peerID)
         }
     }
 

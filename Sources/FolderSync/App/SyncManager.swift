@@ -157,10 +157,6 @@ public class SyncManager: ObservableObject {
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
 
-        // 初始化广播中的 syncID（在 P2PNode 启动后）
-        // 逻辑已移至 p2pNode.start() 之后执行，确保时序正确
-        // Task { @MainActor ... }
-
         // 初始化模块化组件
         folderMonitor = FolderMonitor(syncManager: self)
         folderStatistics = FolderStatistics(syncManager: self, folderMonitor: folderMonitor)
@@ -186,25 +182,26 @@ public class SyncManager: ObservableObject {
         }
 
         peerDiscoveryTask = Task { @MainActor in
-            p2pNode.onPeerDiscovered = { [weak self] peer, remoteSyncIDs in
+            p2pNode.onPeerDiscovered = { [weak self] peer, listenAddresses, remoteSyncIDs in
                 Task { @MainActor in
                     guard let self = self else { return }
                     let peerIDString = peer.b58String
                     guard !peerIDString.isEmpty else { return }
 
                     let wasNew = !self.peerManager.hasPeer(peerIDString)
-                    // 不要覆盖已有的地址
-                    // P2PNode.connectToDiscoveredPeer 已经添加了地址到 PeerManager
-                    // 如果 peer 不存在，则添加（地址会在 connectToDiscoveredPeer 中添加）
-                    // 如果 peer 已存在，则保留其现有地址，只更新在线状态
+
+                    // Convert addresses
+                    let multiaddrs = listenAddresses.compactMap { Multiaddr(string: $0) }
+
                     if wasNew {
-                        // 新 peer，先添加（地址会在 connectToDiscoveredPeer 中添加）
-                        // 这里使用空数组，因为地址会在 connectToDiscoveredPeer 中通过 addOrUpdatePeer 添加
-                        self.peerManager.addOrUpdatePeer(peer, addresses: [])
+                        self.peerManager.addOrUpdatePeer(peer, addresses: multiaddrs)
+                    } else if !multiaddrs.isEmpty {
+                        // Always update addresses if provided
+                        self.peerManager.addOrUpdatePeer(peer, addresses: multiaddrs)
                     }
                     // 更新在线状态（无论新旧 peer 都需要更新）
                     // 收到广播表示设备在线，更新 lastSeenTime 和在线状态
-                    let wasOnline = self.peerManager.isOnline(peerIDString)
+
                     self.peerManager.updateOnlineStatus(peerIDString, isOnline: true)
                     self.peerManager.updateLastSeen(peerIDString)  // 更新最后可见时间
 
@@ -223,9 +220,6 @@ public class SyncManager: ObservableObject {
                     // 收到广播时，无论状态是否变化，都更新设备统计和列表，确保同步
                     // 这样可以确保统计数据和"所有设备"列表始终保持一致
                     self.updateDeviceCounts()
-                    if wasNew || !wasOnline {
-                    }
-                    // 减少收到广播的日志输出，只在状态变化时输出
 
                     // 利用广播中的 syncID 信息，只对匹配的 syncID 触发同步
                     let remoteSyncIDSet = Set(remoteSyncIDs)
@@ -246,19 +240,47 @@ public class SyncManager: ObservableObject {
                     // 对于新对等点，只同步匹配的文件夹
                     // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹
                     Task { @MainActor in
-                        // syncWithPeer 内部会处理对等点注册，这里直接调用即可
-                        for folder in matchingFolders {
-                            if wasNew {
-                                // 新 peer，立即同步匹配的文件夹
-                                self.syncWithPeer(peer: peer, folder: folder)
-                            } else {
-                                // 已存在的 peer，只同步不在冷却期内的文件夹
+                        // 只对已存在的 peer 进行增量同步（如果连接可用）
+                        // 新 peer 的同步移至 onPeerConnected 处理
+                        if !wasNew {
+                            for folder in matchingFolders {
                                 if self.shouldSyncFolderWithPeer(
                                     peerID: peerIDString, folder: folder)
                                 {
+                                    // 这里最好也检查一下 WebRTC 是否就绪，但目前 syncWithPeer 内部会处理（或失败）
+                                    // 对于增量更新，假设连接已建立
                                     self.syncWithPeer(peer: peer, folder: folder)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // 处理 WebRTC 连接建立（DataChannel 就绪）
+            p2pNode.onPeerConnected = { [weak self] peerIDString in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    AppLogger.syncPrint(
+                        "[SyncManager] 🔗 Peer 连接就绪 (DataChannel Open): \(peerIDString.prefix(12))..."
+                    )
+
+                    // 获取 Peer 信息
+                    guard let peerInfo = self.peerManager.getPeer(peerIDString) else { return }
+
+                    // 查找匹配的文件夹
+                    let remoteSyncIDSet = Set(peerInfo.syncIDs)
+                    let matchingFolders = self.folders.filter { folder in
+                        remoteSyncIDSet.contains(folder.syncID)
+                    }
+
+                    guard !matchingFolders.isEmpty else { return }
+                    AppLogger.syncPrint("[SyncManager] 🔄 触发初始化同步: \(matchingFolders.count) 个文件夹")
+
+                    for folder in matchingFolders {
+                        // 使用 PeerID 对象构建
+                        if let peerID = PeerID(cid: peerIDString) {
+                            self.syncWithPeer(peer: peerID, folder: folder)
                         }
                     }
                 }

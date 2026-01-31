@@ -8,6 +8,9 @@ protocol WebRTCManagerDelegate: AnyObject {
     func webRTCManager(
         _ manager: WebRTCManager, didChangeConnectionState state: RTCIceConnectionState,
         for peerID: String)
+    func webRTCManager(
+        _ manager: WebRTCManager, didChangeDataChannelState state: RTCDataChannelState,
+        for peerID: String)
     func webRTCManager(_ manager: WebRTCManager, didReceiveData data: Data, from peerID: String)
 }
 
@@ -56,6 +59,12 @@ public class WebRTCManager: NSObject {
         for pc in pcs {
             pc.close()
         }
+    }
+
+    public func hasConnection(for peerID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return peerConnections[peerID] != nil
     }
 
     // MARK: - Connection Management
@@ -316,6 +325,24 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
 extension WebRTCManager: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         print("[WebRTC] DataChannel State Changed: \(dataChannel.readyState.rawValue)")
+
+        // Find which peer this belongs to
+        var peerID: String?
+        lock.lock()
+        for (pid, dc) in dataChannels {
+            if dc === dataChannel {
+                peerID = pid
+                break
+            }
+        }
+        lock.unlock()
+
+        if let peerID = peerID {
+            DispatchQueue.main.async {
+                self.delegate?.webRTCManager(
+                    self, didChangeDataChannelState: dataChannel.readyState, for: peerID)
+            }
+        }
     }
 
     public func dataChannel(

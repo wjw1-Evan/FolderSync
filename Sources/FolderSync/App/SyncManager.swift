@@ -302,7 +302,8 @@ public class SyncManager: ObservableObject {
                     for folder in self.folders {
                         self.updateFolderStatus(
                             folder.id, status: .error,
-                            message: "P2P 节点启动失败: \(error.localizedDescription)")
+                            message: "P2P 节点启动失败: \(error.localizedDescription)",
+                            errorDetail: String(describing: error))
                     }
                 }
             }

@@ -290,6 +290,7 @@ struct FolderRow: View {
     @State private var isHovered = false
     @State private var showCopySuccess = false
     @State private var showingRemoveConfirmation = false
+    @State private var showingErrorDetail = false
 
     // 从 syncManager 中获取最新的 folder 对象
     private var folder: SyncFolder? {
@@ -335,7 +336,19 @@ struct FolderRow: View {
                                         .font(.headline)
                                         .lineLimit(1)
                                     Spacer()
-                                    StatusBadge(status: folder.status)
+                                    StatusBadge(
+                                        status: folder.status,
+                                        hasDetail: folder.lastErrorDetail != nil
+                                    )
+                                    .onTapGesture {
+                                        if folder.status == .error && folder.lastErrorDetail != nil
+                                        {
+                                            showingErrorDetail = true
+                                        }
+                                    }
+                                    .help(
+                                        folder.status == .error && folder.lastErrorDetail != nil
+                                            ? LocalizedString.errorDetail : "")
                                 }
 
                                 // 路径和同步ID（同一行）
@@ -542,6 +555,13 @@ struct FolderRow: View {
                 }
             }
         }
+        .sheet(isPresented: $showingErrorDetail) {
+            if let folder = folder, let errorDetail = folder.lastErrorDetail {
+                ErrorDetailSheet(
+                    message: folder.lastSyncMessage ?? LocalizedString.errorSummary,
+                    detail: errorDetail)
+            }
+        }
         .sheet(isPresented: $showingExcludeRules) {
             if let folder = folder {
                 ExcludeRulesView(folder: folder)
@@ -578,16 +598,24 @@ struct FolderRow: View {
 
 struct StatusBadge: View {
     let status: SyncStatus
+    var hasDetail: Bool = false
 
     var body: some View {
-        Text(LocalizedString.syncStatus(status).uppercased())
-            .font(.caption2)
-            .fontWeight(.bold)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .background(backgroundColor.opacity(0.1))
-            .foregroundStyle(backgroundColor)
-            .clipShape(Capsule())
+        HStack(spacing: 4) {
+            Text(LocalizedString.syncStatus(status).uppercased())
+            if status == .error && hasDetail {
+                Image(systemName: "info.circle.fill")
+                    .font(.caption2)
+            }
+        }
+        .font(.caption2)
+        .fontWeight(.bold)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+        .background(backgroundColor.opacity(0.1))
+        .foregroundStyle(backgroundColor)
+        .clipShape(Capsule())
+        .contentShape(Rectangle())  // 使整个胶囊区域可点击
     }
 
     var backgroundColor: Color {
@@ -597,6 +625,124 @@ struct StatusBadge: View {
         case .error: return .red
         case .paused: return .orange
         }
+    }
+}
+
+struct ErrorDetailSheet: View {
+    @Environment(\.dismiss) var dismiss
+    let message: String
+    let detail: String
+    @State private var showCopySuccess = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text(LocalizedString.errorDetail)
+                    .font(.headline)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .background(Color.secondary.opacity(0.05))
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Summary
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            LocalizedString.errorMessageLabel,
+                            systemImage: "exclamationmark.octagon.fill"
+                        )
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.red)
+
+                        Text(message)
+                            .font(.body)
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.red.opacity(0.05))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.red.opacity(0.1), lineWidth: 1)
+                            )
+                    }
+
+                    // Detailed Error
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(LocalizedString.detailedErrorLabel, systemImage: "info.bubble.fill")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+
+                        Text(detail)
+                            .font(.system(.body, design: .monospaced))
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.secondary.opacity(0.05))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                            )
+                    }
+                }
+                .padding()
+            }
+
+            // Footer / Actions
+            Divider()
+            HStack {
+                Button {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    let fullError =
+                        "\(LocalizedString.errorMessageLabel) \(message)\n\n\(LocalizedString.detailedErrorLabel)\n\(detail)"
+                    pasteboard.setString(fullError, forType: .string)
+
+                    withAnimation {
+                        showCopySuccess = true
+                    }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        await MainActor.run {
+                            withAnimation {
+                                showCopySuccess = false
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Image(systemName: showCopySuccess ? "checkmark" : "doc.on.doc")
+                        Text(showCopySuccess ? LocalizedString.copied : LocalizedString.copyError)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(showCopySuccess ? .green : .blue)
+                .controlSize(.large)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text(LocalizedString.done)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            .padding()
+        }
+        .frame(width: 500, height: 450)
     }
 }
 

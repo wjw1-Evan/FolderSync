@@ -148,6 +148,13 @@ enum LocalizedString {
     static let counting = "统计中...".localized
     static let pendingTransfers = "待传输".localized
 
+    // MARK: - 错误详情
+    static let errorDetail = "错误详情".localized
+    static let errorSummary = "同步出错".localized
+    static let errorMessageLabel = "错误信息:".localized
+    static let detailedErrorLabel = "详细信息:".localized
+    static let copyError = "复制错误信息".localized
+
     // MARK: - 状态
     static func syncStatus(_ status: SyncStatus) -> String {
         switch status {

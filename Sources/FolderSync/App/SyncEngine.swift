@@ -80,7 +80,8 @@ class SyncEngine {
                 AppLogger.syncPrint(
                     "[SyncEngine] ❌ [syncWithPeer] 对等点注册失败，跳过同步: \(peerID.prefix(12))...")
                 syncManager.updateFolderStatus(
-                    folder.id, status: .error, message: "对等点注册失败", progress: 0.0)
+                    folder.id, status: .error, message: "对等点注册失败", progress: 0.0,
+                    errorDetail: "无法在 \(peerID) 上注册对等点，可能该设备已不再在线或网络受限。")
                 return
             }
 
@@ -205,7 +206,8 @@ class SyncEngine {
             guard !peerID.isEmpty else {
                 AppLogger.syncPrint("[SyncEngine] ❌ performSync: PeerID 无效")
                 syncManager.updateFolderStatus(
-                    currentFolder.id, status: .error, message: "PeerID 无效")
+                    currentFolder.id, status: .error, message: "PeerID 无效",
+                    errorDetail: "同步尝试中使用的 PeerID 为空。")
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -224,7 +226,8 @@ class SyncEngine {
             if peerAddresses.isEmpty {
                 AppLogger.syncPrint("[SyncEngine] ⚠️ performSync: 对等点没有可用地址")
                 syncManager.updateFolderStatus(
-                    currentFolder.id, status: .error, message: "对等点无可用地址", progress: 0.0)
+                    currentFolder.id, status: .error, message: "对等点无可用地址", progress: 0.0,
+                    errorDetail: "无法通过局域网发现该对等点的 IP 地址和信令端口。")
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -267,7 +270,8 @@ class SyncEngine {
 
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error,
-                    message: "对等点连接失败 (多次重试后): \(error.localizedDescription)", progress: 0.0)
+                    message: "对等点连接失败 (多次重试后): \(error.localizedDescription)", progress: 0.0,
+                    errorDetail: String(describing: error))
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -481,7 +485,8 @@ class SyncEngine {
                 AppLogger.syncPrint("[SyncEngine] ❌ [performSync] 获取远程文件列表最终失败: \(error)")
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error,
-                    message: "获取远程文件列表失败 (多次重试后): \(error.localizedDescription)")
+                    message: "获取远程文件列表失败 (多次重试后): \(error.localizedDescription)",
+                    errorDetail: String(describing: error))
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -1697,7 +1702,9 @@ class SyncEngine {
             syncManager.removeFolderPeer(syncID, peerID: peerID)
             let errorMessage =
                 error.localizedDescription.isEmpty ? "同步失败: \(error)" : error.localizedDescription
-            syncManager.updateFolderStatus(currentFolder.id, status: .error, message: errorMessage)
+            syncManager.updateFolderStatus(
+                currentFolder.id, status: .error, message: errorMessage,
+                errorDetail: String(describing: error))
 
             let log = SyncLog(
                 syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,

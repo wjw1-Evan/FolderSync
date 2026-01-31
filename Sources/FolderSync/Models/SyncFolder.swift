@@ -15,7 +15,7 @@ public enum SyncStatus: String, Codable {
 
 public struct SyncFolder: Identifiable, Codable, Equatable {
     public let id: UUID
-    public let syncID: String // Global unique identifier for the sync group
+    public let syncID: String  // Global unique identifier for the sync group
     public var localPath: URL
     public var mode: SyncMode
     public var status: SyncStatus
@@ -23,34 +23,40 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
     public var lastSyncMessage: String?
     public var lastSyncedAt: Date?
     public var peerCount: Int = 0
-    public var fileCount: Int? = nil // 文件数量，nil 表示尚未统计
-    public var folderCount: Int? = nil // 文件夹数量，nil 表示尚未统计
-    public var totalSize: Int64? = nil // 全部文件的总大小（字节），nil 表示尚未统计
+    public var fileCount: Int? = nil  // 文件数量，nil 表示尚未统计
+    public var folderCount: Int? = nil  // 文件夹数量，nil 表示尚未统计
+    public var totalSize: Int64? = nil  // 全部文件的总大小（字节），nil 表示尚未统计
+    public var lastErrorDetail: String?
     public var excludePatterns: [String]
-    
-    public init(id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay, status: SyncStatus = .synced, excludePatterns: [String] = []) {
+
+    public init(
+        id: UUID = UUID(), syncID: String, localPath: URL, mode: SyncMode = .twoWay,
+        status: SyncStatus = .synced, excludePatterns: [String] = []
+    ) {
         self.id = id
         self.syncID = syncID
         self.localPath = localPath
         self.mode = mode
         self.status = status
-        self.fileCount = nil // 初始化为 nil，表示尚未统计
+        self.fileCount = nil  // 初始化为 nil，表示尚未统计
         self.folderCount = nil
         self.totalSize = nil
         self.excludePatterns = excludePatterns
+        self.lastErrorDetail = nil
     }
-    
+
     // 自定义编码/解码以正确处理 URL
     enum CodingKeys: String, CodingKey {
         case id, syncID, localPath, mode, status, syncProgress
-        case lastSyncMessage, lastSyncedAt, peerCount, fileCount, folderCount, totalSize, excludePatterns
+        case lastSyncMessage, lastErrorDetail, lastSyncedAt, peerCount, fileCount, folderCount,
+            totalSize, excludePatterns
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         syncID = try container.decode(String.self, forKey: .syncID)
-        
+
         // URL 需要特殊处理：先解码为字符串，再转换为 URL
         let pathString = try container.decode(String.self, forKey: .localPath)
         if let url = URL(string: pathString) {
@@ -58,34 +64,38 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
         } else {
             // 如果 URL(string:) 失败，尝试使用 fileURL(withPath:)
             // 移除 file:// 前缀（如果存在）
-            let filePath = pathString.hasPrefix("file://") ? String(pathString.dropFirst(7)) : pathString
+            let filePath =
+                pathString.hasPrefix("file://") ? String(pathString.dropFirst(7)) : pathString
             localPath = URL(fileURLWithPath: filePath)
         }
-        
+
         mode = try container.decode(SyncMode.self, forKey: .mode)
         status = try container.decode(SyncStatus.self, forKey: .status)
         syncProgress = try container.decodeIfPresent(Double.self, forKey: .syncProgress) ?? 0.0
         lastSyncMessage = try container.decodeIfPresent(String.self, forKey: .lastSyncMessage)
+        lastErrorDetail = try container.decodeIfPresent(String.self, forKey: .lastErrorDetail)
         lastSyncedAt = try container.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
         peerCount = try container.decodeIfPresent(Int.self, forKey: .peerCount) ?? 0
         fileCount = try container.decodeIfPresent(Int.self, forKey: .fileCount)
         folderCount = try container.decodeIfPresent(Int.self, forKey: .folderCount)
         totalSize = try container.decodeIfPresent(Int64.self, forKey: .totalSize)
-        excludePatterns = try container.decodeIfPresent([String].self, forKey: .excludePatterns) ?? []
+        excludePatterns =
+            try container.decodeIfPresent([String].self, forKey: .excludePatterns) ?? []
     }
-    
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(syncID, forKey: .syncID)
-        
+
         // URL 编码为字符串（使用绝对路径）
         try container.encode(localPath.absoluteString, forKey: .localPath)
-        
+
         try container.encode(mode, forKey: .mode)
         try container.encode(status, forKey: .status)
         try container.encode(syncProgress, forKey: .syncProgress)
         try container.encodeIfPresent(lastSyncMessage, forKey: .lastSyncMessage)
+        try container.encodeIfPresent(lastErrorDetail, forKey: .lastErrorDetail)
         try container.encodeIfPresent(lastSyncedAt, forKey: .lastSyncedAt)
         try container.encode(peerCount, forKey: .peerCount)
         try container.encodeIfPresent(fileCount, forKey: .fileCount)
@@ -93,7 +103,7 @@ public struct SyncFolder: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(totalSize, forKey: .totalSize)
         try container.encode(excludePatterns, forKey: .excludePatterns)
     }
-    
+
     // Equatable 实现：基于 id 进行比较
     public static func == (lhs: SyncFolder, rhs: SyncFolder) -> Bool {
         return lhs.id == rhs.id

@@ -22,14 +22,18 @@ extension SyncManager {
             isDirectory.boolValue
         else {
             AppLogger.syncPrint("[SyncManager] ❌ 文件夹不存在或不是目录: \(folderPath.path)")
-            updateFolderStatus(folder.id, status: .error, message: "文件夹不存在或不是目录")
+            updateFolderStatus(
+                folder.id, status: .error, message: "文件夹不存在或不是目录",
+                errorDetail: "路径: \(folderPath.path)\n请确保文件夹路径正确且未被移除。")
             return
         }
 
         // 检查读取权限
         guard fileManager.isReadableFile(atPath: folderPath.path) else {
             AppLogger.syncPrint("[SyncManager] ❌ 没有读取权限: \(folderPath.path)")
-            updateFolderStatus(folder.id, status: .error, message: "没有读取权限，请检查文件夹权限设置")
+            updateFolderStatus(
+                folder.id, status: .error, message: "没有读取权限，请检查文件夹权限设置",
+                errorDetail: "路径: \(folderPath.path)\n请在系统设置中授予应用访问此文件夹的权限。")
             return
         }
 
@@ -37,7 +41,9 @@ extension SyncManager {
         if folder.mode == .twoWay || folder.mode == .uploadOnly {
             guard fileManager.isWritableFile(atPath: folderPath.path) else {
                 AppLogger.syncPrint("[SyncManager] ❌ 没有写入权限: \(folderPath.path)")
-                updateFolderStatus(folder.id, status: .error, message: "没有写入权限，请检查文件夹权限设置")
+                updateFolderStatus(
+                    folder.id, status: .error, message: "没有写入权限，请检查文件夹权限设置",
+                    errorDetail: "路径: \(folderPath.path)\n请在系统设置中授予应用访问此文件夹的权限。")
                 return
             }
         }
@@ -45,7 +51,9 @@ extension SyncManager {
         // 验证 syncID 格式
         guard SyncIDManager.isValidSyncID(folder.syncID) else {
             AppLogger.syncPrint("[SyncManager] ❌ syncID 格式无效: \(folder.syncID)")
-            updateFolderStatus(folder.id, status: .error, message: "syncID 格式无效（至少4个字符，只能包含字母和数字）")
+            updateFolderStatus(
+                folder.id, status: .error, message: "syncID 格式无效（至少4个字符，只能包含字母和数字）",
+                errorDetail: "输入的 ID: \(folder.syncID)\n请使用符合要求的 Sync ID。")
             return
         }
 
@@ -56,7 +64,9 @@ extension SyncManager {
             if let existingInfo = syncIDManager.getSyncIDInfo(folder.syncID),
                 existingInfo.folderID != folder.id
             {
-                updateFolderStatus(folder.id, status: .error, message: "syncID 已被其他文件夹使用")
+                updateFolderStatus(
+                    folder.id, status: .error, message: "syncID 已被其他文件夹使用",
+                    errorDetail: "该 Sync ID 已被本地其他同步文件夹占用，请更换 ID 或移除冲突文件夹。")
                 return
             }
         }
@@ -64,7 +74,9 @@ extension SyncManager {
         folders.append(normalizedFolder)
         do {
             try StorageManager.shared.saveFolder(normalizedFolder)
-            AppLogger.syncPrint("[SyncManager] ✅ 文件夹配置已保存: \(normalizedFolder.localPath.path) (syncID: \(folder.syncID))")
+            AppLogger.syncPrint(
+                "[SyncManager] ✅ 文件夹配置已保存: \(normalizedFolder.localPath.path) (syncID: \(folder.syncID))"
+            )
         } catch {
             AppLogger.syncPrint("[SyncManager] ❌ 无法保存文件夹配置: \(error)")
             AppLogger.syncPrint("[SyncManager] 错误详情: \(error.localizedDescription)")
@@ -72,20 +84,21 @@ extension SyncManager {
             folders.removeAll { $0.id == folder.id }
             syncIDManager.unregisterSyncID(folder.syncID)
             updateFolderStatus(
-                folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)")
+                folder.id, status: .error, message: "无法保存配置: \(error.localizedDescription)",
+                errorDetail: String(describing: error))
             return
         }
-        
+
         // 重要：检查本地文件夹是否为空，如果为空则清空快照数据
         // 这样可以避免添加新文件夹时，如果之前有快照数据（可能是其他文件夹的），误判为删除
         Task {
             let fileManager = FileManager.default
             let folderPath = normalizedFolder.localPath.path
-            
+
             // 检查文件夹是否为空（只检查文件，不包括子目录）
             let contents = try? fileManager.contentsOfDirectory(atPath: folderPath)
             let isEmpty = contents?.isEmpty ?? true
-            
+
             if isEmpty {
                 // 文件夹为空，清空该 syncID 的快照数据和状态
                 AppLogger.syncPrint("[SyncManager] 🔄 检测到新文件夹为空，清空快照数据: syncID=\(folder.syncID)")
@@ -93,16 +106,16 @@ extension SyncManager {
                     // 清空 lastKnownLocalPaths 和 lastKnownMetadata
                     self.lastKnownLocalPaths[folder.syncID] = []
                     self.lastKnownMetadata[folder.syncID] = [:]
-                    
+
                     // 清空删除记录
                     self.removeDeletedPaths(for: folder.syncID)
-                    
+
                     // 清空文件状态存储
                     self.fileStateStores.removeValue(forKey: folder.syncID)
-                    
+
                     // 删除快照文件（如果存在）
                     try? StorageManager.shared.deleteSnapshot(syncID: folder.syncID)
-                    
+
                     AppLogger.syncPrint("[SyncManager] ✅ 已清空新文件夹的快照数据: syncID=\(folder.syncID)")
                 }
             } else {
@@ -110,7 +123,8 @@ extension SyncManager {
                 // 如果快照数据中的文件路径在当前文件夹中不存在，可能是旧的快照数据，应该清空
                 await MainActor.run {
                     if let lastKnown = self.lastKnownLocalPaths[folder.syncID],
-                       !lastKnown.isEmpty {
+                        !lastKnown.isEmpty
+                    {
                         // 检查快照中的文件是否在当前文件夹中存在
                         var hasValidFiles = false
                         for path in lastKnown {
@@ -120,22 +134,24 @@ extension SyncManager {
                                 break
                             }
                         }
-                        
+
                         // 如果快照中的文件都不存在，清空快照数据
                         if !hasValidFiles {
-                            AppLogger.syncPrint("[SyncManager] 🔄 检测到快照数据中的文件都不存在，清空快照数据: syncID=\(folder.syncID)")
+                            AppLogger.syncPrint(
+                                "[SyncManager] 🔄 检测到快照数据中的文件都不存在，清空快照数据: syncID=\(folder.syncID)")
                             self.lastKnownLocalPaths[folder.syncID] = []
                             self.lastKnownMetadata[folder.syncID] = [:]
                             self.removeDeletedPaths(for: folder.syncID)
                             self.fileStateStores.removeValue(forKey: folder.syncID)
                             try? StorageManager.shared.deleteSnapshot(syncID: folder.syncID)
-                            AppLogger.syncPrint("[SyncManager] ✅ 已清空无效的快照数据: syncID=\(folder.syncID)")
+                            AppLogger.syncPrint(
+                                "[SyncManager] ✅ 已清空无效的快照数据: syncID=\(folder.syncID)")
                         }
                     }
                 }
             }
         }
-        
+
         startMonitoring(folder)
 
         // 立即统计文件数量和文件夹数量
@@ -234,7 +250,8 @@ extension SyncManager {
     }
 
     func updateFolderStatus(
-        _ id: UUID, status: SyncStatus, message: String? = nil, progress: Double = 0.0
+        _ id: UUID, status: SyncStatus, message: String? = nil, progress: Double = 0.0,
+        errorDetail: String? = nil
     ) {
         if let index = folders.firstIndex(where: { $0.id == id }) {
             // 创建新的文件夹对象以触发 @Published 更新
@@ -242,8 +259,15 @@ extension SyncManager {
             updatedFolder.status = status
             updatedFolder.lastSyncMessage = message
             updatedFolder.syncProgress = progress
+
+            if let detail = errorDetail {
+                updatedFolder.lastErrorDetail = detail
+            }
+
             if status == .synced {
                 updatedFolder.lastSyncedAt = Date()
+                // 同步成功时清理旧的错误详情
+                updatedFolder.lastErrorDetail = nil
             }
             folders[index] = updatedFolder
 
@@ -262,6 +286,11 @@ extension SyncManager {
                 AppLogger.syncPrint("[SyncManager] 错误详情: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// 更新文件夹错误状态
+    func updateFolderError(_ id: UUID, message: String, detail: String? = nil) {
+        updateFolderStatus(id, status: .error, message: message, errorDetail: detail)
     }
 
     func addPendingTransfers(_ count: Int) {

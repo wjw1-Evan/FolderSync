@@ -68,10 +68,8 @@ class SyncEngine {
                 return
             }
 
-            // 检查是否正在同步
-            if syncManager.syncInProgress.contains(syncKey) {
-                return
-            }
+            // 注意：现在由 SyncManager 在启动 Task 前同步检查并插入 syncInProgress，
+            // 以防止在高频广播下的任务风暴。这里不再进行重复的 contains 检查。
 
             // 确保对等点已注册（带重试机制）
             let registrationResult = await ensurePeerRegistered(peer: peer, peerID: peerID)

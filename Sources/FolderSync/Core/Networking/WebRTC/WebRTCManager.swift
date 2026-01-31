@@ -340,7 +340,7 @@ public class WebRTCManager: NSObject {
         pc.add(candidate.rtcIceCandidate)
     }
 
-    func sendData(_ data: Data, to peerID: String) throws {
+    func sendData(_ data: Data, to peerID: String) async throws {
         lock.lock()
         let dc = dataChannels[peerID]
         lock.unlock()
@@ -357,6 +357,18 @@ public class WebRTCManager: NSObject {
                 userInfo: [
                     NSLocalizedDescriptionKey: "DataChannel not ready: \(dc.readyState.rawValue)"
                 ])
+        }
+
+        // Flow control: If buffer is too full (> 2MB), wait until it's sent
+        var waitCount = 0
+        while dc.bufferedAmount > 2 * 1024 * 1024 {
+            try await Task.sleep(nanoseconds: 100 * 1_000_000)  // 100ms
+            waitCount += 1
+            if waitCount > 100 {  // 10s timeout for flow control
+                AppLogger.syncPrint(
+                    "[WebRTC] ⚠️ Flow control timeout, buffer still full for \(peerID.prefix(8))")
+                break
+            }
         }
 
         let buffer = RTCDataBuffer(data: data, isBinary: true)

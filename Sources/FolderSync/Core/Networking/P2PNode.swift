@@ -286,12 +286,18 @@ public class P2PNode: NSObject {
                 self.pendingRequests[requestID] = continuation
             }
 
-            do {
-                try webRTC.sendData(frameData, to: peerID)
+            if frameData.count > 1024 * 1024 {
+                AppLogger.syncPrint(
+                    "[P2PNode] 📡 Sending large frame: \(frameData.count / 1024) KB (type: \(frame.type), id: \(frame.id))"
+                )
+            }
 
-                // Timeout logic
-                Task {
-                    try await Task.sleep(nanoseconds: 45 * 1_000_000_000)
+            Task {
+                do {
+                    try await webRTC.sendData(frameData, to: peerID)
+
+                    // Timeout logic
+                    try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                     self.requestsQueue.async {
                         if let storedContinuation = self.pendingRequests.removeValue(
                             forKey: requestID)
@@ -305,18 +311,19 @@ public class P2PNode: NSObject {
                                     userInfo: [NSLocalizedDescriptionKey: "Request timed out"]))
                         }
                     }
+                } catch {
+                    self.requestsQueue.async {
+                        if let continuation = self.pendingRequests.removeValue(forKey: requestID) {
+                            continuation.resume(throwing: error)
+                        }
+                    }
                 }
-            } catch {
-                requestsQueue.async {
-                    self.pendingRequests.removeValue(forKey: requestID)
-                }
-                continuation.resume(throwing: error)
             }
         }
     }
 
-    public func sendData(_ data: Data, to peerID: String) throws {
-        try webRTC.sendData(data, to: peerID)
+    public func sendData(_ data: Data, to peerID: String) async throws {
+        try await webRTC.sendData(data, to: peerID)
     }
 
     // MARK: - Helpers
@@ -417,7 +424,12 @@ extension P2PNode: WebRTCManagerDelegate {
                     let responseFrame = WebRTCFrame(
                         id: frame.id, type: "res", payload: responseData)
                     let responseFrameData = try JSONEncoder().encode(responseFrame)
-                    try self.webRTC.sendData(responseFrameData, to: peerID)
+                    if responseFrameData.count > 1024 * 1024 {
+                        AppLogger.syncPrint(
+                            "[P2PNode] 📡 Sending large response: \(responseFrameData.count / 1024) KB (id: \(frame.id))"
+                        )
+                    }
+                    try await self.webRTC.sendData(responseFrameData, to: peerID)
                 } catch {
                     AppLogger.syncPrint("[P2PNode] ❌ Handler error for req \(frame.id): \(error)")
                 }

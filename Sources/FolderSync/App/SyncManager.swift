@@ -56,6 +56,9 @@ public class SyncManager: ObservableObject {
     var peerSyncCooldown: [String: Date] = [:]  // "peerID:syncID" -> 最后同步完成时间
     var peerSyncCooldownDuration: TimeInterval = 30.0  // 同步完成后30秒内不重复同步
 
+    /// 记录每个 syncID+Peer 最后处理广播的时间，用于防抖
+    var lastBroadcastProcessedTime: [String: Date] = [:]
+
     // 设备统计（用于触发UI更新）
     @Published var onlineDeviceCountValue: Int = 1  // 包括自身，默认为1
     @Published var offlineDeviceCountValue: Int = 0
@@ -243,12 +246,26 @@ public class SyncManager: ObservableObject {
                     // 如果连接尚未建立或正在建立，同步逻辑应由 onPeerConnected 触发
                     if !wasNew && self.p2pNode.webRTC.isDataChannelReady(for: peerIDString) {
                         for folder in matchingFolders {
-                            if self.shouldSyncFolderWithPeer(
-                                peerID: peerIDString, folder: folder)
+                            let syncKey = "\(folder.syncID):\(peerIDString)"
+
+                            // 广播防抖：1秒内不重复处理同一个 peer-folder 的广播
+                            if let lastProcessed = self.lastBroadcastProcessedTime[syncKey],
+                                Date().timeIntervalSince(lastProcessed) < 1.0
+                            {
+                                continue
+                            }
+                            self.lastBroadcastProcessedTime[syncKey] = Date()
+
+                            // 关键修复：同步检查并立即插入，防止 Task 启动延迟导致的任务风暴
+                            if !self.syncInProgress.contains(syncKey)
+                                && self.shouldSyncFolderWithPeer(
+                                    peerID: peerIDString, folder: folder)
                             {
                                 AppLogger.syncPrint(
                                     "[SyncManager] 🔄 通过广播触发增量同步: \(peerIDString.prefix(8)), 文件夹: \(folder.syncID)"
                                 )
+                                // 立即占用标志位
+                                self.syncInProgress.insert(syncKey)
                                 self.syncWithPeer(peer: peer, folder: folder)
                             }
                         }
@@ -277,9 +294,15 @@ public class SyncManager: ObservableObject {
                     AppLogger.syncPrint("[SyncManager] 🔄 触发初始化同步: \(matchingFolders.count) 个文件夹")
 
                     for folder in matchingFolders {
-                        // 使用 PeerID 对象构建
-                        if let peerID = PeerID(cid: peerIDString) {
-                            self.syncWithPeer(peer: peerID, folder: folder)
+                        let syncKey = "\(folder.syncID):\(peerIDString)"
+                        if !self.syncInProgress.contains(syncKey)
+                            && self.shouldSyncFolderWithPeer(peerID: peerIDString, folder: folder)
+                        {
+                            // 使用 PeerID 对象构建
+                            if let peerID = PeerID(cid: peerIDString) {
+                                self.syncInProgress.insert(syncKey)
+                                self.syncWithPeer(peer: peerID, folder: folder)
+                            }
                         }
                     }
                 }
@@ -343,7 +366,9 @@ public class SyncManager: ObservableObject {
         syncWriteCooldown = syncWriteCooldown.filter { $0.value > cutoff }
     }
 
-    let ignorePatterns = [".DS_Store", ".git/", "node_modules/", ".build/", ".swiftpm/"]
+    let ignorePatterns = [
+        ".DS_Store", ".git/", "node_modules/", ".build/", ".swiftpm/", ".dat.nosync",
+    ]
 
     /// 更新广播中的 syncID 列表
     func updateBroadcastSyncIDs() {

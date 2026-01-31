@@ -101,6 +101,7 @@ class FileTransfer {
         if let creationDate = remoteMeta.creationDate {
             attributes[FileAttributeKey.creationDate] = creationDate
         }
+        AppLogger.syncPrint("[FileTransfer] 🛠️ 设置文件属性: \(path), mtime=\(remoteMeta.mtime)")
         try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
 
         // 合并 Vector Clock（使用 VectorClockManager）
@@ -316,6 +317,7 @@ class FileTransfer {
         if let creationDate = remoteMeta.creationDate {
             attributes[FileAttributeKey.creationDate] = creationDate
         }
+        AppLogger.syncPrint("[FileTransfer] 🛠️ 设置文件属性: \(path), mtime=\(remoteMeta.mtime)")
         try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
 
         // 合并 Vector Clock（使用 VectorClockManager）

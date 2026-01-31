@@ -62,19 +62,7 @@ extension SyncManager {
                     updateDeletedPaths(dp, for: folder.syncID)
                 }
 
-                // 从 lastKnownMetadata 和 lastKnownLocalPaths 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
-                // 这样可以防止系统尝试将目录作为文件上传
-                if lastKnownMetadata[folder.syncID]?[relativePath] != nil {
-                    AppLogger.syncPrint("[recordLocalChange] 🔄 检测到目录创建，移除文件元数据: \(relativePath)")
-                    lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
-                }
-                // 同时从 lastKnownLocalPaths 中移除，防止系统尝试将目录作为文件处理
-                if lastKnownLocalPaths[folder.syncID]?.contains(relativePath) == true {
-                    AppLogger.syncPrint("[recordLocalChange] 🔄 检测到目录创建，移除已知路径: \(relativePath)")
-                    lastKnownLocalPaths[folder.syncID]?.remove(relativePath)
-                }
-                AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略目录（只记录文件变更）: \(relativePath)")
-                return
+                AppLogger.syncPrint("[recordLocalChange] � 检测到目录变更，继续处理以同步属性: \(relativePath)")
             }
         }
 
@@ -146,6 +134,14 @@ extension SyncManager {
         var cachedHash: String? = nil
         let getHash = { () async throws -> String in
             if let h = cachedHash { return h }
+            // Check if directory
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: canonicalAbsolutePath, isDirectory: &isDir),
+                isDir.boolValue
+            {
+                cachedHash = "DIRECTORY"
+                return "DIRECTORY"
+            }
             let h = try await self.computeFileHash(
                 fileURL: URL(fileURLWithPath: canonicalAbsolutePath))
             cachedHash = h
@@ -335,10 +331,33 @@ extension SyncManager {
                         "[recordLocalChange] 📊 当前文件哈希值: \(currentHash.prefix(16))...")
 
                     if currentHash == knownMeta.hash {
-                        // 文件内容没有变化，可能是文件系统触发的误报（如复制操作时原文件触发事件）
-                        // 不记录任何变更
-                        AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件内容未变化（哈希值相同），可能是复制操作时的误报")
-                        return
+                        // 哈希相同，检查元数据（mtime/creationDate）是否变化
+                        let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
+                        let currentMtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                        let currentCreation = attrs?[.creationDate] as? Date
+
+                        let mtimeChanged =
+                            abs(knownMeta.mtime.timeIntervalSince(currentMtime)) > 0.001
+                        // creationDate 比较：只有当两者都存在且不同，或者一个存在一个不存在时才算变化
+                        // 注意：FileMetadata creationDate 是可选的
+                        let creationChanged: Bool
+                        if let oldC = knownMeta.creationDate, let newC = currentCreation {
+                            creationChanged = abs(oldC.timeIntervalSince(newC)) > 0.001
+                        } else if knownMeta.creationDate == nil && currentCreation == nil {
+                            creationChanged = false
+                        } else {
+                            // 一个有值一个没值，认为变了
+                            creationChanged = true
+                        }
+
+                        if !mtimeChanged && !creationChanged {
+                            AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件内容及元数据未变化")
+                            return
+                        }
+                        AppLogger.syncPrint(
+                            "[recordLocalChange] ✅ 记录为修改：元数据已变化 (mtime: \(mtimeChanged), creation: \(creationChanged))"
+                        )
+                        // 继续执行作为 modified 处理
                     } else {
                         // 文件内容确实变化了，记录为修改
                         AppLogger.syncPrint("[recordLocalChange] ✅ 记录为修改：文件内容已变化（哈希值不同）")
@@ -596,6 +615,7 @@ extension SyncManager {
                     let hash = try await getHash()
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                    let creationDate = attrs?[.creationDate] as? Date
 
                     if lastKnownMetadata[folder.syncID] == nil {
                         lastKnownMetadata[folder.syncID] = [:]
@@ -603,6 +623,7 @@ extension SyncManager {
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
                         mtime: mtime,
+                        creationDate: creationDate,
                         vectorClock: updatedVC
                     )
                     AppLogger.syncPrint("[recordLocalChange] 🔄 已更新已知路径和元数据: \(relativePath)")
@@ -617,6 +638,7 @@ extension SyncManager {
                     let hash = try await getHash()
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+                    let creationDate = attrs?[.creationDate] as? Date
 
                     if lastKnownMetadata[folder.syncID] == nil {
                         lastKnownMetadata[folder.syncID] = [:]
@@ -624,6 +646,7 @@ extension SyncManager {
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
                         mtime: mtime,
+                        creationDate: creationDate,
                         vectorClock: updatedVC
                     )
                     AppLogger.syncPrint("[recordLocalChange] 🔄 已更新元数据: \(relativePath)")

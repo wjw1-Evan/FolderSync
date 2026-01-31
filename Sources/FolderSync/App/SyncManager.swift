@@ -27,6 +27,10 @@ public class SyncManager: ObservableObject {
     var uploadSamples: [(Date, Int64)] = []
     var downloadSamples: [(Date, Int64)] = []
     let speedWindow: TimeInterval = 3
+    var pendingUploadBytes: Int64 = 0
+    var lastUploadUpdate: Date = Date()
+    var pendingDownloadBytes: Int64 = 0
+    var lastDownloadUpdate: Date = Date()
 
     // 同步状态管理
     var lastKnownLocalPaths: [String: Set<String>] = [:]
@@ -234,10 +238,12 @@ public class SyncManager: ObservableObject {
                     self.updateDeviceCounts()
 
                     // 利用广播中的 syncID 信息，只对匹配的 syncID 触发同步
+                    /*
                     let remoteSyncIDSet = Set(remoteSyncIDs)
                     let matchingFolders = self.folders.filter { folder in
                         remoteSyncIDSet.contains(folder.syncID)
                     }
+                    */
 
                     /*
                     if !matchingFolders.isEmpty {
@@ -255,10 +261,18 @@ public class SyncManager: ObservableObject {
                     // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹
                     // 只有当 DataChannel 已经就绪时才通过广播触发增量同步
                     // 如果连接尚未建立或正在建立，同步逻辑应由 onPeerConnected 触发
+                    // 优化：移除了基于广播的定时同步逻辑
+                    // 这里的逻辑会导致每收到一次广播就尝试同步一次（尽管有 30s 冷却），造成不必要的资源消耗。
+                    // 现在的同步策略改为事件驱动：
+                    // 1. 设备上线时：由 onPeerConnected 触发一次初始同步
+                    // 2. 文件变化时：由 FolderMonitor 触发增量同步
+                    // 因此，这里不再需要处理广播触发的同步。
+
+                    /*
                     if !wasNew && self.p2pNode.webRTC.isDataChannelReady(for: peerIDString) {
                         for folder in matchingFolders {
                             let syncKey = "\(folder.syncID):\(peerIDString)"
-
+                    
                             // 广播防抖：1秒内不重复处理同一个 peer-folder 的广播
                             if let lastProcessed = self.lastBroadcastProcessedTime[syncKey],
                                 Date().timeIntervalSince(lastProcessed) < 1.0
@@ -266,7 +280,7 @@ public class SyncManager: ObservableObject {
                                 continue
                             }
                             self.lastBroadcastProcessedTime[syncKey] = Date()
-
+                    
                             // 关键修复：同步检查并立即插入，防止 Task 启动延迟导致的任务风暴
                             if !self.syncInProgress.contains(syncKey)
                                 && self.shouldSyncFolderWithPeer(
@@ -281,6 +295,7 @@ public class SyncManager: ObservableObject {
                             }
                         }
                     }
+                    */
                 }
             }
 

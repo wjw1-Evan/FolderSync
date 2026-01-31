@@ -104,6 +104,8 @@ class FileTransfer {
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
+        syncManager.addDownloadBytes(Int64(data.count))
+
         return (
             Int64(data.count),
             SyncLog.SyncedFileInfo(
@@ -230,6 +232,7 @@ class FileTransfer {
                         activeChunks -= 1
                         if let (_, data) = result {
                             downloadedBytes += Int64(data.count)
+                            syncManager.addDownloadBytes(Int64(data.count))
                         }
 
                         // 补充新任务
@@ -417,6 +420,8 @@ class FileTransfer {
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
+        syncManager.addUploadBytes(Int64(data.count))
+
         return (
             Int64(data.count),
             SyncLog.SyncedFileInfo(
@@ -556,6 +561,7 @@ class FileTransfer {
                         activeChunks -= 1
                         if let (_, bytes) = result {
                             uploadedBytes += bytes
+                            syncManager.addUploadBytes(bytes)
                         }
 
                         // 补充新任务

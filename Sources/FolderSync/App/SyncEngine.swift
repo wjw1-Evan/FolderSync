@@ -1406,7 +1406,7 @@ class SyncEngine {
             }
             defer { cleanupPendingTransfers() }
 
-            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo)?.self) { group in
+            await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo, Bool)?.self) { group in
                 var activeDownloads = 0
 
                 for item in downloadItems {
@@ -1416,11 +1416,13 @@ class SyncEngine {
                         activeDownloads -= 1
                         if let result = result {
                             markTransferCompleted(direction: .download)
-                            if let (bytes, fileInfo) = result {
+                            if let (bytes, fileInfo, statsUpdated) = result {
                                 totalDownloadBytes += bytes
                                 syncedFiles.append(fileInfo)
                                 completedOps += 1
-                                await MainActor.run { syncManager.addDownloadBytes(bytes) }
+                                if !statsUpdated {
+                                    await MainActor.run { syncManager.addDownloadBytes(bytes) }
+                                }
                                 await MainActor.run {
                                     syncManager.updateFolderStatus(
                                         currentFolder.id, status: .syncing,
@@ -1475,7 +1477,8 @@ class SyncEngine {
                                         0,
                                         SyncLog.SyncedFileInfo(
                                             path: path, fileName: fileName, folderName: folderName,
-                                            size: 0, operation: .create)
+                                            size: 0, operation: .create),
+                                        true
                                     )
                                 } catch {
                                     AppLogger.syncPrint(
@@ -1496,15 +1499,17 @@ class SyncEngine {
                                 fileSize = s
                             }
                             do {
+                                let (bytes, info): (Int64, SyncLog.SyncedFileInfo)
                                 if fileSize >= self.chunkSyncThreshold {
-                                    return try await ft.downloadFileWithChunks(
+                                    (bytes, info) = try await ft.downloadFileWithChunks(
                                         path: path, remoteMeta: remoteMeta, folder: latestFolder,
                                         peer: peer, peerID: peerID, localMetadata: localMetadata)
                                 } else {
-                                    return try await ft.downloadFileFull(
+                                    (bytes, info) = try await ft.downloadFileFull(
                                         path: path, remoteMeta: remoteMeta, folder: latestFolder,
                                         peer: peer, peerID: peerID, localMetadata: localMetadata)
                                 }
+                                return (bytes, info, true)
                             } catch {
                                 AppLogger.syncPrint(
                                     "[SyncEngine] ❌ 下载文件失败: \(path) - \(error.localizedDescription)"
@@ -1558,7 +1563,8 @@ class SyncEngine {
                                     Int64(data.count),
                                     SyncLog.SyncedFileInfo(
                                         path: path, fileName: fileName, folderName: folderName,
-                                        size: Int64(data.count), operation: .conflict)
+                                        size: Int64(data.count), operation: .conflict),
+                                    false
                                 )
                             } catch {
                                 AppLogger.syncPrint(
@@ -1572,11 +1578,13 @@ class SyncEngine {
 
                 for await result in group {
                     markTransferCompleted(direction: .download)
-                    if let (bytes, fileInfo) = result {
+                    if let (bytes, fileInfo, statsUpdated) = result {
                         totalDownloadBytes += bytes
                         syncedFiles.append(fileInfo)
                         completedOps += 1
-                        await MainActor.run { syncManager.addDownloadBytes(bytes) }
+                        if !statsUpdated {
+                            await MainActor.run { syncManager.addDownloadBytes(bytes) }
+                        }
                         syncManager.updateFolderStatus(
                             currentFolder.id, status: .syncing,
                             message: "下载完成: \(completedOps)/\(totalOps)",
@@ -1600,9 +1608,6 @@ class SyncEngine {
                                 syncedFiles.append(fileInfo)
                                 completedOps += 1
 
-                                await MainActor.run {
-                                    syncManager.addUploadBytes(bytes)
-                                }
                                 await MainActor.run {
                                     syncManager.updateFolderStatus(
                                         currentFolder.id, status: .syncing,
@@ -1724,9 +1729,6 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
 
-                        await MainActor.run {
-                            syncManager.addUploadBytes(bytes)
-                        }
                         syncManager.updateFolderStatus(
                             currentFolder.id, status: .syncing,
                             message: "上传完成: \(completedOps)/\(totalOps)",

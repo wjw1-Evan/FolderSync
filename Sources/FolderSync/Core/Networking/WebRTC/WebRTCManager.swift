@@ -346,10 +346,11 @@ public class WebRTCManager: NSObject {
             peerConnection = newPc
         }
 
-        guard let pc = peerConnection else { return }
-
+        pc.setRemoteDescription(rtcSdp) { error in
             if let error = error {
-                AppLogger.syncPrint("[WebRTC] ❌ Set Remote Description Error for \(peerID.prefix(8)): \(error.localizedDescription)")
+                AppLogger.syncPrint(
+                    "[WebRTC] ❌ Set Remote Description Error for \(peerID.prefix(8)): \(error.localizedDescription)"
+                )
                 return
             }
             AppLogger.syncPrint("[WebRTC] ✅ Set Remote Description Success for \(peerID.prefix(8))")

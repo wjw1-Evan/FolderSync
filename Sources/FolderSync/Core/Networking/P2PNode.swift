@@ -225,6 +225,14 @@ public class P2PNode: NSObject {
 
     public func sendRequest(_ request: SyncRequest, to peerID: String) async throws -> SyncResponse
     {
+        // 先等待 DataChannel 就绪
+        let isReady = await webRTC.waitForDataChannelReady(for: peerID, timeout: 5.0)
+        guard isReady else {
+            throw NSError(
+                domain: "P2PNode", code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "DataChannel not ready after waiting"])
+        }
+
         let requestID = UUID().uuidString
         let requestData = try JSONEncoder().encode(request)
         let frame = WebRTCFrame(id: requestID, type: "req", payload: requestData)

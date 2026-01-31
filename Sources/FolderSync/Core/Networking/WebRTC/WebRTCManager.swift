@@ -72,6 +72,29 @@ public class WebRTCManager: NSObject {
         return peerConnections[peerID] != nil
     }
 
+    /// 检查 DataChannel 是否就绪（已打开）
+    public func isDataChannelReady(for peerID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let dc = dataChannels[peerID] else { return false }
+        return dc.readyState == .open
+    }
+
+    /// 等待 DataChannel 就绪，带超时
+    public func waitForDataChannelReady(for peerID: String, timeout: TimeInterval = 10.0) async
+        -> Bool
+    {
+        let startTime = Date()
+        while Date().timeIntervalSince(startTime) < timeout {
+            if isDataChannelReady(for: peerID) {
+                return true
+            }
+            // 等待 100ms 再检查
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
     // MARK: - Connection Management
 
     /// 发起连接 (Offer)

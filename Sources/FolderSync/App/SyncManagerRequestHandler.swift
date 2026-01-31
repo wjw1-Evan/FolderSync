@@ -6,6 +6,16 @@ import Foundation
 extension SyncManager {
     /// 处理同步请求（统一处理函数）
     func handleSyncRequest(_ syncReq: SyncRequest) async throws -> SyncResponse {
+        let startTime = Date()
+        AppLogger.syncPrint("[SyncManager] 📥 Handling request: \(syncReq)")
+        defer {
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed > 0.1 {
+                AppLogger.syncPrint(
+                    "[SyncManager] ✅ Handled request: \(syncReq.description) in \(String(format: "%.2f", elapsed))s"
+                )
+            }
+        }
         switch syncReq {
         case .getMST(let syncID):
             guard let folder = await findFolder(by: syncID) else {

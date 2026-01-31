@@ -174,7 +174,10 @@ class FolderMonitor {
             }
 
             if hasSyncInProgress {
-                AppLogger.syncPrint("[FolderMonitor] ⏭️ 同步已进行中，跳过防抖触发的同步: \(syncID)")
+                AppLogger.syncPrint("[FolderMonitor] ⏭️ 同步已进行中，延迟重试: \(syncID)")
+                // 重新调度防抖触发（相当于延迟重试）
+                // 注意：这里不需要手动 delay，因为 triggerSyncAfterDebounce 内部会再次等待 debounceDelay
+                self.triggerSyncAfterDebounce(for: folder, syncID: syncID)
                 return
             }
 

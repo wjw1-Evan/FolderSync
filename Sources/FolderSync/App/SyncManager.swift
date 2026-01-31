@@ -330,27 +330,6 @@ public class SyncManager: ObservableObject {
             // 启动定期检查设备在线状态
             startPeerStatusMonitoring()
 
-            // 启动后等待一段时间，然后对所有已注册的在线对等点触发同步
-            // 这确保后启动的客户端能够自动同步文件
-            Task { @MainActor in
-                // 等待5秒，确保所有对等点都已发现并注册
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-
-                // 获取所有已注册的在线对等点
-                let registeredPeers = peerManager.allPeers.filter { peerInfo in
-                    p2pNode.registrationService.isRegistered(peerInfo.peerIDString)
-                        && peerManager.isOnline(peerInfo.peerIDString)
-                }
-
-                if !registeredPeers.isEmpty {
-                    // 对所有已注册的在线对等点触发同步
-                    for folder in folders {
-                        for peerInfo in registeredPeers {
-                            syncWithPeer(peer: peerInfo.peerID, folder: folder)
-                        }
-                    }
-                }
-            }
         }
     }
 

@@ -104,12 +104,10 @@ class SyncDecisionEngine {
                     )
                     return .conflict
                 }
-                // 删除记录的 VC 更旧且时间差较大，理论上应该上传本地文件（删除被覆盖）
-                // 但为了安全，保守处理：如果删除记录的 VC 更旧，说明删除操作更早
-                // 这种情况下，应该保持删除状态，而不是上传文件
-                // 因为删除操作已经发生，不应该被覆盖
-                AppLogger.syncPrint("[SyncDecisionEngine] ⚠️ 删除记录的 VC 更旧，但保守处理为保持删除: 路径=\(path)")
-                return .skip
+                // 删除记录的 VC 更旧且时间差较大，说明本地文件是在远程删除之后重新创建或更新的
+                // 这种情况下，本地版本应该覆盖远程的删除状态（复活文件）
+                AppLogger.syncPrint("[SyncDecisionEngine] 🔄 删除记录的 VC 更旧，本地文件获胜（复活）: 路径=\(path)")
+                return .upload
             case .concurrent:
                 // 并发冲突，保守处理：删除本地，但记录冲突
                 return .conflict

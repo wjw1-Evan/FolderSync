@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -177,9 +178,6 @@ public class LANDiscovery {
         }
     }
 
-    // MARK: - Shared UDP listener (process-wide)
-    // ... (unchanged)
-
     public func start(peerID: String, listenAddresses: [String] = [], syncIDs: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
@@ -213,7 +211,15 @@ public class LANDiscovery {
         broadcastConnection = nil
     }
 
-    // MARK: - Shared listener message handling (per instance)
+    // MARK: - Helper Methods
+
+    private func getSyncIDHash(_ syncID: String) -> String {
+        let inputData = Data(syncID.utf8)
+        let hashed = SHA256.hash(data: inputData)
+        // Use first 8 bytes (16 hex chars)
+        return hashed.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func handleIncomingMessage(_ message: String, from address: String, myPeerID: String) {
         guard isRunning else { return }
 
@@ -224,14 +230,30 @@ public class LANDiscovery {
             return
         }
 
-        // 解析正常的发现消息
+        // 解析正常的发现消息 (returns hashes in syncIDHashes)
         if let peerInfo = parseDiscoveryMessage(message) {
             // Ignore our own broadcasts
             if peerInfo.peerID != myPeerID {
-                onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses, peerInfo.syncIDs)
+                // 安全匹配：只回调那些我们也有的 syncID (通过哈希匹配)
+                // 收到的是对方的 syncID 哈希列表
+                let remoteHashes = Set(peerInfo.syncIDHashes)
+
+                // 计算本地 syncID 的哈希映射: Hash -> OriginalID
+                var localHashMap: [String: String] = [:]
+                for id in currentSyncIDs {
+                    localHashMap[getSyncIDHash(id)] = id
+                }
+
+                // 找出交集 (Mutual SyncIDs)
+                var matchedSyncIDs: [String] = []
+                for hash in remoteHashes {
+                    if let localID = localHashMap[hash] {
+                        matchedSyncIDs.append(localID)
+                    }
+                }
+
+                onPeerDiscovered?(peerInfo.peerID, address, peerInfo.addresses, matchedSyncIDs)
             }
-        } else {
-            AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法解析广播消息: 消息长度=\(message.count)")
         }
     }
 
@@ -257,7 +279,6 @@ public class LANDiscovery {
             let listener = try NWListener(
                 using: parameters, on: NWEndpoint.Port(rawValue: servicePort)!)
 
-            // 使用 UDP 的无连接接收方式
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleIncomingConnection(connection, myPeerID: peerID)
             }
@@ -268,11 +289,9 @@ public class LANDiscovery {
                 case .ready:
                     AppLogger.syncPrint(
                         "[LANDiscovery] ✅ Listener ready on port \(self.servicePort)")
-                    // 监听器就绪后，立即发送一次广播请求，触发其他设备响应
                     self.sendDiscoveryRequest()
                 case .failed(let error):
                     AppLogger.syncPrint("[LANDiscovery] ❌ Listener failed: \(error)")
-                    // 监听器失败时，尝试重新启动
                     if self.isRunning {
                         AppLogger.syncPrint("[LANDiscovery] 🔄 尝试重新启动监听器...")
                         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0)
@@ -297,54 +316,40 @@ public class LANDiscovery {
         }
     }
 
-    /// 发送发现请求，让其他设备知道新设备上线并请求它们广播自己的信息
     func sendDiscoveryRequest() {
         let requestMessage = "{\"type\":\"discovery_request\",\"service\":\"foldersync\"}"
         guard let data = requestMessage.data(using: .utf8) else { return }
-
-        let parameters = NWParameters.udp
-        parameters.allowLocalEndpointReuse = true
 
         let host = NWEndpoint.Host("255.255.255.255")
         let port = NWEndpoint.Port(rawValue: servicePort)!
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
 
-        let connection = NWConnection(to: endpoint, using: parameters)
-
-        // 线程安全地添加连接到数组中以保持强引用，防止被释放
+        let connection = NWConnection(to: endpoint, using: .udp)
         addConnection(connection)
 
-        // 使用 weak self 避免循环引用
         connection.stateUpdateHandler = { [weak self] state in
             guard let self = self else {
-                // 如果 self 已被释放，取消连接
                 connection.cancel()
                 return
             }
 
             switch state {
             case .ready:
-                // 检查连接是否仍然有效（未被取消）
                 connection.send(
                     content: data,
                     completion: .contentProcessed { [weak self] error in
-                        // 无论成功或失败，都要清理连接
                         connection.cancel()
                         self?.removeConnection(connection)
-
                         if let error = error {
                             AppLogger.syncPrint(
                                 "[LANDiscovery] Discovery request send error: \(error)")
                         }
-                        // 减少发现请求的日志输出
                     })
             case .failed(let error):
                 AppLogger.syncPrint("[LANDiscovery] Discovery request connection failed: \(error)")
                 connection.cancel()
-                // 连接失败后，从数组中移除
                 self.removeConnection(connection)
             case .cancelled:
-                // 连接被取消，从数组中移除
                 self.removeConnection(connection)
             default:
                 break
@@ -353,9 +358,7 @@ public class LANDiscovery {
 
         connection.start(queue: DispatchQueue.global(qos: .utility))
 
-        // 设置超时机制：如果连接在10秒内没有完成，自动取消并清理
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10.0) { [weak self] in
-            // 检查连接是否仍在数组中（未完成）
             var shouldCancel = false
             self?.connectionsQueue.sync {
                 shouldCancel =
@@ -363,8 +366,6 @@ public class LANDiscovery {
             }
 
             if shouldCancel {
-                AppLogger.syncPrint(
-                    "[LANDiscovery] ⚠️ Discovery request timeout, cancelling connection")
                 connection.cancel()
                 self?.removeConnection(connection)
             }
@@ -400,9 +401,7 @@ public class LANDiscovery {
             }
 
             if let error = error {
-                // 某些错误是正常的（如连接关闭），不需要记录
                 if case .posix(let code) = error, code == .ECANCELED {
-                    // 正常取消，不需要日志
                 } else {
                     AppLogger.syncPrint("[LANDiscovery] ⚠️ 接收错误: \(error)")
                 }
@@ -410,48 +409,37 @@ public class LANDiscovery {
                 return
             }
 
-            if let data = data, !data.isEmpty {
-                if let message = String(data: data, encoding: .utf8) {
-                    // 检查是否是发现请求
-                    if message.contains("\"type\":\"discovery_request\"") {
-                        // 收到发现请求，立即广播自己的信息作为响应
-                        // 减少日志输出
-                        self.sendBroadcast(
-                            peerID: myPeerID, listenAddresses: self.currentListenAddresses)
-                        // 继续接收
-                        if !isComplete {
-                            self.receiveMessage(from: connection, myPeerID: myPeerID)
-                        }
-                        return
+            if let data = data, !data.isEmpty, let message = String(data: data, encoding: .utf8) {
+                if message.contains("\"type\":\"discovery_request\"") {
+                    self.sendBroadcast(
+                        peerID: myPeerID, listenAddresses: self.currentListenAddresses)
+                    if !isComplete {
+                        self.receiveMessage(from: connection, myPeerID: myPeerID)
                     }
+                    return
+                }
 
-                    // 解析正常的发现消息
-                    if let peerInfo = self.parseDiscoveryMessage(message) {
-                        // Ignore our own broadcasts
-                        if peerInfo.peerID != myPeerID {
-                            let address =
-                                connection.currentPath?.remoteEndpoint?.debugDescription
-                                ?? "unknown"
+                if let peerInfo = self.parseDiscoveryMessage(message) {
+                    if peerInfo.peerID != myPeerID {
+                        let address =
+                            connection.currentPath?.remoteEndpoint?.debugDescription ?? "unknown"
 
-                            // 验证 PeerID
-                            if peerInfo.peerID.isEmpty {
-                                AppLogger.syncPrint("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空，忽略此对等点")
-                                return
-                            }
-
-                            if peerInfo.peerID.count < 10 {
-                                AppLogger.syncPrint(
-                                    "[LANDiscovery] ⚠️ 警告: 解析得到的 PeerID 似乎过短: \(peerInfo.peerID)")
-                            }
-
-                            // 减少日志输出，只在首次发现或每100次输出一次
-                            // 每次收到广播都触发回调，确保 lastSeenTime 被更新
-                            self.onPeerDiscovered?(
-                                peerInfo.peerID, address, peerInfo.addresses, peerInfo.syncIDs)
+                        let remoteHashes = Set(peerInfo.syncIDHashes)
+                        var localHashMap: [String: String] = [:]
+                        for id in self.currentSyncIDs {
+                            localHashMap[self.getSyncIDHash(id)] = id
                         }
-                    } else {
-                        // 减少解析失败的日志输出，只在真正有问题时输出
-                        // AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法解析发现消息: \(message.prefix(100))...")
+                        var matchedSyncIDs: [String] = []
+                        for hash in remoteHashes {
+                            if let localID = localHashMap[hash] {
+                                matchedSyncIDs.append(localID)
+                            }
+                        }
+
+                        if !peerInfo.peerID.isEmpty {
+                            self.onPeerDiscovered?(
+                                peerInfo.peerID, address, peerInfo.addresses, matchedSyncIDs)
+                        }
                     }
                 }
             }
@@ -467,33 +455,21 @@ public class LANDiscovery {
     private func startBroadcasting(peerID: String, listenAddresses: [String]) {
         self.currentListenAddresses = listenAddresses
 
-        // 确保在主线程上创建 Timer，这样它会在主 RunLoop 上运行
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-
-            // 如果已有定时器，先停止它
             self.broadcastTimer?.invalidate()
-
-            // Broadcast every 1 second
             let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) {
                 [weak self] _ in
                 guard let self = self else { return }
-                // 在后台线程发送广播，避免阻塞主线程
                 DispatchQueue.global(qos: .utility).async {
                     self.sendBroadcast(peerID: peerID, listenAddresses: self.currentListenAddresses)
                 }
             }
             RunLoop.current.add(timer, forMode: .common)
             self.broadcastTimer = timer
-
-            // 减少启动日志输出
         }
 
-        // Send initial broadcast immediately
         sendBroadcast(peerID: peerID, listenAddresses: listenAddresses)
-
-        // 在启动后立即发送发现请求，主动寻找已有设备
-        // 延迟一小段时间确保监听器已就绪
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
             [weak self] in
             self?.sendDiscoveryRequest()
@@ -506,7 +482,6 @@ public class LANDiscovery {
 
     public func updateSyncIDs(_ syncIDs: [String]) {
         self.currentSyncIDs = syncIDs
-        // Trigger immediate broadcast with new IDs
         if isRunning && !myPeerID.isEmpty {
             DispatchQueue.global(qos: .utility).async {
                 self.sendBroadcast(
@@ -518,7 +493,6 @@ public class LANDiscovery {
     private func sendBroadcast(peerID: String, listenAddresses: [String]) {
         guard isRunning else { return }
 
-        // 验证地址有效性
         let validAddresses = listenAddresses.filter { addr in
             if let (_, port) = AddressConverter.extractIPPort(from: addr) {
                 return port > 0
@@ -526,42 +500,25 @@ public class LANDiscovery {
             return false
         }
 
-        if validAddresses.isEmpty && !listenAddresses.isEmpty {
-            // 仍然发送广播，但地址列表为空
-        }
-
         let message = createDiscoveryMessage(
             peerID: peerID, listenAddresses: validAddresses, syncIDs: currentSyncIDs)
-        guard let data = message.data(using: .utf8) else {
-            AppLogger.syncPrint("[LANDiscovery] ⚠️ 无法创建广播消息数据")
-            return
-        }
+        guard let data = message.data(using: .utf8) else { return }
 
-        let parameters = NWParameters.udp
-        parameters.allowLocalEndpointReuse = true
-
-        // Create broadcast endpoint
         let host = NWEndpoint.Host("255.255.255.255")
         let port = NWEndpoint.Port(rawValue: servicePort)!
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
 
-        let connection = NWConnection(to: endpoint, using: parameters)
+        let connection = NWConnection(to: endpoint, using: .udp)
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
                 connection.send(
                     content: data,
                     completion: .contentProcessed { error in
-                        if let error = error {
-                            AppLogger.syncPrint("[LANDiscovery] ❌ 广播发送错误: \(error)")
-                        }
                         connection.cancel()
                     })
-            case .failed(let error):
-                AppLogger.syncPrint("[LANDiscovery] ❌ 广播连接失败: \(error)")
+            case .failed:
                 connection.cancel()
-            case .cancelled, .waiting, .preparing:
-                break
             default:
                 break
             }
@@ -572,86 +529,44 @@ public class LANDiscovery {
     private func createDiscoveryMessage(
         peerID: String, listenAddresses: [String] = [], syncIDs: [String] = []
     ) -> String {
-        // JSON format: {"peerID": "...", "service": "foldersync", "addresses": [...], "syncIDs": [...]}
-        // 过滤掉端口为0的地址（0表示自动分配，不能用于连接）
         let validAddresses = listenAddresses.filter { addr in
-            // 检查地址格式：/ip4/IP/tcp/PORT
-            if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") {
-                // 减少过滤日志输出
-                return false
-            }
-            // 使用 AddressConverter 验证地址有效性
-            if AddressConverter.extractIPPort(from: addr) == nil {
-                // 减少过滤日志输出
-                return false
-            }
-            return true
+            if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") { return false }
+            return AddressConverter.extractIPPort(from: addr) != nil
         }
 
-        if validAddresses.isEmpty && !listenAddresses.isEmpty {
-            // 只在真正有问题时输出警告
-            AppLogger.syncPrint("[LANDiscovery] ⚠️ 警告: 所有地址都被过滤，没有有效地址可广播")
-        }
-
-        // 限制 syncID 数量，最多 20 个（避免消息过大）
         let limitedSyncIDs = Array(syncIDs.prefix(20))
+        let syncIDHashes = limitedSyncIDs.map { getSyncIDHash($0) }
 
         let addressesJson = validAddresses.map { "\"\($0)\"" }.joined(separator: ",")
-        let syncIDsJson = limitedSyncIDs.map { "\"\($0)\"" }.joined(separator: ",")
+        let hashesJson = syncIDHashes.map { "\"\($0)\"" }.joined(separator: ",")
+
         return
-            "{\"peerID\":\"\(peerID)\",\"service\":\"foldersync\",\"addresses\":[\(addressesJson)],\"syncIDs\":[\(syncIDsJson)]}"
+            "{\"peerID\":\"\(peerID)\",\"service\":\"foldersync\",\"addresses\":[\(addressesJson)],\"syncIDHashes\":[\(hashesJson)]}"
     }
 
     private func parseDiscoveryMessage(_ message: String) -> (
-        peerID: String, service: String, addresses: [String], syncIDs: [String]
+        peerID: String, service: String, addresses: [String], syncIDHashes: [String]
     )? {
-        guard let data = message.data(using: .utf8) else {
-            AppLogger.syncPrint("[LANDiscovery] ❌ 无法将消息转换为 UTF-8 数据")
-            return nil
-        }
-
+        guard let data = message.data(using: .utf8) else { return nil }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            AppLogger.syncPrint("[LANDiscovery] ❌ 无法解析 JSON: \(message.prefix(100))...")
             return nil
         }
-
-        guard let peerID = json["peerID"] as? String else {
-            AppLogger.syncPrint("[LANDiscovery] ❌ JSON 中缺少 'peerID' 字段")
-            AppLogger.syncPrint("[LANDiscovery]   JSON 键: \(json.keys.joined(separator: ", "))")
-            return nil
-        }
-
-        guard let service = json["service"] as? String, service == "foldersync" else {
-            AppLogger.syncPrint("[LANDiscovery] ⚠️ 服务不匹配或缺失: \(json["service"] ?? "nil")")
-            return nil
-        }
+        guard let peerID = json["peerID"] as? String else { return nil }
+        guard let service = json["service"] as? String, service == "foldersync" else { return nil }
 
         let addresses = (json["addresses"] as? [String]) ?? []
-        let syncIDs = (json["syncIDs"] as? [String]) ?? []
+        let syncIDHashes = (json["syncIDHashes"] as? [String]) ?? []
 
-        // 验证解析结果
-        if peerID.isEmpty {
-            AppLogger.syncPrint("[LANDiscovery] ❌ 错误: 解析得到的 PeerID 为空")
-            return nil
-        }
-
-        // 过滤掉端口为0或无效的地址
+        if peerID.isEmpty { return nil }
         let validAddresses = addresses.filter { addr in
             if let (_, port) = AddressConverter.extractIPPort(from: addr) {
-                if port > 0 {
-                    return true
-                } else {
-                    // 减少过滤日志输出
-                    return false
-                }
-            } else {
-                // 减少过滤日志输出
-                return false
+                return port > 0
             }
+            return false
         }
 
-        // 减少解析成功的详细日志输出
-
-        return (peerID: peerID, service: service, addresses: validAddresses, syncIDs: syncIDs)
+        return (
+            peerID: peerID, service: service, addresses: validAddresses, syncIDHashes: syncIDHashes
+        )
     }
 }

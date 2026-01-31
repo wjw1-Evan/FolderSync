@@ -228,9 +228,7 @@ class FolderStatistics {
                 }
 
                 activeTasks += 1
-                group.addTask { [weak self] in
-                    guard let self = self else { return nil }
-
+                group.addTask {
                     do {
                         let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
                         let mtime = resourceValues.contentModificationDate ?? Date()

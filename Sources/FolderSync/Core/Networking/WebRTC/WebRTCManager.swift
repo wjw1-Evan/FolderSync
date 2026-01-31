@@ -346,6 +346,8 @@ public class WebRTCManager: NSObject {
             peerConnection = newPc
         }
 
+        guard let pc = peerConnection else { return }
+
         pc.setRemoteDescription(rtcSdp) { error in
             if let error = error {
                 AppLogger.syncPrint(
@@ -359,7 +361,8 @@ public class WebRTCManager: NSObject {
             if rtcSdp.type == .offer {
                 let constraints = RTCMediaConstraints(
                     mandatoryConstraints: nil, optionalConstraints: nil)
-                pc.answer(for: constraints) { [weak self] sdp, error in
+                pc.answer(for: constraints) {
+                    [weak self] (sdp: RTCSessionDescription?, error: Error?) in
                     guard let sdp = sdp else { return }
                     pc.setLocalDescription(sdp) { error in
                         if error == nil {

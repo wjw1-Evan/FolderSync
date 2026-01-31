@@ -72,7 +72,10 @@ public class WebRTCManager: NSObject {
     }
 
     deinit {
-        stop()
+        // Cannot call @MainActor method synchronously in deinit.
+        // The cleanup will happen when the object is deallocated, but we can't
+        // guarantee stop() runs before deallocation completes.
+        // This is acceptable since WebRTC handles its own cleanup.
     }
 
     public func stop() {
@@ -115,7 +118,6 @@ public class WebRTCManager: NSObject {
         -> Bool
     {
         let startTime = Date()
-        let pollInterval: TimeInterval = 0.5  // 每 500ms 主动检查一次
 
         // 1. 立即检查
         if isDataChannelReady(for: peerID) {
@@ -125,8 +127,6 @@ public class WebRTCManager: NSObject {
 
         // 2. 检查是否有对应的 PeerConnection
         let pc = peerConnections[peerID]
-        let initialState = pc?.iceConnectionState
-
         if pc == nil {
             AppLogger.syncPrint(
                 "[WebRTC] ❌ Cannot wait for DataChannel: No PeerConnection for \(peerID.prefix(8))"
@@ -134,6 +134,7 @@ public class WebRTCManager: NSObject {
             return false
         }
 
+        let initialState = pc?.iceConnectionState
         if let state = initialState, state == .failed || state == .closed {
             AppLogger.syncPrint(
                 "[WebRTC] ❌ Cannot wait for DataChannel: Connection to \(peerID.prefix(8)) already in state \(state.rawValue)"
@@ -145,89 +146,113 @@ public class WebRTCManager: NSObject {
             "[WebRTC] ⏳ Waiting for DataChannel to \(peerID.prefix(8)), ICE state: \(initialState?.rawValue ?? -1)"
         )
 
-        // 3. 使用主动轮询 + 事件驱动的混合策略
+        // 3. 使用 withCheckedContinuation 并在 Task { @MainActor } 中处理逻辑
         return await withCheckedContinuation { continuation in
             let waiter = Waiter(continuation)
-
-            // 安全的 resume 辅助函数，使用 Waiter.tryResume() 确保只 resume 一次
-            func safeResume(result: Bool, reason: String) {
-                // 从等待列表中移除（无论是否成功 resume）
-                if var currentList = self.pendingReadyContinuations[peerID],
-                    let index = currentList.firstIndex(where: { $0 === waiter })
-                {
-                    currentList.remove(at: index)
-                    self.pendingReadyContinuations[peerID] = currentList
-                }
-
-                // 尝试 resume，如果已经被 resume 过则返回 false
-                if waiter.tryResume(returning: result) {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    AppLogger.syncPrint(
-                        "[WebRTC] \(result ? "✅" : "❌") DataChannel wait \(reason) for \(peerID.prefix(8)) after \(String(format: "%.1f", elapsed))s"
-                    )
-                }
+            Task { @MainActor in
+                self.handleWaitingForDataChannel(
+                    waiter: waiter, peerID: peerID, timeout: timeout, startTime: startTime)
             }
+        }
+    }
 
-            // 添加到等待列表（用于事件驱动的通知）
-            // 再次检查就绪状态（在锁内检查以避免竞态）
-            if let dc = dataChannels[peerID], dc.readyState == .open {
-                safeResume(result: true, reason: "already open (rechecked)")
-                return
+    @MainActor
+    private func handleWaitingForDataChannel(
+        waiter: Waiter, peerID: String, timeout: TimeInterval, startTime: Date
+    ) {
+        let pollInterval: TimeInterval = 0.5
+
+        // 安全的 resume 辅助函数
+        func safeResume(result: Bool, reason: String) {
+            // 从等待列表中移除
+            self.unregisterWaiter(waiter, for: peerID)
+
+            // 尝试 resume
+            if waiter.tryResume(returning: result) {
+                let elapsed = Date().timeIntervalSince(startTime)
+                AppLogger.syncPrint(
+                    "[WebRTC] \(result ? "✅" : "❌") DataChannel wait \(reason) for \(peerID.prefix(8)) after \(String(format: "%.1f", elapsed))s"
+                )
             }
+        }
 
-            var list = pendingReadyContinuations[peerID] ?? []
-            list.append(waiter)
-            pendingReadyContinuations[peerID] = list
+        // 立即再次检查就绪状态
+        if self.isDataChannelReady(for: peerID) {
+            safeResume(result: true, reason: "already open (rechecked)")
+            return
+        }
 
-            // 启动主动轮询任务
-            Task {
-                var pollCount = 0
-                let maxPolls = Int(timeout / pollInterval)
+        // 检查连接是否已经失败
+        let pc = peerConnections[peerID]
+        if pc == nil || pc?.iceConnectionState == .failed || pc?.iceConnectionState == .closed {
+            safeResume(result: false, reason: "connection failed or removed")
+            return
+        }
 
-                while pollCount < maxPolls {
-                    try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
-                    pollCount += 1
+        // 注册到等待列表
+        self.registerWaiter(waiter, for: peerID)
 
-                    // 检查是否已经被事件驱动的逻辑处理
-                    if waiter.hasResumed {
-                        return
-                    }
+        // 启动主动轮询任务
+        Task {
+            var pollCount = 0
+            let maxPolls = Int(timeout / pollInterval)
 
-                    // 主动检查 DataChannel 状态
+            while pollCount < maxPolls {
+                try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                pollCount += 1
+
+                // 检查是否已经被其他逻辑处理（如事件回调）
+                if waiter.hasResumed { return }
+
+                // 回到 MainActor 检查状态
+                await MainActor.run {
                     if self.isDataChannelReady(for: peerID) {
                         safeResume(result: true, reason: "ready (polled)")
                         return
                     }
 
-                    // 检查 ICE 连接状态
                     let currentPC = self.peerConnections[peerID]
                     let currentState = currentPC?.iceConnectionState
-                    let dcState = self.dataChannels[peerID]?.readyState
 
-                    // 如果 PeerConnection 已被移除，终止等待
                     if currentPC == nil {
                         safeResume(result: false, reason: "PeerConnection removed")
                         return
                     }
 
-                    // 如果 ICE 连接失败或关闭，终止等待
                     if let state = currentState, state == .failed || state == .closed {
                         safeResume(result: false, reason: "ICE state \(state.rawValue)")
                         return
                     }
 
-                    // 每 5 次轮询输出一次状态日志
-                    if pollCount % 5 == 0 {
-                        let sigState = currentPC?.signalingState.rawValue ?? -1
+                    if pollCount % 10 == 0 {
+                        let dcState = self.dataChannels[peerID]?.readyState.rawValue ?? -1
                         AppLogger.syncPrint(
-                            "[WebRTC] ⏳ Still waiting for DataChannel to \(peerID.prefix(8)): ICE=\(currentState?.rawValue ?? -1), Sig=\(sigState), DC=\(dcState?.rawValue ?? -1)"
+                            "[WebRTC] ⏳ Still waiting for DataChannel to \(peerID.prefix(8)): ICE=\(currentState?.rawValue ?? -1), DC=\(dcState)"
                         )
                     }
                 }
 
-                // 超时
+                if waiter.hasResumed { return }
+            }
+
+            // 超时
+            await MainActor.run {
                 safeResume(result: false, reason: "timeout")
             }
+        }
+    }
+
+    private func registerWaiter(_ waiter: Waiter, for peerID: String) {
+        var list = pendingReadyContinuations[peerID] ?? []
+        list.append(waiter)
+        pendingReadyContinuations[peerID] = list
+    }
+
+    private func unregisterWaiter(_ waiter: Waiter, for peerID: String) {
+        guard var list = pendingReadyContinuations[peerID], !list.isEmpty else { return }
+        if let index = list.firstIndex(where: { $0 === waiter }) {
+            list.remove(at: index)
+            pendingReadyContinuations[peerID] = list
         }
     }
 
@@ -348,7 +373,7 @@ public class WebRTCManager: NSObject {
         let pc = peerConnections[peerID]
 
         guard let pc = pc else { return }
-        pc.addIceCandidate(candidate.rtcIceCandidate, completionHandler: nil)
+        pc.add(candidate.rtcIceCandidate) { _ in }
     }
 
     func sendData(_ data: Data, to peerID: String) async throws {
@@ -416,11 +441,10 @@ public class WebRTCManager: NSObject {
 
     public func removeConnection(for peerID: String) {
         let pc = peerConnections.removeValue(forKey: peerID)
-        _ = dataChannels.removeValue(forKey: peerID)
+        let dc = dataChannels.removeValue(forKey: peerID)
         if let pc = pc {
             pcToPeerID.removeValue(forKey: ObjectIdentifier(pc))
         }
-    }
 
         dc?.close()
         pc?.close()

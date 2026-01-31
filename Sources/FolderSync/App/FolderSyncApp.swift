@@ -23,8 +23,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct FolderSyncApp: App {
-    @StateObject private var syncManager = SyncManager()
-    @StateObject private var launchManager = LaunchManager()
+    @StateObject private var syncManager: SyncManager
+    @StateObject private var launchManager: LaunchManager
 
     @Environment(\.openWindow) private var openWindow
 
@@ -34,33 +34,33 @@ struct FolderSyncApp: App {
     // AppDelegate 实例
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    private static let instanceLock = SingleInstanceLock()
+
     init() {
+        // Enforce Single Instance using file lock
+        if !Self.instanceLock.tryLock() {
+            Self.logger.error("应用已在运行 (File Lock)，将退出此实例")
+
+            // Try to activate existing app
+            let bundleID = Bundle.main.bundleIdentifier ?? "com.FolderSync.App"
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+                if app != .current {
+                    app.activate()
+                    break
+                }
+            }
+            exit(0)
+        }
+
+        // Initialize managers only after we know we are the only instance
+        _syncManager = StateObject(wrappedValue: SyncManager())
+        _launchManager = StateObject(wrappedValue: LaunchManager())
+
         // 设置应用为 GUI 模式，不显示终端窗口
         NSApplication.shared.setActivationPolicy(.regular)
 
         // 重定向标准输出和错误输出到日志文件（可选，用于调试）
         setupLogging()
-
-        // Enforce Single Instance
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.FolderSync.App"
-        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-
-        let currentApp = NSRunningApplication.current
-
-        for app in runningApps {
-            if app != currentApp {
-                // Already running
-                Self.logger.info("应用已在运行，激活现有实例")
-                app.activate()
-
-                // Terminate current instance
-                // We can't use NSApplication.shared.terminate here as it might not be ready,
-                // so we use exit(0)
-                exit(0)
-            }
-        }
-
-        // 初始状态已在 LaunchManager init 中同步
     }
 
     /// 设置日志系统，将控制台输出重定向到日志文件

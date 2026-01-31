@@ -32,14 +32,14 @@ public class SyncManager: ObservableObject {
     var lastKnownMetadata: [String: [String: FileMetadata]] = [:]  // syncID -> [path: metadata] 用于重命名检测
     var deletedRecords: [String: Set<String>] = [:]  // 旧格式，用于兼容
     var syncInProgress: Set<String> = []  // 正在同步的 (syncID, peerID) 组合，格式: "syncID:peerID"
-    
+
     // 新的统一状态存储（每个 syncID 一个）
     var fileStateStores: [String: FileStateStore] = [:]
-    
+
     // 去重机制：记录最近处理的变更，避免短时间内重复记录
     var recentChanges: [String: Date] = [:]  // "syncID:relativePath" -> 时间戳
     let changeDeduplicationWindow: TimeInterval = 1.0  // 1秒内的重复变更会被忽略
-    
+
     // 重命名检测：记录可能的重命名操作（旧路径 -> 等待新路径）
     var pendingRenames: [String: (hash: String, timestamp: Date)] = [:]  // "syncID:relativePath" -> (哈希值, 时间戳)
     let renameDetectionWindow: TimeInterval = 2.0  // 2秒内检测重命名
@@ -55,7 +55,6 @@ public class SyncManager: ObservableObject {
     // 按 peer-folder 对记录的同步冷却时间，用于避免频繁同步
     var peerSyncCooldown: [String: Date] = [:]  // "peerID:syncID" -> 最后同步完成时间
     var peerSyncCooldownDuration: TimeInterval = 30.0  // 同步完成后30秒内不重复同步
-
 
     // 设备统计（用于触发UI更新）
     @Published var onlineDeviceCountValue: Int = 1  // 包括自身，默认为1
@@ -108,12 +107,15 @@ public class SyncManager: ObservableObject {
                             if let existingInfo = syncIDManager.getSyncIDInfo(folder.syncID) {
                                 if existingInfo.folderID == folder.id {
                                     // 同一个文件夹，syncID 已存在（可能是重复加载）
-                                    AppLogger.syncPrint("[SyncManager] ℹ️ syncID 已注册（同一文件夹）: \(folder.syncID)")
+                                    AppLogger.syncPrint(
+                                        "[SyncManager] ℹ️ syncID 已注册（同一文件夹）: \(folder.syncID)")
                                 } else {
                                     // syncID 被其他文件夹使用
-                                    AppLogger.syncPrint("[SyncManager] ⚠️ 警告: syncID 已被其他文件夹使用: \(folder.syncID)")
+                                    AppLogger.syncPrint(
+                                        "[SyncManager] ⚠️ 警告: syncID 已被其他文件夹使用: \(folder.syncID)")
                                     AppLogger.syncPrint("[SyncManager]   当前文件夹 ID: \(folder.id)")
-                                    AppLogger.syncPrint("[SyncManager]   已注册文件夹 ID: \(existingInfo.folderID)")
+                                    AppLogger.syncPrint(
+                                        "[SyncManager]   已注册文件夹 ID: \(existingInfo.folderID)")
                                 }
                             } else if let existingSyncID = syncIDManager.getSyncID(for: folder.id) {
                                 // folderID 已关联其他 syncID
@@ -123,7 +125,8 @@ public class SyncManager: ObservableObject {
                                 AppLogger.syncPrint("[SyncManager]   已关联 syncID: \(existingSyncID)")
                             } else {
                                 // 未知原因（理论上不应该发生）
-                                AppLogger.syncPrint("[SyncManager] ⚠️ 警告: syncID 注册失败（未知原因）: \(folder.syncID)")
+                                AppLogger.syncPrint(
+                                    "[SyncManager] ⚠️ 警告: syncID 注册失败（未知原因）: \(folder.syncID)")
                             }
                         }
                         AppLogger.syncPrint(
@@ -145,7 +148,7 @@ public class SyncManager: ObservableObject {
             self.folders = []
             self.deletedRecords = [:]
         }
-        
+
         // 从快照恢复 lastKnownLocalPaths 和 lastKnownMetadata
         if !AppPaths.isRunningTests {
             restoreSnapshots()
@@ -153,7 +156,7 @@ public class SyncManager: ObservableObject {
 
         // 初始化设备统计（自身始终在线）
         updateDeviceCounts()  // 这会同时更新 allDevicesValue
-        
+
         // 初始化广播中的 syncID（在 P2PNode 启动后）
         Task { @MainActor in
             // 等待 P2PNode 启动完成
@@ -212,7 +215,8 @@ public class SyncManager: ObservableObject {
                     if let peerInfo = self.peerManager.getPeer(peerIDString) {
                         let timeSinceUpdate = Date().timeIntervalSince(peerInfo.lastSeenTime)
                         if timeSinceUpdate > 1.0 {
-                            AppLogger.syncPrint("[SyncManager] ⚠️ 警告: lastSeenTime 更新后时间差异常: \(timeSinceUpdate)秒")
+                            AppLogger.syncPrint(
+                                "[SyncManager] ⚠️ 警告: lastSeenTime 更新后时间差异常: \(timeSinceUpdate)秒")
                         }
                     }
 
@@ -228,11 +232,15 @@ public class SyncManager: ObservableObject {
                     let matchingFolders = self.folders.filter { folder in
                         remoteSyncIDSet.contains(folder.syncID)
                     }
-                    
+
                     if !matchingFolders.isEmpty {
-                        AppLogger.syncPrint("[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)")
+                        AppLogger.syncPrint(
+                            "[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)"
+                        )
                     } else if !remoteSyncIDs.isEmpty {
-                        AppLogger.syncPrint("[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)")
+                        AppLogger.syncPrint(
+                            "[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)"
+                        )
                     }
 
                     // 对于新对等点，只同步匹配的文件夹
@@ -263,7 +271,8 @@ public class SyncManager: ObservableObject {
                 AppLogger.syncPrint("[SyncManager] ❌ P2P 节点启动失败: \(error)")
                 AppLogger.syncPrint("[SyncManager] 错误详情: \(error.localizedDescription)")
                 if let nsError = error as NSError? {
-                    AppLogger.syncPrint("[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
+                    AppLogger.syncPrint(
+                        "[SyncManager] 错误域: \(nsError.domain), 错误码: \(nsError.code)")
                     AppLogger.syncPrint("[SyncManager] 用户信息: \(nsError.userInfo)")
                 }
                 // 继续执行，但 P2P 功能将不可用
@@ -316,7 +325,7 @@ public class SyncManager: ObservableObject {
             }
         }
     }
-    
+
     /// 标记某个 (syncID, path) 进入“同步写入冷却期”，用于忽略由同步落地导致的该路径 FSEvents。
     /// - Note: 既会在处理远端 PUT 写入时调用，也会在本地“下载落地写入”时调用（pull 同步）。
     func markSyncCooldown(syncID: String, path: String) {
@@ -337,8 +346,8 @@ public class SyncManager: ObservableObject {
     }
 
     func setupP2PHandlers() {
-        // 设置原生网络服务的消息处理器
-        p2pNode.nativeNetwork.messageHandler = { [weak self] request in
+        // 设置消息处理器
+        p2pNode.messageHandler = { [weak self] request in
             guard let self = self else { return SyncResponse.error("Manager deallocated") }
             return try await self.handleSyncRequest(request)
         }
@@ -349,8 +358,7 @@ public class SyncManager: ObservableObject {
 
     // MARK: - 同步请求处理
     // handleSyncRequest 及相关方法已移至 SyncManagerRequestHandler.swift
-    
-    
+
     /// 从快照恢复 lastKnownLocalPaths 和 lastKnownMetadata
     private func restoreSnapshots() {
         Task.detached {
@@ -360,7 +368,7 @@ public class SyncManager: ObservableObject {
                     for snapshot in snapshots {
                         // 恢复路径集合
                         self.lastKnownLocalPaths[snapshot.syncID] = Set(snapshot.files.keys)
-                        
+
                         // 恢复元数据
                         var metadata: [String: FileMetadata] = [:]
                         for (path, fileSnapshot) in snapshot.files {
@@ -380,8 +388,6 @@ public class SyncManager: ObservableObject {
         }
     }
 }
-
-
 
 /// 设备信息结构
 public struct DeviceInfo: Identifiable, Equatable {

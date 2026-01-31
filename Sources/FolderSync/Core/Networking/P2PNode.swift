@@ -1,574 +1,342 @@
 import Darwin
 import Foundation
 import Network
+import WebRTC
 
-public class P2PNode {
+public class P2PNode: NSObject {
     private var lanDiscovery: LANDiscovery?
-    @MainActor public let peerManager: PeerManager  // 统一的 Peer 管理器
-    @MainActor public let registrationService: PeerRegistrationService  // Peer 注册服务
+    @MainActor public let peerManager: PeerManager
+    @MainActor public let registrationService: PeerRegistrationService
 
-    // 原生网络服务（替代 libp2p）
-    public let nativeNetwork: NativeNetworkService
+    // New WebRTC Stack
+    public let webRTC: WebRTCManager
+    public let signaling: TCPSignalingService
 
-    // 本机 PeerID（持久化存储）
-    private var myPeerID: PeerID?
+    // My PeerID (Backing property)
+    public private(set) var peerID: PeerID?
 
-    public var onPeerDiscovered: ((PeerID, [String]) -> Void)?  // Peer 发现回调 (peer, syncIDs)
+    public var onPeerDiscovered: ((PeerID, [String]) -> Void)?
 
-    // 网络路径监控，用于检测 IP 地址变化
+    // Callback for SyncEngine to handle requests
+    // Request -> Response (Async)
+    public var messageHandler: ((SyncRequest) async throws -> SyncResponse)?
+
+    // Request tracking
+    private var pendingRequests: [String: CheckedContinuation<SyncResponse, Error>] = [:]
+    private let requestsQueue = DispatchQueue(label: "com.foldersync.p2p.requests")
+
+    struct WebRTCFrame: Codable {
+        let id: String
+        let type: String  // "req" | "res"
+        let payload: Data
+    }
+
+    // Network Monitoring
     private var pathMonitor: NWPathMonitor?
     private var pathMonitorQueue: DispatchQueue?
     private var lastKnownIP: String = ""
 
-    public init() {
-        // PeerManager 和 PeerRegistrationService 需要在 MainActor 上初始化
+    public override init() {
         self.peerManager = MainActor.assumeIsolated { PeerManager() }
         self.registrationService = MainActor.assumeIsolated { PeerRegistrationService() }
 
-        // 初始化原生网络服务
-        self.nativeNetwork = NativeNetworkService()
+        /// 使用 Google STUN Server
+        self.webRTC = WebRTCManager(iceServers: ["stun:stun.l.google.com:19302"])
+        self.signaling = TCPSignalingService()
 
-        // 将 registrationService 关联到 peerManager
+        super.init()
+
         Task { @MainActor in
             self.peerManager.registrationService = self.registrationService
         }
-    }
 
-    /// 获取对等点的缓存地址
-    func getCachedAddresses(for peer: PeerID) async -> [Multiaddr]? {
-        return await MainActor.run {
-            return peerManager.getAddresses(for: peer.b58String)
+        // Setup Delegates
+        self.webRTC.delegate = self
+
+        // Setup Signaling Callback
+        self.signaling.onReceiveSignal = { [weak self] signal in
+            self?.handleSignalingMessage(signal)
         }
     }
 
-    /// 从持久化存储预注册 peer（原生实现，无需 libp2p）
-    @MainActor
-    private func preRegisterPersistedPeers() async {
-        let peersToRegister = peerManager.getPeersForPreRegistration()
-
-        guard !peersToRegister.isEmpty else {
-            AppLogger.syncPrint("[P2PNode] ℹ️ 没有需要预注册的 peer")
-            return
-        }
-
-        AppLogger.syncPrint("[P2PNode] 🔄 开始预注册 \(peersToRegister.count) 个持久化的 peer...")
-
-        registrationService.registerPeers(peersToRegister)
-
-        AppLogger.syncPrint("[P2PNode] ✅ 完成预注册 \(peersToRegister.count) 个 peer")
-    }
-
-    /// 重新触发对等点注册（用于 peerNotFound 错误后的重试）
-    @MainActor
-    func retryPeerRegistration(peer: PeerID) async {
-        let peerIDString = peer.b58String
-        AppLogger.syncPrint(
-            "[P2PNode] 🔄 [retryPeerRegistration] 开始重试注册: \(peerIDString.prefix(12))...")
-
-        // 检查是否已经注册
-        if registrationService.isRegistered(peerIDString) {
-            AppLogger.syncPrint(
-                "[P2PNode] ✅ [retryPeerRegistration] Peer 已注册，无需重试: \(peerIDString.prefix(12))...")
-            return
-        }
-
-        let addresses = peerManager.getAddresses(for: peerIDString)
-
-        AppLogger.syncPrint("[P2PNode] 📍 [retryPeerRegistration] 获取到的地址数量: \(addresses.count)")
-        if !addresses.isEmpty {
-            for (idx, addr) in addresses.enumerated() {
-                AppLogger.syncPrint("[P2PNode]   [\(idx + 1)] \(addr)")
-            }
-        }
-
-        guard !addresses.isEmpty else {
-            AppLogger.syncPrint(
-                "[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: 对等点无可用地址: \(peerIDString.prefix(12))..."
-            )
-            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 提示: 对等点可能还未被发现或地址信息丢失")
-            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 建议: 等待 LAN Discovery 重新发现该对等点")
-            return
-        }
-
-        guard registrationService.isReady else {
-            AppLogger.syncPrint(
-                "[P2PNode] ❌ [retryPeerRegistration] 重试注册失败: registrationService 未就绪: \(peerIDString.prefix(12))..."
-            )
-            AppLogger.syncPrint("[P2PNode] 💡 [retryPeerRegistration] 提示: 等待 P2P 节点完全启动")
-            return
-        }
-
-        // 使用 registrationService 重试注册
-        let registered = registrationService.retryRegistration(peerID: peer, addresses: addresses)
-        if registered {
-            AppLogger.syncPrint(
-                "[P2PNode] ✅ [retryPeerRegistration] 重试注册成功: \(peerIDString.prefix(12))... (\(addresses.count) 个地址)"
-            )
-        } else {
-            AppLogger.syncPrint(
-                "[P2PNode] ⚠️ [retryPeerRegistration] 重试注册失败（可能正在注册中）: \(peerIDString.prefix(12))..."
-            )
-            // 检查注册状态
-            let state = registrationService.getRegistrationState(peerIDString)
-            AppLogger.syncPrint("[P2PNode] 📊 [retryPeerRegistration] 当前注册状态: \(state)")
-        }
-    }
-
-    /// 检查对等点是否已成功注册到 peer store
-    func isPeerRegistered(_ peerID: String) async -> Bool {
-        return await MainActor.run {
-            return peerManager.isRegistered(peerID)
-        }
-    }
-
-    /// Setup LAN discovery using UDP broadcast
-    private func setupLANDiscovery(
-        peerID: String, listenAddresses: [String] = [], syncIDs: [String] = []
-    ) {
-        let discovery = LANDiscovery()
-        discovery.onPeerDiscovered = {
-            [weak self] discoveredPeerID, address, peerAddresses, syncIDs in
-            guard !discoveredPeerID.isEmpty else {
-                AppLogger.syncPrint("[P2PNode] ⚠️ 收到空的 peerID，忽略")
-                return
-            }
-
-            // 关键修复：确保不会处理自己的广播
-            guard discoveredPeerID != peerID else {
-                // 忽略自己的广播
-                return
-            }
-
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                await self.handleDiscoveredPeer(
-                    peerID: discoveredPeerID, discoveryAddress: address,
-                    listenAddresses: peerAddresses, syncIDs: syncIDs)
-            }
-        }
-        discovery.start(peerID: peerID, listenAddresses: listenAddresses, syncIDs: syncIDs)
-        self.lanDiscovery = discovery
-    }
-
-    /// 处理发现的 peer（新的统一入口）
-    @MainActor
-    private func handleDiscoveredPeer(
-        peerID: String, discoveryAddress: String, listenAddresses: [String], syncIDs: [String]
-    ) async {
-        guard let myPeerID = myPeerID?.b58String, peerID != myPeerID else { return }
-
-        guard let peerIDObj = PeerID(cid: peerID) else {
-            AppLogger.syncPrint("[P2PNode] ❌ 无法解析 PeerID: \(peerID.prefix(12))...")
-            return
-        }
-
-        let connectableStrs = Self.buildConnectableAddresses(
-            listenAddresses: listenAddresses, discoveryAddress: discoveryAddress)
-        var parsedAddresses: [Multiaddr] = []
-        for addrStr in connectableStrs {
-            if let addr = try? Multiaddr(addrStr) {
-                parsedAddresses.append(addr)
-            }
-        }
-
-        guard !parsedAddresses.isEmpty else {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 无有效地址，跳过: \(peerID.prefix(12))...")
-            return
-        }
-
-        _ = peerManager.addOrUpdatePeer(peerIDObj, addresses: parsedAddresses)
-
-        // 更新 syncIDs（从广播消息中获取）
-        peerManager.updateSyncIDs(peerID, syncIDs: syncIDs)
-
-        // 更新最后可见时间（收到广播表示设备在线）
-        // 注意：每次收到广播都应该更新 lastSeenTime，即使地址没有变化
-        peerManager.updateLastSeen(peerID)
-
-        // 检查是否需要注册（地址变化或未注册）
-        let existing = peerManager.getPeer(peerID)
-        let addressesChanged =
-            Set(parsedAddresses.map { $0.description })
-            != Set(existing?.addresses.map { $0.description } ?? [])
-        let needsRegistration = !registrationService.isRegistered(peerID) || addressesChanged
-
-        if needsRegistration {
-            let registered = registrationService.registerPeer(
-                peerID: peerIDObj, addresses: parsedAddresses)
-            if registered {
-                peerManager.updateDeviceStatus(peerID, status: .online)
-                self.onPeerDiscovered?(peerIDObj, syncIDs)
-            } else {
-                let state = registrationService.getRegistrationState(peerID)
-                AppLogger.syncPrint("[P2PNode] ⚠️ Peer 注册失败: \(peerID.prefix(12))..., 状态: \(state)")
-                peerManager.updateDeviceStatus(peerID, status: .online)
-                self.onPeerDiscovered?(peerIDObj, syncIDs)
-            }
-        } else {
-            // 这表示设备仍然在线，只是地址没有变化
-            peerManager.updateLastSeen(peerID)
-
-            // 更新设备状态为在线（只有真正收到有效广播时才标记为在线）
-            peerManager.updateDeviceStatus(peerID, status: .online)
-
-            // 即使已注册，也通知 SyncManager（可能状态有变化）
-            self.onPeerDiscovered?(peerIDObj, syncIDs)
-        }
-    }
-
-    /// 将监听地址中的 0.0.0.0 替换为发现地址的 IP，生成可连接的 multiaddr。
-    /// 对等点广播 /ip4/0.0.0.0/tcp/63355 无法直接连接，需替换为 /ip4/192.168.0.164/tcp/63355。
-    private static func buildConnectableAddresses(
-        listenAddresses: [String], discoveryAddress: String
-    ) -> [String] {
-        guard discoveryAddress != "unknown", !discoveryAddress.isEmpty else {
-            return listenAddresses
-        }
-        let discoveryIP: String
-        if let lastColon = discoveryAddress.lastIndex(of: ":") {
-            discoveryIP = String(discoveryAddress[..<lastColon])
-        } else {
-            discoveryIP = discoveryAddress
-        }
-        guard !discoveryIP.isEmpty else { return listenAddresses }
-        return listenAddresses.compactMap { addr in
-            // 跳过端口为0的地址（0表示自动分配，不能用于连接）
-            if addr.contains("/tcp/0") || addr.hasSuffix("/tcp/0") {
-                AppLogger.syncPrint("[P2PNode] ⚠️ 跳过端口为0的地址: \(addr)")
-                return nil
-            }
-            if addr.contains("/ip4/0.0.0.0/") {
-                return addr.replacingOccurrences(of: "/ip4/0.0.0.0/", with: "/ip4/\(discoveryIP)/")
-            }
-            return addr
-        }
-    }
+    // MARK: - Startup & Shutdown
 
     public func start() async throws {
         let folderSyncDir = AppPaths.appDirectory
-
-        // 加载或生成 PeerID
         let peerIDFile = folderSyncDir.appendingPathComponent("peerid.txt")
         let password = AppPaths.isRunningTests ? "" : KeychainManager.loadOrCreatePassword()
 
         let peerID: PeerID
         if AppPaths.isRunningTests {
-            // 测试场景通常会在同一台机器/同一进程里模拟多个“设备”，需要每个节点有唯一 PeerID
             peerID = PeerID.generate()
-            AppLogger.syncPrint("[P2PNode] ✅ 测试模式：已生成临时 PeerID: \(peerID.b58String.prefix(12))...")
         } else if let savedPeerID = PeerID.load(from: peerIDFile, password: password) {
             peerID = savedPeerID
-            AppLogger.syncPrint("[P2PNode] ✅ 已加载现有 PeerID: \(peerID.b58String.prefix(12))...")
         } else {
-            // 生产模式：生成并持久化 PeerID
             peerID = PeerID.generate()
             try? peerID.save(to: peerIDFile, password: password)
-            AppLogger.syncPrint("[P2PNode] ✅ 已生成新 PeerID: \(peerID.b58String.prefix(12))...")
         }
+        self.peerID = peerID
 
-        self.myPeerID = peerID
+        // Start TCP Signaling Server (Port for exchanging SDP)
+        let signalingPort = try signaling.startServer()
+        AppLogger.syncPrint("[P2PNode] ✅ Signaling Server started on port: \(signalingPort)")
 
-        // 获取本机真实 IP 地址用于监听
-        let localIP = getLocalIPAddress()
-        lastKnownIP = localIP
-        AppLogger.syncPrint("[P2PNode] 📍 检测到本机 IP 地址: \(localIP)")
+        // Setup LAN Discovery
+        setupLANDiscovery(peerID: peerID.b58String, signalingPort: signalingPort)
 
-        // 启动原生 TCP 服务器
-        do {
-            let nativePort = try nativeNetwork.startServer(port: 0)
-            guard nativePort > 0 else {
-                throw NSError(
-                    domain: "P2PNode", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "TCP 服务器启动失败：无法获取有效端口"])
-            }
-            AppLogger.syncPrint("[P2PNode] ✅ 原生 TCP 服务器已启动，端口: \(nativePort)")
-        } catch {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器启动失败: \(error)")
-            throw error
-        }
-
-        // 启用 LAN discovery（UDP 广播）
-        setupLANDiscovery(peerID: peerID.b58String, listenAddresses: [], syncIDs: [])
-
-        // 启动网络路径监控，监听 IP 地址变化
-        startNetworkPathMonitoring()
-
-        // 等待节点初始化完成
-        try? await Task.sleep(nanoseconds: 500_000_000)
-
-        // 从持久化存储预注册 peer（测试环境禁用，避免跨用例污染）
-        if !AppPaths.isRunningTests {
-            _ = await MainActor.run {
-                Task {
-                    await self.preRegisterPersistedPeers()
-                }
-            }
-        }
-
-        // 更新 LAN discovery 的监听地址
-        var addresses: [String] = []
-
-        // 添加原生 TCP 服务器的地址
-        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
-            let nativeAddress = "/ip4/\(localIP)/tcp/\(nativePort)"
-            addresses.append(nativeAddress)
-            AppLogger.syncPrint("[P2PNode] ✅ 已添加原生 TCP 服务器地址到广播: \(nativeAddress)")
-            AppLogger.syncPrint("[P2PNode] 📋 地址详情: IP=\(localIP), 端口=\(nativePort), 格式验证: ✅")
-
-            // 验证地址格式
-            if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(
-                from: nativeAddress)
-            {
-                if extractedIP == localIP && extractedPort == nativePort {
-                    AppLogger.syncPrint("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
-                } else {
-                    AppLogger.syncPrint(
-                        "[P2PNode] ⚠️ 警告: 地址格式验证失败: 期望 \(localIP):\(nativePort), 实际 \(extractedIP):\(extractedPort)"
-                    )
-                }
-            } else {
-                AppLogger.syncPrint("[P2PNode] ❌ 错误: 无法从广播地址中提取 IP:Port: \(nativeAddress)")
-            }
-        } else {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法添加到广播")
-            if let port = nativeNetwork.serverPort {
-                AppLogger.syncPrint("[P2PNode]   当前端口值: \(port) (无效)")
-            } else {
-                AppLogger.syncPrint("[P2PNode]   当前端口值: nil (未启动)")
-            }
-        }
-
-        lanDiscovery?.updateListenAddresses(addresses)
-
-        // 更新广播中的 syncID（如果有提供）
-        // 注意：syncID 会在 SyncManager 初始化后通过 updateBroadcastSyncIDs 更新
-
-        // 地址更新后立即发送广播
-        if !addresses.isEmpty {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                self?.lanDiscovery?.sendDiscoveryRequest()
-            }
-        }
-
-        // 输出启动状态
-        AppLogger.syncPrint("\n[P2PNode] ========== P2P 节点启动状态 ==========")
-        AppLogger.syncPrint("[P2PNode] PeerID: \(peerID.b58String)")
-
-        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
-            AppLogger.syncPrint("[P2PNode] 监听地址: /ip4/\(localIP)/tcp/\(nativePort)")
-        }
-        AppLogger.syncPrint("[P2PNode] ✅ Ready for connections")
-
-        if lanDiscovery != nil {
-            AppLogger.syncPrint("[P2PNode] ✅ LAN Discovery 已启用 (UDP 广播端口: 8765)")
-        } else {
-            AppLogger.syncPrint("[P2PNode] ❌ LAN Discovery 未启用")
-        }
-
-        AppLogger.syncPrint("[P2PNode] ======================================\n")
+        AppLogger.syncPrint(
+            "[P2PNode] ✅ WebRTC Node Started. PeerID: \(peerID.b58String.prefix(8))...")
     }
 
-    /// 获取本机的局域网 IP 地址
+    public func stop() async throws {
+        lanDiscovery?.stop()
+        signaling.stop()
+        webRTC.stop()
+        await peerManager.saveAllPeers()
+    }
+
+    // MARK: - Signaling & Discovery
+
+    public func updateBroadcastSyncIDs(_ syncIDs: [String]) {
+        lanDiscovery?.updateSyncIDs(syncIDs)
+    }
+
+    private func setupLANDiscovery(peerID: String, signalingPort: UInt16) {
+        let discovery = LANDiscovery()
+        discovery.onPeerDiscovered = { [weak self] discoveredID, address, addresses, syncIDs in
+            guard let self = self, discoveredID != peerID else { return }
+
+            // "addresses" here contains the Signaling Endpoint
+            Task {
+                await self.handleDiscoveredPeer(
+                    peerID: discoveredID, addresses: addresses, syncIDs: syncIDs)
+            }
+        }
+
+        // Broadcast our Signaling Address
+        let localIP = getLocalIPAddress()
+        let mySignalingAddr = "/ip4/\(localIP)/tcp/\(signalingPort)"
+        discovery.start(peerID: peerID, listenAddresses: [mySignalingAddr], syncIDs: [])
+        self.lanDiscovery = discovery
+    }
+
+    private func handleDiscoveredPeer(peerID: String, addresses: [String], syncIDs: [String]) async
+    {
+        guard let myPeerID = self.peerID?.b58String else { return }
+        guard let peerIDObj = PeerID(cid: peerID) else { return }
+
+        // Filter for valid signaling address
+        var signalingIP: String?
+        var signalingPort: UInt16?
+
+        for addr in addresses {
+            if let (ip, port) = AddressConverter.extractIPPort(from: addr) {
+                if ip != "0.0.0.0" && ip != "127.0.0.1" {  // Prefer remote IP
+                    signalingIP = ip
+                    signalingPort = port
+                    break
+                }
+                if ip == "127.0.0.1" && signalingIP == nil {
+                    signalingIP = ip
+                    signalingPort = port
+                }
+            }
+        }
+
+        guard let targetIP = signalingIP, let targetPort = signalingPort else { return }
+
+        // Initiate connection if I am larger ID
+        if myPeerID > peerID {
+            AppLogger.syncPrint(
+                "[P2PNode] 🤖 Initiating WebRTC to \(peerID.prefix(8))... Signal: \(targetIP):\(targetPort)"
+            )
+
+            webRTC.createOffer(for: peerID) { [weak self] sdp in
+                let msg = SignalingMessage(
+                    type: "offer", sdp: sdp, candidate: nil, targetPeerID: peerID,
+                    senderPeerID: myPeerID)
+                self?.signaling.send(signal: msg, to: targetIP, port: targetPort)
+            }
+        }
+
+        Task { @MainActor in
+            peerManager.updateDeviceStatus(peerID, status: .online)
+        }
+        self.onPeerDiscovered?(peerIDObj, syncIDs)
+    }
+
+    private func handleSignalingMessage(_ msg: SignalingMessage) {
+        if let sdp = msg.sdp {
+            webRTC.handleRemoteSdp(sdp, from: msg.senderPeerID) { [weak self] answerSdp in
+                guard let self = self, let answer = answerSdp else { return }
+
+                Task {
+                    // Start Answer back phase
+                    // We need to know where to send it.
+                    // Assuming we keep track or just use stored address in PeerManager
+                    let addresses = await self.peerManager.getAddresses(for: msg.senderPeerID)
+                    for addr in addresses {
+                        if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
+                            let responseMsg = SignalingMessage(
+                                type: "answer", sdp: answer, candidate: nil,
+                                targetPeerID: msg.senderPeerID,
+                                senderPeerID: self.peerID?.b58String ?? "")
+                            self.signaling.send(signal: responseMsg, to: ip, port: port)
+                            break
+                        }
+                    }
+                }
+            }
+        } else if let candidate = msg.candidate {
+            webRTC.handleRemoteCandidate(candidate, from: msg.senderPeerID)
+        }
+    }
+
+    // MARK: - Sending Data
+
+    public func sendRequest(_ request: SyncRequest, to peerID: String) async throws -> SyncResponse
+    {
+        let requestID = UUID().uuidString
+        let requestData = try JSONEncoder().encode(request)
+        let frame = WebRTCFrame(id: requestID, type: "req", payload: requestData)
+        let frameData = try JSONEncoder().encode(frame)
+
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<SyncResponse, Error>) in
+            requestsQueue.async {
+                self.pendingRequests[requestID] = continuation
+            }
+
+            do {
+                try webRTC.sendData(frameData, to: peerID)
+
+                // Timeout logic
+                Task {
+                    try await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                    self.requestsQueue.async {
+                        if let storedContinuation = self.pendingRequests.removeValue(
+                            forKey: requestID)
+                        {
+                            storedContinuation.resume(
+                                throwing: NSError(
+                                    domain: "P2PNode", code: -2,
+                                    userInfo: [NSLocalizedDescriptionKey: "Request timed out"]))
+                        }
+                    }
+                }
+            } catch {
+                requestsQueue.async {
+                    self.pendingRequests.removeValue(forKey: requestID)
+                }
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    public func sendData(_ data: Data, to peerID: String) throws {
+        try webRTC.sendData(data, to: peerID)
+    }
+
+    // MARK: - Helpers
     private func getLocalIPAddress() -> String {
-        var address = "127.0.0.1"  // 默认值
-
+        var address = "127.0.0.1"
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return address }
-        guard let firstAddr = ifaddr else { return address }
-
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return address }
         defer { freeifaddrs(ifaddr) }
 
         for ifptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ifptr.pointee
-
-            // 检查 ifa_addr 是否为 null（某些接口可能没有地址）
-            guard let ifaAddr = interface.ifa_addr else {
-                continue
-            }
-
-            // 检查是否为 IPv4 地址
-            let addrFamily = ifaAddr.pointee.sa_family
-            if addrFamily == UInt8(AF_INET) {
-                // 检查接口名称，排除回环接口
+            guard let ifaAddr = interface.ifa_addr else { continue }
+            if ifaAddr.pointee.sa_family == UInt8(AF_INET) {
                 let name = String(cString: interface.ifa_name)
+                // Filter common interfaces
                 if name.hasPrefix("en") || name.hasPrefix("eth") || name.hasPrefix("wlan") {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     getnameinfo(
-                        ifaAddr,
-                        socklen_t(ifaAddr.pointee.sa_len),
-                        &hostname,
-                        socklen_t(hostname.count),
-                        nil,
-                        socklen_t(0),
-                        NI_NUMERICHOST)
-                    address = String(cString: hostname)
-
-                    // 优先选择非 127.0.0.1 的地址
-                    if address != "127.0.0.1" && !address.isEmpty {
+                        ifaAddr, socklen_t(ifaAddr.pointee.sa_len), &hostname,
+                        socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST)
+                    let ip = String(cString: hostname)
+                    if ip != "127.0.0.1" && !ip.isEmpty {
+                        address = ip
                         break
                     }
                 }
             }
         }
-
         return address
     }
+}
 
-    /// 启动网络路径监控，监听 IP 地址变化
-    private func startNetworkPathMonitoring() {
-        let monitor = NWPathMonitor()
-        let queue = DispatchQueue(label: "com.foldersync.networkPathMonitor")
-
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard let self = self else { return }
-
-            // 检查网络是否可用
-            guard path.status == .satisfied else {
-                AppLogger.syncPrint("[P2PNode] ⚠️ 网络路径不可用")
-                return
+// MARK: - WebRTC Delegate
+extension P2PNode: WebRTCManagerDelegate {
+    func webRTCManager(
+        _ manager: WebRTCManager, didDiscoverLocalCandidate candidate: IceCandidate,
+        for peerID: String
+    ) {
+        Task {
+            let addresses = await self.peerManager.getAddresses(for: peerID)
+            for addr in addresses {
+                if let (ip, port) = AddressConverter.extractIPPort(from: addr.description) {
+                    let msg = SignalingMessage(
+                        type: "candidate", sdp: nil, candidate: candidate, targetPeerID: peerID,
+                        senderPeerID: self.peerID?.b58String ?? "")
+                    self.signaling.send(signal: msg, to: ip, port: port)
+                    break
+                }
             }
+        }
+    }
 
-            // 延迟一小段时间，确保网络接口已完全更新
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
-                [weak self] in
-                guard let self = self else { return }
+    func webRTCManager(
+        _ manager: WebRTCManager, didChangeConnectionState state: RTCIceConnectionState,
+        for peerID: String
+    ) {
+        AppLogger.syncPrint("[P2PNode] WebRTC State for \(peerID.prefix(8)): \(state.rawValue)")
+        if state == .connected {
+            Task { @MainActor in
+                peerManager.updateDeviceStatus(peerID, status: .online)
+            }
+        }
+    }
 
-                // 获取新的 IP 地址
-                let newIP = self.getLocalIPAddress()
+    func webRTCManager(_ manager: WebRTCManager, didReceiveData data: Data, from peerID: String) {
+        guard let frame = try? JSONDecoder().decode(WebRTCFrame.self, from: data) else { return }
 
-                // 如果 IP 地址发生变化（排除初始状态和回环地址）
-                if !self.lastKnownIP.isEmpty && newIP != self.lastKnownIP && newIP != "127.0.0.1" {
-                    AppLogger.syncPrint("[P2PNode] 🔄 检测到 IP 地址变化: \(self.lastKnownIP) -> \(newIP)")
-                    let oldIP = self.lastKnownIP
-                    self.lastKnownIP = newIP
-
-                    // 更新监听地址和广播地址
-                    Task { [weak self] in
-                        await self?.updateListenAddressForIPChange(newIP: newIP, oldIP: oldIP)
+        if frame.type == "req" {
+            // Handle Request
+            Task {
+                guard let messageHandler = messageHandler else { return }
+                if let request = try? JSONDecoder().decode(SyncRequest.self, from: frame.payload) {
+                    do {
+                        let response = try await messageHandler(request)
+                        let responseData = try JSONEncoder().encode(response)
+                        let responseFrame = WebRTCFrame(
+                            id: frame.id, type: "res", payload: responseData)
+                        let responseFrameData = try JSONEncoder().encode(responseFrame)
+                        try self.webRTC.sendData(responseFrameData, to: peerID)
+                    } catch {
+                        print("Handler error: \(error)")
                     }
-                } else if self.lastKnownIP.isEmpty && newIP != "127.0.0.1" {
-                    // 首次设置 IP（启动时）
-                    self.lastKnownIP = newIP
+                }
+            }
+        } else if frame.type == "res" {
+            // Handle Response
+            requestsQueue.async {
+                if let continuation = self.pendingRequests.removeValue(forKey: frame.id) {
+                    if let response = try? JSONDecoder().decode(
+                        SyncResponse.self, from: frame.payload)
+                    {
+                        continuation.resume(returning: response)
+                    } else {
+                        continuation.resume(
+                            throwing: NSError(
+                                domain: "P2PNode", code: -3,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: "Failed to decode response payload"
+                                ]))
+                    }
                 }
             }
         }
-
-        monitor.start(queue: queue)
-        self.pathMonitor = monitor
-        self.pathMonitorQueue = queue
-        AppLogger.syncPrint("[P2PNode] ✅ 网络路径监控已启动")
-    }
-
-    /// 停止网络路径监控
-    private func stopNetworkPathMonitoring() {
-        pathMonitor?.cancel()
-        pathMonitor = nil
-        pathMonitorQueue = nil
-        AppLogger.syncPrint("[P2PNode] ✅ 网络路径监控已停止")
-    }
-
-    /// 当 IP 地址改变时，更新监听地址和广播地址
-    private func updateListenAddressForIPChange(newIP: String, oldIP: String) async {
-        AppLogger.syncPrint("[P2PNode] 🔄 开始更新监听地址以适应新的 IP: \(newIP)")
-
-        // 获取当前原生 TCP 服务器的端口
-        guard let currentPort = nativeNetwork.serverPort, currentPort > 0 else {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 当前没有有效的监听端口，无法更新")
-            return
-        }
-
-        // 停止旧服务器
-        nativeNetwork.stopServer()
-
-        // 使用新 IP 重新启动服务器（保持相同端口）
-        do {
-            let newPort = try nativeNetwork.startServer(port: currentPort)
-            guard newPort > 0 else {
-                throw NSError(
-                    domain: "P2PNode", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：端口无效"])
-            }
-            AppLogger.syncPrint("[P2PNode] 🔌 使用新 IP 和端口重新监听: \(newIP):\(newPort)")
-        } catch {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 重新启动服务器失败: \(error)")
-            // 尝试使用自动分配的端口
-            do {
-                let newPort = try nativeNetwork.startServer(port: 0)
-                guard newPort > 0 else {
-                    throw NSError(
-                        domain: "P2PNode", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "服务器启动失败：无法获取有效端口"])
-                }
-                AppLogger.syncPrint("[P2PNode] 🔌 使用新 IP 和自动分配端口重新监听: \(newIP):\(newPort)")
-            } catch {
-                AppLogger.syncPrint("[P2PNode] ❌ 无法重新启动服务器: \(error)")
-                return
-            }
-        }
-
-        // 等待服务器启动
-        try? await Task.sleep(nanoseconds: 500_000_000)
-
-        // 更新 LAN Discovery 的广播地址
-        var newAddresses: [String] = []
-        if let nativePort = nativeNetwork.serverPort, nativePort > 0 {
-            let nativeAddress = "/ip4/\(newIP)/tcp/\(nativePort)"
-            newAddresses.append(nativeAddress)
-            AppLogger.syncPrint("[P2PNode] ✅ 已更新广播地址: \(nativeAddress)")
-            AppLogger.syncPrint("[P2PNode] 📋 地址详情: IP=\(newIP), 端口=\(nativePort)")
-
-            // 验证地址格式
-            if let (extractedIP, extractedPort) = AddressConverter.extractIPPort(
-                from: nativeAddress)
-            {
-                if extractedIP == newIP && extractedPort == nativePort {
-                    AppLogger.syncPrint("[P2PNode] ✅ 地址格式验证通过: \(extractedIP):\(extractedPort)")
-                } else {
-                    AppLogger.syncPrint("[P2PNode] ⚠️ 警告: 地址格式验证失败")
-                }
-            }
-        } else {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 原生 TCP 服务器端口无效或未启动，无法更新广播地址")
-        }
-
-        lanDiscovery?.updateListenAddresses(newAddresses)
-        AppLogger.syncPrint("[P2PNode] ✅ 已更新监听和广播地址: \(newAddresses)")
-
-        // 立即发送一次广播，通知其他设备 IP 地址已改变
-        lanDiscovery?.sendDiscoveryRequest()
-        AppLogger.syncPrint("[P2PNode] 📡 已发送广播通知 IP 地址变化")
-    }
-
-    /// 更新广播中的 syncID 列表
-    @MainActor
-    public func updateBroadcastSyncIDs(_ syncIDs: [String]) {
-        lanDiscovery?.updateSyncIDs(syncIDs)
-    }
-
-    public func stop() async throws {
-        // 停止网络路径监控
-        stopNetworkPathMonitoring()
-
-        // 保存所有 peer 到持久化存储
-        await peerManager.saveAllPeers()
-
-        // 停止原生 TCP 服务器
-        nativeNetwork.stopServer()
-
-        lanDiscovery?.stop()
-    }
-
-    public var peerID: String? {
-        return myPeerID?.b58String
-    }
-
-    public var listenAddresses: [String] {
-        guard let nativePort = nativeNetwork.serverPort, nativePort > 0 else {
-            AppLogger.syncPrint("[P2PNode] ⚠️ 无法获取有效的监听端口")
-            return []
-        }
-        let localIP = getLocalIPAddress()
-        return ["/ip4/\(localIP)/tcp/\(nativePort)"]
     }
 }

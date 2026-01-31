@@ -17,7 +17,10 @@ extension SyncManager {
     ///   - path: 文件相对路径
     ///   - syncID: 同步 ID
     ///   - peerID: 当前设备的 PeerID
-    func deleteFileAtomically(path: String, syncID: String, peerID: String) {
+    ///   - vectorClock: 可选的外部 Vector Clock（通常来自对等点）
+    func deleteFileAtomically(
+        path: String, syncID: String, peerID: String, vectorClock: VectorClock? = nil
+    ) {
         guard let folder = folders.first(where: { $0.syncID == syncID }) else { return }
         let folderID = folder.id
 
@@ -26,9 +29,17 @@ extension SyncManager {
             VectorClockManager.getVectorClock(folderID: folderID, syncID: syncID, path: path)
             ?? VectorClock()
 
-        // 2. 递增 Vector Clock（标记删除操作）
-        var updatedVC = currentVC
-        updatedVC.increment(for: peerID)
+        // 2. 更新 Vector Clock
+        var updatedVC: VectorClock
+        if let externalVC = vectorClock {
+            // 如果提供了外部 VC（例如来自远端删除请求），则进行合并
+            updatedVC = VectorClockManager.mergeVectorClocks(
+                localVC: currentVC, remoteVC: externalVC)
+        } else {
+            // 如果是本地发起删除，则递增本地 PeerID
+            updatedVC = currentVC
+            updatedVC.increment(for: peerID)
+        }
 
         // 3. 创建删除记录
         let deletionRecord = DeletionRecord(

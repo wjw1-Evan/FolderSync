@@ -172,9 +172,13 @@ class VectorClockManager {
             // 迁移到新路径
             try StorageManager.shared.setVectorClock(
                 folderID: folderID, syncID: syncID, path: newPath, oldVC)
-            // 删除旧路径的 Vector Clock
-            try? StorageManager.shared.deleteVectorClock(
-                folderID: folderID, syncID: syncID, path: oldPath)
+
+            // 注意：不要立即删除旧路径的 Vector Clock
+            // 因为在重命名操作中，旧路径需要保留其 Vector Clock 历史，
+            // 以便在后续的 deleteFileAtomically 调用中正确地递增并产生删除记录（Tombstone），
+            // 从而能够正确地将删除操作传播到其他 Peer。
+            // try? StorageManager.shared.deleteVectorClock(folderID: folderID, syncID: syncID, path: oldPath)
+
             return true
         } catch {
             AppLogger.syncPrint(

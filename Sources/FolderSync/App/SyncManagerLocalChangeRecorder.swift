@@ -265,7 +265,7 @@ extension SyncManager {
                 )
 
                 // 写入删除记录与 VectorClock，确保删除可同步到远端
-                if let myPeerID = p2pNode.peerID, !myPeerID.isEmpty {
+                if let myPeerID = p2pNode.peerID?.b58String, !myPeerID.isEmpty {
                     deleteFileAtomically(
                         path: relativePath, syncID: folder.syncID, peerID: myPeerID)
                 } else {
@@ -518,7 +518,7 @@ extension SyncManager {
         // 本地内容发生变化时，必须立即递增并持久化 VectorClock。
         // 否则在“内容已变但 VC 仍旧值”的窗口期，会出现 VC 相等但哈希不同，从而被误判为冲突。
         var updatedVC: VectorClock?
-        if let myPeerID = p2pNode.peerID, !myPeerID.isEmpty {
+        if let myPeerID = p2pNode.peerID?.b58String, !myPeerID.isEmpty {
             if changeType == .renamed, let oldPath = matchedRename {
                 _ = VectorClockManager.migrateVectorClock(
                     folderID: folder.id,
@@ -549,11 +549,19 @@ extension SyncManager {
 
         // 立即更新已知路径列表和元数据，避免后续重复事件
         if changeType == .created || changeType == .renamed {
-            // 如果是重命名操作，需要先移除旧路径
+            // 如果是重命名操作，需要先移除旧路径并创建删除记录（Tombstone）
             if changeType == .renamed, let oldPath = matchedRename {
+                // 重要：必须为旧路径创建原子性删除记录（Tombstone），
+                // 否则同步引擎在扫描时因为 oldPath 已经从 lastKnown 中移除且硬盘上也已消失，
+                // 会认为该路径从未存在过，从而导致无法向远端发送删除请求。
+                if let myPeerID = p2pNode.peerID?.b58String, !myPeerID.isEmpty {
+                    deleteFileAtomically(
+                        path: oldPath, syncID: folder.syncID, peerID: myPeerID)
+                }
+
                 lastKnownLocalPaths[folder.syncID]?.remove(oldPath)
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: oldPath)
-                AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除旧路径: \(oldPath)")
+                AppLogger.syncPrint("[recordLocalChange] 🔄 已处理重命名操作的旧路径删除记录并移除: \(oldPath)")
             }
 
             // 新建或重命名：添加到已知路径列表
@@ -643,7 +651,7 @@ extension SyncManager {
             AppLogger.syncPrint(
                 "[recordLocalChange] ⏰ 重命名等待超时，确认为删除: \(relativePath) (syncID: \(folder.syncID))")
 
-            if let myPeerID = self.p2pNode.peerID, !myPeerID.isEmpty {
+            if let myPeerID = self.p2pNode.peerID?.b58String, !myPeerID.isEmpty {
                 self.deleteFileAtomically(
                     path: relativePath, syncID: folder.syncID, peerID: myPeerID)
             } else {

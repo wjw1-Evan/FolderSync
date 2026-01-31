@@ -234,82 +234,16 @@ class SyncEngine {
                 return
             }
 
-            // 尝试使用原生网络服务
+            // 尝试使用 WebRTC 服务
             var rootRes: SyncResponse?
             do {
-                let addressStrings = peerAddresses.map { $0.description }
-
-                // 获取所有按优先级排序的地址（用于地址回退）
-                let sortedAddresses = AddressConverter.extractAllAddresses(from: addressStrings)
-
-                guard !sortedAddresses.isEmpty else {
-                    let errorMsg = "无法从地址中提取 IP:Port（地址数: \(addressStrings.count)）"
-                    AppLogger.syncPrint("[SyncEngine] ❌ performSync: \(errorMsg)")
-                    throw NSError(
-                        domain: "SyncEngine", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: errorMsg])
-                }
-
-                // 验证所有地址格式
-                var validAddresses: [String] = []
-                for address in sortedAddresses {
-                    let addressComponents = address.split(separator: ":")
-                    guard addressComponents.count == 2,
-                        let extractedIP = String(addressComponents[0]).removingPercentEncoding,
-                        let extractedPort = UInt16(String(addressComponents[1])),
-                        extractedPort > 0,
-                        extractedPort <= 65535,
-                        !extractedIP.isEmpty,
-                        extractedIP != "0.0.0.0"
-                    else {
-                        // 跳过无效地址
-                        continue
-                    }
-                    validAddresses.append(address)
-                }
-
-                guard !validAddresses.isEmpty else {
-                    AppLogger.syncPrint("[SyncEngine] ❌ performSync: 所有地址格式验证失败")
-                    throw NSError(
-                        domain: "SyncEngine", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "所有地址格式无效"])
-                }
-
-                // 尝试每个地址（按优先级），如果失败则尝试下一个
-                var lastError: Error?
-
-                for (index, address) in validAddresses.enumerated() {
-                    do {
-                        rootRes =
-                            try await syncManager.p2pNode.nativeNetwork.sendRequest(
-                                .getMST(syncID: syncID),
-                                to: address,
-                                timeout: 30.0,  // 大文件同步时对端可能繁忙，需更长超时
-                                maxRetries: 3
-                            ) as SyncResponse
-                        break  // 成功，退出循环
-                    } catch {
-                        lastError = error
-                        // 如果不是最后一个地址，继续尝试下一个
-                        if index < validAddresses.count - 1 {
-                            continue
-                        }
-                    }
-                }
-
-                // 如果所有地址都失败了
-                guard rootRes != nil else {
-                    throw lastError
-                        ?? NSError(
-                            domain: "SyncEngine", code: -1,
-                            userInfo: [
-                                NSLocalizedDescriptionKey:
-                                    "所有地址连接失败（共尝试 \(validAddresses.count) 个地址）"
-                            ])
-                }
+                rootRes = try await syncManager.p2pNode.sendRequest(
+                    .getMST(syncID: syncID),
+                    to: peerID
+                )
             } catch {
                 let errorString = String(describing: error)
-                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] 原生 TCP 请求失败: \(errorString)")
+                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] WebRTC 请求失败: \(errorString)")
 
                 // 简化逻辑：仅使用广播判断peer有效性，连接失败不删除peer
                 // 如果peer仍在发送广播，说明它是在线的，连接失败可能是临时网络问题
@@ -418,18 +352,17 @@ class SyncEngine {
             }
 
             // 第三步：通过哈希值匹配重命名（第一次同步时跳过）
-            if !isFirstSync {
-                for (oldPath, oldMeta) in disappearedFiles {
-                    // 查找具有相同哈希值的新文件
-                    if let (newPath, _) = newFiles.first(where: { $0.value.hash == oldMeta.hash }) {
-                        // 找到匹配！这是重命名操作
-                        renamedFiles[oldPath] = newPath
-                        newFiles.removeValue(forKey: newPath)  // 从新文件列表中移除，因为它是重命名
-                        AppLogger.syncPrint("[SyncEngine] 🔄 检测到文件重命名: \(oldPath) -> \(newPath)")
-                    } else {
-                        // 没有找到匹配，这是真正的删除
-                        locallyDeleted.insert(oldPath)
-                    }
+            for (oldPath, oldMeta) in disappearedFiles {
+                // 查找具有相同哈希值的新文件
+                if let (newPath, _) = newFiles.first(where: { $0.value.hash == oldMeta.hash }) {
+                    // 找到匹配！这是重命名操作
+                    renamedFiles[oldPath] = newPath
+                    newFiles.removeValue(forKey: newPath)  // 从新文件列表中移除，因为它是重命名
+                    locallyDeleted.insert(oldPath)  // 仍然标记为已删除，以便创建删除记录
+                    AppLogger.syncPrint("[SyncEngine] 🔄 检测到文件重命名: \(oldPath) -> \(newPath)")
+                } else {
+                    // 没有找到匹配，这是真正的删除
+                    locallyDeleted.insert(oldPath)
                 }
             }
 
@@ -446,7 +379,7 @@ class SyncEngine {
             // 更新 deletedPaths（只包含真正的删除，不包括重命名）
             // 使用原子性删除操作创建删除记录
             if !locallyDeleted.isEmpty {
-                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID?.b58String ?? "" }
 
                 for path in locallyDeleted {
                     // 使用原子性删除操作创建删除记录
@@ -594,7 +527,7 @@ class SyncEngine {
                 }
             }
 
-            let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+            let myPeerID = await MainActor.run { syncManager.p2pNode.peerID?.b58String ?? "" }
             var totalOps = 0
             var completedOps = 0
             var syncedFiles: [SyncLog.SyncedFileInfo] = []
@@ -716,7 +649,7 @@ class SyncEngine {
             let remoteDeletedSet = Set(remoteDeletedPaths)
             if !remoteDeletedSet.isEmpty {
                 AppLogger.syncPrint("[SyncEngine] 📋 收到远程删除记录: \(remoteDeletedSet.count) 个文件")
-                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                let myPeerID = await MainActor.run { syncManager.p2pNode.peerID?.b58String ?? "" }
 
                 for deletedPath in remoteDeletedSet {
                     // 获取远程删除记录（如果使用新格式）
@@ -1211,17 +1144,28 @@ class SyncEngine {
             )
 
             // 处理删除和重命名：重命名需要先在远程删除旧路径，然后上传新路径
-            var toDelete =
+            var toDeleteMap: [String: VectorClock?] = [:]
+            let pathsToDelete =
                 (mode == .twoWay || mode == .uploadOnly)
                 ? locallyDeleted.union(deleteRemotePaths) : []
+
+            for path in pathsToDelete {
+                toDeleteMap[path] = VectorClockManager.getVectorClock(
+                    folderID: currentFolder.id, syncID: syncID, path: path)
+            }
+
             // 重命名操作：需要在远程删除旧路径
             if mode == .twoWay || mode == .uploadOnly {
                 for oldPath in renamedFiles.keys {
-                    toDelete.insert(oldPath)
+                    if toDeleteMap[oldPath] == nil {
+                        toDeleteMap[oldPath] = VectorClockManager.getVectorClock(
+                            folderID: currentFolder.id, syncID: syncID, path: oldPath)
+                    }
                 }
             }
-            if !toDelete.isEmpty {
-                totalOps += toDelete.count
+
+            if !toDeleteMap.isEmpty {
+                totalOps += toDeleteMap.count
             }
 
             if totalOps > 0 {
@@ -1231,13 +1175,13 @@ class SyncEngine {
             }
 
             // 重要：先执行删除操作，确保远程删除后再进行下载，避免下载已删除的文件
-            if !toDelete.isEmpty {
+            if !toDeleteMap.isEmpty {
                 syncManager.updateFolderStatus(
-                    currentFolder.id, status: .syncing, message: "正在删除 \(toDelete.count) 个文件...",
+                    currentFolder.id, status: .syncing, message: "正在删除 \(toDeleteMap.count) 个文件...",
                     progress: Double(completedOps) / Double(max(totalOps, 1)))
 
                 let delRes: SyncResponse = try await syncManager.sendSyncRequest(
-                    .deleteFiles(syncID: syncID, paths: Array(toDelete)),
+                    .deleteFiles(syncID: syncID, paths: toDeleteMap),
                     to: peer,
                     peerID: peerID,
                     timeout: 90.0,
@@ -1253,9 +1197,11 @@ class SyncEngine {
                     // 3. 这样可以防止删除请求成功后，但远程文件还在的情况下，文件被重新下载
 
                     // 获取当前设备的 PeerID（用于创建删除记录）
-                    let myPeerID = await MainActor.run { syncManager.p2pNode.peerID ?? "" }
+                    let myPeerID = await MainActor.run {
+                        syncManager.p2pNode.peerID?.b58String ?? ""
+                    }
 
-                    for rel in toDelete {
+                    for rel in toDeleteMap.keys {
                         // 使用原子性删除操作
                         await MainActor.run {
                             syncManager.deleteFileAtomically(
@@ -1288,7 +1234,7 @@ class SyncEngine {
 
                         // 注意：不从这里移除 deletedSet，让第 542-549 行的逻辑在下次同步时确认删除
                     }
-                    completedOps += toDelete.count
+                    completedOps += toDeleteMap.count
 
                     // 注意：不在这里更新 deletedPaths
                     // deletedSet 仍然包含已发送删除请求的文件，直到下次同步时确认远程文件已不存在

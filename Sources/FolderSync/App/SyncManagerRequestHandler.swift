@@ -1,5 +1,5 @@
-import Foundation
 import Crypto
+import Foundation
 
 /// 同步请求处理扩展
 /// 负责处理来自其他对等点的同步请求
@@ -67,55 +67,51 @@ extension SyncManager {
             guard let folder = await findFolder(by: syncID) else {
                 return .error("Folder not found")
             }
-                let fileURL = folder.localPath.appendingPathComponent(relativePath)
-                let parentDir = fileURL.deletingLastPathComponent()
-                let fileManager = FileManager.default
+            let fileURL = folder.localPath.appendingPathComponent(relativePath)
+            let parentDir = fileURL.deletingLastPathComponent()
+            let fileManager = FileManager.default
 
-                try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
-                if !fileManager.fileExists(atPath: parentDir.path) {
-                    try fileManager.createDirectory(
-                        at: parentDir, withIntermediateDirectories: true)
-                }
+            try? preparePathForWritingFile(
+                fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
+            if !fileManager.fileExists(atPath: parentDir.path) {
+                try fileManager.createDirectory(
+                    at: parentDir, withIntermediateDirectories: true)
+            }
 
-                guard fileManager.isWritableFile(atPath: parentDir.path) else {
-                    return .error("没有写入权限: \(parentDir.path)")
-                }
+            guard fileManager.isWritableFile(atPath: parentDir.path) else {
+                return .error("没有写入权限: \(parentDir.path)")
+            }
 
-                // 先合并 Vector Clock（在写入文件之前，确保 VC 逻辑正确）
-                var mergedVC: VectorClock?
-                if let vc = vectorClock {
-                    let localVC = VectorClockManager.getVectorClock(folderID: folder.id, syncID: syncID, path: relativePath)
-                    mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
-                }
-                
-                // 标记同步写入冷却：即将落地远端写入，避免 FSEvents 回调把它当成本地修改并递增 VC
-                self.markSyncCooldown(syncID: syncID, path: relativePath)
+            // 先合并 Vector Clock（在写入文件之前，确保 VC 逻辑正确）
+            var mergedVC: VectorClock?
+            if let vc = vectorClock {
+                let localVC = VectorClockManager.getVectorClock(
+                    folderID: folder.id, syncID: syncID, path: relativePath)
+                mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
+            }
 
-                // 写入文件
-                try data.write(to: fileURL)
-                
-                // 文件写入成功后，保存 Vector Clock
-                if let vc = mergedVC {
-                    VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: relativePath, vc: vc)
-                }
-                
+            // 标记同步写入冷却：即将落地远端写入，避免 FSEvents 回调把它当成本地修改并递增 VC
+            self.markSyncCooldown(syncID: syncID, path: relativePath)
+
+            // 写入文件
+            try data.write(to: fileURL)
+
+            // 文件写入成功后，保存 Vector Clock
+            if let vc = mergedVC {
+                VectorClockManager.saveVectorClock(
+                    folderID: folder.id, syncID: syncID, path: relativePath, vc: vc)
+            }
+
             return .putAck(syncID: syncID, path: relativePath)
 
         case .deleteFiles(let syncID, let paths):
-            guard let folder = await findFolder(by: syncID) else {
+            guard (await findFolder(by: syncID)) != nil else {
                 return .error("Folder not found")
             }
-                let fileManager = FileManager.default
-
-                for rel in paths {
-                    let fileURL = folder.localPath.appendingPathComponent(rel)
-                    // 如果文件存在，直接删除
-                    if fileManager.fileExists(atPath: fileURL.path) {
-                        try? fileManager.removeItem(at: fileURL)
-                    }
-                    // 删除 Vector Clock（使用 VectorClockManager）
-                    VectorClockManager.deleteVectorClock(folderID: folder.id, syncID: syncID, path: rel)
-                }
+            let myPeerID = p2pNode.peerID?.b58String ?? ""
+            for (rel, vc) in paths {
+                deleteFileAtomically(path: rel, syncID: syncID, peerID: myPeerID, vectorClock: vc)
+            }
             return .deleteAck(syncID: syncID)
 
         // 块级别增量同步请求
@@ -249,7 +245,8 @@ extension SyncManager {
         let fileManager = FileManager.default
 
         do {
-            try? preparePathForWritingFile(fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
+            try? preparePathForWritingFile(
+                fileURL: fileURL, baseDir: folder.localPath, fileManager: fileManager)
             if !fileManager.fileExists(atPath: parentDir.path) {
                 try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
             }
@@ -275,9 +272,11 @@ extension SyncManager {
 
             // 更新 Vector Clock（使用 VectorClockManager）
             if let vc = vectorClock {
-                let localVC = VectorClockManager.getVectorClock(folderID: folder.id, syncID: syncID, path: path)
+                let localVC = VectorClockManager.getVectorClock(
+                    folderID: folder.id, syncID: syncID, path: path)
                 let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: vc)
-                VectorClockManager.saveVectorClock(folderID: folder.id, syncID: syncID, path: path, vc: mergedVC)
+                VectorClockManager.saveVectorClock(
+                    folderID: folder.id, syncID: syncID, path: path, vc: mergedVC)
             }
 
             return .fileChunksAck(syncID: syncID, path: path)

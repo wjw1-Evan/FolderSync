@@ -5,11 +5,14 @@ import Foundation
 extension SyncManager {
     /// 与指定对等点同步指定文件夹。
     /// - Parameter precomputedState: 可选预计算状态 (MST, metadata)；若提供则 performSync 跳过初始 calculateFullState，避免重复计算。
-    func syncWithPeer(peer: PeerID, folder: SyncFolder, precomputedState: (MerkleSearchTree, [String: FileMetadata])? = nil) {
+    func syncWithPeer(
+        peer: PeerID, folder: SyncFolder,
+        precomputedState: (MerkleSearchTree, [String: FileMetadata])? = nil
+    ) {
         syncEngine.syncWithPeer(peer: peer, folder: folder, precomputedState: precomputedState)
     }
 
-    /// 统一的请求函数 - 使用原生 TCP
+    /// 统一的请求函数 - 使用 WebRTC
     func sendSyncRequest(
         _ message: SyncRequest,
         to peer: PeerID,
@@ -18,58 +21,10 @@ extension SyncManager {
         maxRetries: Int = 3,
         folder: SyncFolder? = nil
     ) async throws -> SyncResponse {
-        // 获取对等点地址
-        let peerAddresses = await MainActor.run {
-            return p2pNode.peerManager.getAddresses(for: peer.b58String)
-        }
-
-        // 从地址中提取第一个可用的 IP:Port 地址
-        let addressStrings = peerAddresses.map { $0.description }
-        guard let address = AddressConverter.extractFirstAddress(from: addressStrings) else {
-            // 删除无法访问的 peer（无可用地址）
-            // 简化逻辑：无法访问的peer直接删除
-            await MainActor.run {
-                // 从所有syncID中移除该peer
-                for folder in self.folders {
-                    self.removeFolderPeer(folder.syncID, peerID: peerID)
-                }
-                // 从PeerManager中删除
-                self.peerManager.removePeer(peerID)
-            }
-            throw NSError(
-                domain: "SyncManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "对等点无可用地址"])
-        }
-
-        // 验证提取的地址
-        let addressComponents = address.split(separator: ":")
-        guard addressComponents.count == 2,
-            let extractedIP = String(addressComponents[0]).removingPercentEncoding,
-            let extractedPort = UInt16(String(addressComponents[1])),
-            extractedPort > 0,
-            extractedPort <= 65535,
-            !extractedIP.isEmpty,
-            extractedIP != "0.0.0.0"
-        else {
-            AppLogger.syncPrint("[SyncManager] ❌ [sendSyncRequest] 地址格式验证失败: \(address)")
-            throw NSError(
-                domain: "SyncManager", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "地址格式无效: \(address)"])
-        }
-
-        // 使用原生 TCP
-        do {
-            return try await p2pNode.nativeNetwork.sendRequest(
-                message,
-                to: address,
-                timeout: timeout,
-                maxRetries: maxRetries
-            ) as SyncResponse
-        } catch {
-            // 简化逻辑：仅使用广播判断peer有效性，请求失败不删除peer
-            // 如果peer仍在发送广播，说明它是在线的，请求失败可能是临时网络问题
-            // peer的有效性由广播时间戳判断，不在请求过程中删除peer
-            throw error
-        }
+        // 使用 WebRTC
+        // P2PNode 内部处理重试和超时（如果需要更复杂的策略可以在此层添加）
+        // 目前 P2PNode.sendRequest 实现了基本的超时
+        return try await p2pNode.sendRequest(message, to: peerID)
     }
 
     /// 检查是否应该为特定对等点和文件夹触发同步
@@ -175,32 +130,35 @@ extension SyncManager {
                 }
             } else {
                 for peerInfo in registeredPeers {
-                    syncWithPeer(peer: peerInfo.peerID, folder: folder, precomputedState: precomputed)
+                    syncWithPeer(
+                        peer: peerInfo.peerID, folder: folder, precomputedState: precomputed)
                 }
-                
+
                 // 定期检查同步状态，如果所有同步都完成但状态仍然是 .syncing，重置状态
                 // 这样可以避免因为所有 peer 都失败而导致状态一直卡在 .syncing
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    let maxWaitTime = 60.0 // 最多等待60秒
-                    let checkInterval = 2.0 // 每2秒检查一次
+                    let maxWaitTime = 60.0  // 最多等待60秒
+                    let checkInterval = 2.0  // 每2秒检查一次
                     let startTime = Date()
-                    
+
                     while Date().timeIntervalSince(startTime) < maxWaitTime {
                         try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
-                        
+
                         // 检查是否所有 peer 的同步都已完成
                         let allSyncCompleted = registeredPeers.allSatisfy { peerInfo in
                             let syncKey = "\(folder.syncID):\(peerInfo.peerIDString)"
                             return !self.syncInProgress.contains(syncKey)
                         }
-                        
+
                         if allSyncCompleted {
                             // 所有同步都完成，检查状态
                             if let index = self.folders.firstIndex(where: { $0.id == folder.id }) {
                                 let currentFolder = self.folders[index]
                                 if currentFolder.status == .syncing {
-                                    AppLogger.syncPrint("[SyncManager] 🔄 所有同步已完成但状态仍为 .syncing，重置状态: \(folder.syncID)")
+                                    AppLogger.syncPrint(
+                                        "[SyncManager] 🔄 所有同步已完成但状态仍为 .syncing，重置状态: \(folder.syncID)"
+                                    )
                                     self.updateFolderStatus(
                                         folder.id, status: .synced, message: "同步完成", progress: 1.0)
                                 }

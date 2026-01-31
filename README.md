@@ -28,12 +28,14 @@
 - 开发语言：Swift 5.9+，利用Swift Concurrency（async/await）、Combine框架实现异步任务与事件驱动，适配macOS 14+系统版本。
 - 开发工具：Xcode 15+，使用SwiftUI构建GUI。
 - 依赖管理：Swift Package Manager (SPM)。
-- **外部依赖**：
+    - `stasel/WebRTC` (124.0+): 用于实现 P2P 直接通信和 NAT 穿透。
     - `swift-crypto` (4.0.0+)：用于加密和哈希计算（Ed25519 密钥对、SHA256 哈希等）
 
 ## 2. 核心技术模块
 
-- **P2P通信 (原生 TCP + TLS)**：使用 macOS 原生 Network 框架实现 TCP 客户端/服务器通信，通过 UDP 广播实现局域网自动发现。设备间通过原生 TCP 连接直接通信，支持可选的 TLS 加密，无需依赖第三方 P2P 框架。
+- **P2P通信 (WebRTC + TCP Signaling)**：
+    - **WebRTC**: 使用 Google WebRTC 协议栈实现 P2P 数据传输。支持 NAT 穿透（STUN/TURN）、端到端加密（DTLS-SRTP）和可靠数据传输（SCTP DataChannels）。
+    - **TCP Signaling**: 在局域网内使用轻量级 TCP 服务进行信令交换（SDP Offer/Answer, ICE Candidates），配合 UDP 广播实现自动发现。
 - **系统集成 (ServiceManagement)**：利用 `ServiceManagement` 框架（`SMAppService`）实现用户可控的“开机自动启动”功能。
 - **文件监控 (FSEvents)**：利用 macOS 原生 FSEvents API 实现高效的目录递归监控，捕获文件创建、修改、删除、重命名等事件。采用防抖机制（2 秒延迟）避免频繁同步。实现文件写入稳定性检测，文件大小稳定 3 秒后才认为写入完成，避免同步不完整的文件。
 - **增量同步 (CDC & Merkle Search Trees)**：
@@ -70,28 +72,24 @@
    - **FolderMonitor**：文件夹监控管理器，负责文件系统事件监控、文件稳定性检测和同步触发防抖。实现文件写入稳定性检测（文件大小稳定 3 秒后才认为写入完成）。
    - **P2PHandlers**：P2P 消息处理器，负责处理来自对等点的同步请求和响应。
 
-3. **网络层 (原生 TCP/TLS + LAN Discovery + NAT 穿透)**：使用原生 TCP 客户端/服务器实现设备间通信，支持可选的 TLS 加密。通过 UDP 广播实现局域网自动发现。包括对等点发现、连接管理、地址转换、对等点注册服务、NAT 穿透检测和中继服务等。通过异步回调与业务逻辑层通信。
+3. **网络层 (WebRTC + LAN Discovery)**：
+   - **WebRTCManager**: 封装 `RTCPeerConnection` 和 `RTCDataChannel`，负责 P2P 连接建立和数据传输。
+   - **TCPSignalingService**: 负责局域网内的信令交换。
+   - **LANDiscovery**: 负责广播 PeerID 和信令地址。
+   - **P2PNode**: 协调上述组件，提供统一的 P2P 通信接口。
 
 4. **存储层 (JSON 文件存储)**：使用 JSON 文件存储文件夹配置、文件索引、Vector Clocks、设备状态与同步日志，避免 SQLite 的 I/O 错误问题。
 
 ## 2. 核心模块详解
 
-### （1）网络与设备发现 (原生 TCP + LAN Discovery)
-- **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备，无需手动配置。设备每 5 秒广播一次自己的 PeerID 和监听地址，并监听其他设备的广播消息。这是主要的设备发现机制，完全在局域网内工作，无需任何服务器。
-- **原生 TCP 通信**：使用 macOS 原生 Network 框架实现 TCP 客户端/服务器，设备间通过 TCP 连接直接通信。服务器自动分配端口，客户端通过地址转换从多地址格式中提取 IP:Port 进行连接。
-- **智能对等点注册**：当通过 LAN Discovery 发现对等点时，系统会自动将对等点注册到 PeerManager 和 PeerRegistrationService 中，确保后续的连接能够成功建立。注册过程包括：
-  - 解析对等点的 PeerID 和监听地址
-  - 将对等点添加到 PeerManager 的持久化存储
-  - 通过 PeerRegistrationService 管理注册状态
-  - 延迟同步以确保对等点已完全注册
-- **自动连接与多点同步**：发现设备后自动建立连接并开始同步，无需任何手动配对步骤。支持同时向多个已注册的设备进行同步（多点同步）。所有通信均在客户端之间直接进行（P2P），无需中央服务器。
-- **设备状态监控**：定期检查设备在线状态（每 20 秒），自动更新设备在线/离线状态，并在 UI 中实时显示。
-- **纯 P2P 架构**：客户端之间通过原生 TCP 协议直接通信，所有数据传输都在设备间直连完成，不经过任何中间服务器。
-- **对等点身份**：基于 Ed25519 密钥对生成 PeerID，作为设备唯一身份标识。密钥对存储在本地文件中，使用密码加密保护。
-- **地址管理**：实现地址转换器（AddressConverter）处理多地址格式，从 libp2p 多地址格式中提取可用的 IP:Port 地址用于 TCP 连接。
-- **NAT 穿透**：实现 AutoNAT 服务自动检测 NAT 类型和公网可达性，帮助判断是否需要使用中继服务。
-- **中继服务**：实现 Circuit Relay 中继服务，当设备无法直连时，可通过中继服务器进行通信，支持广域网同步场景。
-- **TLS 加密**：网络层支持可选的 TLS 加密，可通过参数启用，确保数据传输安全。
+### （1）网络与设备发现 (WebRTC + LAN Discovery)
+- **局域网自动发现**：使用 UDP 广播在局域网内自动发现其他设备。设备广播包含 PeerID 和 **TCP 信令端口**。
+- **WebRTC 连接**：
+  - **信令交换**：通过发现的 TCP 端口建立临时连接，交换 WebRTC 所需的 SDP 和 ICE Candidates。
+  - **P2P 数据传输**：建立 WebRTC 连接后，通过 `RTCDataChannel` 进行可靠的数据传输。所有同步请求和文件数据均通过 DataChannel 传输。
+  - **NAT 穿透**：WebRTC 内置 ICE 框架，结合 STUN 服务器（默认 Google STUN），具备强大的 NAT 穿透能力。
+- **智能对等点注册**：当通过 LAN Discovery 发现对等点时，自动发起 WebRTC 连接流程。
+- **安全性**：WebRTC 强制使用 DTLS-SRTP 加密，确保通信内容的机密性和完整性。
 
 ### （2）内容定义块管理 (Block Management)
 - **FastCDC 算法**：已实现 FastCDC 算法用于文件内容定义切分，支持变长块（4KB-64KB），提高数据去重率并解决"插入/删除字节导致偏移失效"的问题。使用 Gear 哈希算法进行内容定义切分。
@@ -124,30 +122,35 @@
 
 ### （1）P2P 节点初始化与局域网发现
 ```swift
+### （1）P2P 节点初始化与局域网发现
+```swift
 class P2PNode {
-    private var lanDiscovery: LANDiscovery?
-    public let peerManager: PeerManager
-    public let registrationService: PeerRegistrationService
-    public let nativeNetwork: NativeNetworkService
+    // WebRTC 核心组件
+    public let webRTC: WebRTCManager
+    public let signaling: TCPSignalingService
     
     func start() async throws {
-        // 加载或生成密钥对
-        let keyPair = try loadOrGenerateKeyPair()
-        myPeerID = keyPair.peerID
+        // ... (PeerID 加载)
         
-        // 启动原生 TCP 服务器
-        let port = try nativeNetwork.startServer(port: 0)
+        // 1. 启动 TCP 信令服务器
+        let signalingPort = try signaling.startServer()
         
-        // 启用 UDP 广播局域网发现
-        let discovery = LANDiscovery()
-        discovery.onPeerDiscovered = { [weak self] peerID, address, peerAddresses in
-            await self?.connectToDiscoveredPeer(peerID: peerID, addresses: peerAddresses)
-        }
-        discovery.start(peerID: myPeerID.b58String, listenAddresses: ["/ip4/0.0.0.0/tcp/\(port)"])
+        // 2. 初始化 WebRTC Manager
+        // webRTC 已在 init 中配置了 STUN Server
         
-        // 设置对等点发现回调
-        self.onPeerDiscovered = { peer in
-            // 触发同步管理器开始同步
+        // 3. 启动 LAN Discovery，广播自己的信令地址
+        setupLANDiscovery(peerID: peerID.b58String, signalingPort: signalingPort)
+    }
+    
+    // 处理发现的 Peer
+    private func handleDiscoveredPeer(...) {
+        // 如果我是发起方 (PeerID 更大)
+        if myPeerID > peerID {
+            // 创建 WebRTC Offer
+            webRTC.createOffer(for: peerID) { sdp in
+                // 通过 TCP 信令发送 Offer
+                signaling.send(signal: .offer(sdp), to: targetIP)
+            }
         }
     }
 }

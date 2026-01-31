@@ -132,7 +132,7 @@ extension SyncManager {
         var devices: [DeviceInfo] = []
 
         // 添加自身
-        if let myPeerID = p2pNode.peerID {
+        if let myPeerID = p2pNode.peerID?.b58String {
             devices.append(
                 DeviceInfo(
                     peerID: myPeerID,

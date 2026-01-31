@@ -30,16 +30,10 @@ public class LANDiscovery {
         ensureSharedListenerStarted()
     }
 
+    /// 取消注册时不再关闭共享 listener，避免下一测试重新绑定端口时出现 Address already in use（同一进程内多测试顺序执行）
     private static func unregisterSharedHandler(id: UUID) {
-        let shouldStop: Bool = sharedQueue.sync {
+        sharedQueue.sync {
             sharedHandlers.removeValue(forKey: id)
-            return sharedHandlers.isEmpty
-        }
-        if shouldStop {
-            sharedQueue.async {
-                sharedListener?.cancel()
-                sharedListener = nil
-            }
         }
     }
 

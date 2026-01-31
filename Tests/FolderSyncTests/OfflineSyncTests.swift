@@ -36,33 +36,28 @@ final class OfflineSyncTests: XCTestCase {
     }
     
     override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源
+        // 停止 P2P 节点以清理资源（stop 可重复调用，已停止时无副作用）
         try? await syncManager1?.p2pNode.stop()
         try? await syncManager2?.p2pNode.stop()
         
         syncManager1 = nil
         syncManager2 = nil
         
-        TestHelpers.cleanupTempDirectory(tempDir1)
-        TestHelpers.cleanupTempDirectory(tempDir2)
+        if tempDir1 != nil { TestHelpers.cleanupTempDirectory(tempDir1) }
+        if tempDir2 != nil { TestHelpers.cleanupTempDirectory(tempDir2) }
         
         try await super.tearDown()
     }
     
-    /// 模拟客户端2离线
+    /// 模拟客户端2离线（通过停止其 P2P 网络服务实现）
     func simulateClient2Offline() async throws {
-        // 将客户端2标记为离线
-        // 注意：在实际实现中，这可能需要修改 PeerManager 的状态
-        // 这里简化处理，通过停止网络服务来模拟离线
         try await syncManager2.p2pNode.stop()
     }
     
-    /// 模拟客户端2上线
+    /// 模拟客户端2上线（重新启动其 P2P 网络服务）
     func simulateClient2Online() async throws {
-        // 重新启动网络服务
         try await syncManager2.p2pNode.start()
-        // 等待重新发现
-        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try? await Task.sleep(nanoseconds: 3_000_000_000) // 等待重新发现
     }
     
     // MARK: - 离线添加测试
@@ -385,61 +380,69 @@ final class OfflineSyncTests: XCTestCase {
         let tempDir3 = try TestHelpers.createTempDirectory()
         var syncManager3: SyncManager? = SyncManager()
         
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        let folder3 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir3)
-        syncManager3?.addFolder(folder3)
-        
-        // 等待发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 模拟客户端2和3离线
-        try await simulateClient2Offline()
-        try await syncManager3?.p2pNode.stop()
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-        
-        // 客户端1添加文件
-        let testFile = tempDir1.appendingPathComponent("multi_offline.txt")
-        try TestHelpers.createTestFile(at: testFile, content: "Added while clients 2 and 3 offline")
-        
-        // 等待客户端1处理
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 客户端2上线
-        try await simulateClient2Online()
-        
-        // 等待客户端2同步
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证客户端2已同步
-        let syncedFile2 = tempDir2.appendingPathComponent("multi_offline.txt")
-        let exists2 = await TestHelpers.waitForCondition(timeout: 10.0) {
-            TestHelpers.fileExists(at: syncedFile2)
-        }
-        XCTAssertTrue(exists2, "客户端2应该已同步")
-        
-        // 客户端3上线
-        try await syncManager3?.p2pNode.start()
-        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
-        
-        // 等待客户端3同步
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证客户端3已同步
-        let syncedFile3 = tempDir3.appendingPathComponent("multi_offline.txt")
-        let exists3 = await TestHelpers.waitForCondition(timeout: 10.0) {
-            TestHelpers.fileExists(at: syncedFile3)
-        }
-        XCTAssertTrue(exists3, "客户端3应该已同步")
-        
-        if exists3 {
-            let content = try TestHelpers.readFileContent(at: syncedFile3)
-            XCTAssertEqual(content, "Added while clients 2 and 3 offline", "文件内容应该正确")
+        func cleanupThirdClient() async {
+            try? await syncManager3?.p2pNode.stop()
+            syncManager3 = nil
+            TestHelpers.cleanupTempDirectory(tempDir3)
         }
         
-        // 清理
-        syncManager3 = nil
-        TestHelpers.cleanupTempDirectory(tempDir3)
+        do {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+            
+            let folder3 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir3)
+            syncManager3?.addFolder(folder3)
+            
+            // 等待发现
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+            
+            // 模拟客户端2和3离线
+            try await simulateClient2Offline()
+            try await syncManager3?.p2pNode.stop()
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
+            
+            // 客户端1添加文件
+            let testFile = tempDir1.appendingPathComponent("multi_offline.txt")
+            try TestHelpers.createTestFile(at: testFile, content: "Added while clients 2 and 3 offline")
+            
+            // 等待客户端1处理
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
+            
+            // 客户端2上线
+            try await simulateClient2Online()
+            
+            // 等待客户端2同步
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+            
+            // 验证客户端2已同步
+            let syncedFile2 = tempDir2.appendingPathComponent("multi_offline.txt")
+            let exists2 = await TestHelpers.waitForCondition(timeout: 10.0) {
+                TestHelpers.fileExists(at: syncedFile2)
+            }
+            XCTAssertTrue(exists2, "客户端2应该已同步")
+            
+            // 客户端3上线
+            try await syncManager3?.p2pNode.start()
+            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+            
+            // 等待客户端3同步
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+            
+            // 验证客户端3已同步
+            let syncedFile3 = tempDir3.appendingPathComponent("multi_offline.txt")
+            let exists3 = await TestHelpers.waitForCondition(timeout: 10.0) {
+                TestHelpers.fileExists(at: syncedFile3)
+            }
+            XCTAssertTrue(exists3, "客户端3应该已同步")
+            
+            if exists3 {
+                let content = try TestHelpers.readFileContent(at: syncedFile3)
+                XCTAssertEqual(content, "Added while clients 2 and 3 offline", "文件内容应该正确")
+            }
+        } catch {
+            await cleanupThirdClient()
+            throw error
+        }
+        await cleanupThirdClient()
     }
     
     /// 测试离线期间多个操作

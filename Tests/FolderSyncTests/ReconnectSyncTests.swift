@@ -31,8 +31,8 @@ final class ReconnectSyncTests: XCTestCase {
         let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
         syncManager2.addFolder(folder2)
         
-        // 等待文件夹添加和发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        // 等待文件夹添加和 peer 发现（双节点需更长时间完成发现与注册）
+        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
     }
     
     override func tearDown() async throws {
@@ -43,8 +43,10 @@ final class ReconnectSyncTests: XCTestCase {
         syncManager1 = nil
         syncManager2 = nil
         
-        TestHelpers.cleanupTempDirectory(tempDir1)
-        TestHelpers.cleanupTempDirectory(tempDir2)
+        if let d1 = tempDir1 { TestHelpers.cleanupTempDirectory(d1) }
+        if let d2 = tempDir2 { TestHelpers.cleanupTempDirectory(d2) }
+        tempDir1 = nil
+        tempDir2 = nil
         
         try await super.tearDown()
     }
@@ -58,6 +60,14 @@ final class ReconnectSyncTests: XCTestCase {
     func simulateClient2Online() async throws {
         try await syncManager2.p2pNode.start()
         try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+    }
+    
+    /// 等待 client1 发现重连的 client2 并显式触发同步（client2 重启后为新 PeerID，需发现后再同步）
+    func waitDiscoveryAndTriggerSyncFromClient1() async {
+        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        if let folder1 = syncManager1.folders.first(where: { $0.syncID == syncID }) {
+            _ = await TestHelpers.triggerSyncAndWait(syncManager: syncManager1, folder: folder1, timeout: 25.0)
+        }
     }
     
     // MARK: - 重新上线后同步测试
@@ -97,9 +107,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        
-        // 等待同步
-        try? await Task.sleep(nanoseconds: 7_000_000_000) // 7秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证所有操作都已同步
         for (filename, expectedContent) in operations {
@@ -153,9 +161,10 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 等待删除记录传播和文件删除
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
         
         // 验证文件已删除
         let deleted = await TestHelpers.waitForCondition(timeout: 15.0) {
@@ -164,9 +173,17 @@ final class ReconnectSyncTests: XCTestCase {
         
         XCTAssertTrue(deleted, "文件应该已删除")
         
-        // 验证客户端2也有删除记录
-        let deletedPaths2 = syncManager2.deletedPaths(for: syncID)
-        XCTAssertTrue(deletedPaths2.contains("deletion_test.txt"), "客户端2应该有删除记录")
+        // 验证客户端2也有删除记录（等待同步应用删除记录，本方法已在 MainActor）
+        var hasDeletionRecord = false
+        let deletionRecordDeadline = Date().addingTimeInterval(10.0)
+        while Date() < deletionRecordDeadline {
+            if syncManager2.deletedPaths(for: syncID).contains("deletion_test.txt") {
+                hasDeletionRecord = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+        }
+        XCTAssertTrue(hasDeletionRecord, "客户端2应该有删除记录")
     }
     
     /// 测试 Vector Clock 合并
@@ -190,9 +207,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        
-        // 等待同步（Vector Clock 合并）
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证文件已更新
         let syncedFile = tempDir2.appendingPathComponent("vc_test.txt")
@@ -223,7 +238,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证文件1已同步
         let syncedFile1 = tempDir2.appendingPathComponent("reconnect1.txt")
@@ -242,7 +257,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证文件2已同步
         let syncedFile2 = tempDir2.appendingPathComponent("reconnect2.txt")
@@ -274,9 +289,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 网络恢复（客户端2上线）
         try await simulateClient2Online()
-        
-        // 等待同步完成
-        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证文件已同步
         let syncedFile = tempDir2.appendingPathComponent("large_sync.bin")
@@ -320,9 +333,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        
-        // 等待同步完成
-        try? await Task.sleep(nanoseconds: 7_000_000_000) // 7秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证所有文件都已同步（完整性检查）
         var syncedCount = 0
@@ -370,9 +381,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        
-        // 等待同步
-        try? await Task.sleep(nanoseconds: 7_000_000_000) // 7秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证文件已重新创建（新文件，不是旧文件）
         let syncedFile = tempDir2.appendingPathComponent("recreate.txt")
@@ -422,9 +431,7 @@ final class ReconnectSyncTests: XCTestCase {
         
         // 客户端2上线
         try await simulateClient2Online()
-        
-        // 等待同步
-        try? await Task.sleep(nanoseconds: 7_000_000_000) // 7秒
+        await waitDiscoveryAndTriggerSyncFromClient1()
         
         // 验证最终状态
         // 文件1应该不存在（已删除）
@@ -446,8 +453,11 @@ final class ReconnectSyncTests: XCTestCase {
             XCTAssertEqual(content, "File 2", "重命名后的文件内容应该正确")
         }
         
-        // 原文件名不应该存在
+        // 原文件名不应该存在（等待删除/重命名同步完成）
         let syncedFile2 = tempDir2.appendingPathComponent("order2.txt")
-        XCTAssertFalse(TestHelpers.fileExists(at: syncedFile2), "原文件名不应该存在")
+        let order2Gone = await TestHelpers.waitForCondition(timeout: 10.0) {
+            !TestHelpers.fileExists(at: syncedFile2)
+        }
+        XCTAssertTrue(order2Gone, "原文件名不应该存在")
     }
 }

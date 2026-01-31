@@ -96,7 +96,7 @@ class TestHelpers {
         return files
     }
     
-    /// 等待条件满足（带超时）
+    /// 等待条件满足（带超时，同步条件）
     static func waitForCondition(
         timeout: TimeInterval = 10.0,
         condition: @escaping () -> Bool
@@ -104,6 +104,21 @@ class TestHelpers {
         let startTime = Date()
         while Date().timeIntervalSince(startTime) < timeout {
             if condition() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+        }
+        return false
+    }
+
+    /// 等待条件满足（带超时，异步条件，用于需 MainActor 等异步检查）
+    static func waitForCondition(
+        timeout: TimeInterval = 10.0,
+        condition: @escaping () async -> Bool
+    ) async -> Bool {
+        let startTime = Date()
+        while Date().timeIntervalSince(startTime) < timeout {
+            if await condition() {
                 return true
             }
             try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒

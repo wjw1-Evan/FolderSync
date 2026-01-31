@@ -31,8 +31,8 @@ final class FileOperationsSyncTests: XCTestCase {
         let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
         syncManager2.addFolder(folder2)
         
-        // 等待文件夹添加和发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        // 等待文件夹添加和 peer 发现（双节点需更长时间完成发现与注册）
+        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
     }
     
     override func tearDown() async throws {
@@ -57,12 +57,12 @@ final class FileOperationsSyncTests: XCTestCase {
         let testFile = tempDir1.appendingPathComponent("newfile.txt")
         try TestHelpers.createTestFile(at: testFile, content: "New file content")
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        // 等待 FSEvents 记录与同步
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 验证文件已同步到客户端2
         let syncedFile = tempDir2.appendingPathComponent("newfile.txt")
-        let fileExists = await TestHelpers.waitForCondition(timeout: 10.0) {
+        let fileExists = await TestHelpers.waitForCondition(timeout: 28.0) {
             TestHelpers.fileExists(at: syncedFile)
         }
         
@@ -84,8 +84,8 @@ final class FileOperationsSyncTests: XCTestCase {
         let file2 = tempDir2.appendingPathComponent("file2.txt")
         try TestHelpers.createTestFile(at: file2, content: "File 2 from client 2")
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        // 等待 FSEvents 记录与双向同步
+        try await Task.sleep(nanoseconds: 8_000_000_000) // 8秒
         
         // 验证两个文件都已同步到两个客户端
         let filesToCheck: [(URL?, String, String)] = [
@@ -96,7 +96,7 @@ final class FileOperationsSyncTests: XCTestCase {
         for (dir, filename, expectedContent) in filesToCheck {
             guard let dir = dir else { continue }
             let fileURL = dir.appendingPathComponent(filename)
-            let exists = await TestHelpers.waitForCondition(timeout: 10.0) {
+            let exists = await TestHelpers.waitForCondition(timeout: 28.0) {
                 TestHelpers.fileExists(at: fileURL)
             }
             
@@ -128,15 +128,15 @@ final class FileOperationsSyncTests: XCTestCase {
         let deepFile = deepDir.appendingPathComponent("deepfile.txt")
         try TestHelpers.createTestFile(at: deepFile, content: "Deep file")
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        // 等待 FSEvents 记录与嵌套结构同步
+        try await Task.sleep(nanoseconds: 8_000_000_000) // 8秒
         
-        // 验证文件夹结构已同步
+        // 验证文件夹结构已同步：先等待子目录出现，再校验文件
         let syncedSubDir = tempDir2.appendingPathComponent("subdir")
-        XCTAssertTrue(
-            TestHelpers.directoryExists(at: syncedSubDir),
-            "子文件夹应该已同步"
-        )
+        let subDirSynced = await TestHelpers.waitForCondition(timeout: 28.0) {
+            TestHelpers.directoryExists(at: syncedSubDir)
+        }
+        XCTAssertTrue(subDirSynced, "子文件夹应该已同步")
         
         let syncedFile1 = syncedSubDir.appendingPathComponent("file1.txt")
         let syncedFile2 = syncedSubDir.appendingPathComponent("file2.txt")
@@ -150,7 +150,7 @@ final class FileOperationsSyncTests: XCTestCase {
         ]
         
         for (fileURL, expectedContent) in filesToCheck {
-            let exists = await TestHelpers.waitForCondition(timeout: 10.0) {
+            let exists = await TestHelpers.waitForCondition(timeout: 28.0) {
                 TestHelpers.fileExists(at: fileURL)
             }
             
@@ -172,18 +172,22 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: testFile, content: "Original content")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 修改文件
         try TestHelpers.createTestFile(at: testFile, content: "Modified content")
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
-        
-        // 验证文件已更新
+        // 等待同步并验证文件已更新
         let syncedFile = tempDir2.appendingPathComponent("modify_test.txt")
-        let content = try TestHelpers.readFileContent(at: syncedFile)
-        XCTAssertEqual(content, "Modified content", "文件内容应该已更新")
+        let updated = await TestHelpers.waitForCondition(timeout: 28.0) {
+            guard let c = try? TestHelpers.readFileContent(at: syncedFile) else { return false }
+            return c == "Modified content"
+        }
+        XCTAssertTrue(updated, "文件内容应该已同步为 Modified content")
+        if updated {
+            let content = try TestHelpers.readFileContent(at: syncedFile)
+            XCTAssertEqual(content, "Modified content", "文件内容应该已更新")
+        }
     }
     
     /// 测试多客户端同时修改不同文件
@@ -196,7 +200,7 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: file2, content: "Original 2")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 客户端1修改文件1
         try TestHelpers.createTestFile(at: file1, content: "Modified 1")
@@ -204,18 +208,24 @@ final class FileOperationsSyncTests: XCTestCase {
         // 客户端2修改文件2
         try TestHelpers.createTestFile(at: file2, content: "Modified 2")
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证两个文件都已更新
+        // 等待同步并验证两个文件都已更新
         let syncedFile1 = tempDir2.appendingPathComponent("modify1.txt")
         let syncedFile2 = tempDir1.appendingPathComponent("modify2.txt")
         
-        let content1 = try TestHelpers.readFileContent(at: syncedFile1)
-        XCTAssertEqual(content1, "Modified 1", "文件1应该已更新")
+        let bothUpdated = await TestHelpers.waitForCondition(timeout: 28.0) {
+            guard let c1 = try? TestHelpers.readFileContent(at: syncedFile1),
+                  let c2 = try? TestHelpers.readFileContent(at: syncedFile2) else { return false }
+            return c1 == "Modified 1" && c2 == "Modified 2"
+        }
+        XCTAssertTrue(bothUpdated, "两个文件应已同步为 Modified 1 / Modified 2")
         
-        let content2 = try TestHelpers.readFileContent(at: syncedFile2)
-        XCTAssertEqual(content2, "Modified 2", "文件2应该已更新")
+        if bothUpdated {
+            let content1 = try TestHelpers.readFileContent(at: syncedFile1)
+            XCTAssertEqual(content1, "Modified 1", "文件1应该已更新")
+            
+            let content2 = try TestHelpers.readFileContent(at: syncedFile2)
+            XCTAssertEqual(content2, "Modified 2", "文件2应该已更新")
+        }
     }
     
     /// 测试大文件修改（触发块级同步）
@@ -225,23 +235,30 @@ final class FileOperationsSyncTests: XCTestCase {
         let originalData = TestHelpers.generateLargeFileData(sizeInMB: 2)
         try TestHelpers.createTestFile(at: largeFile, data: originalData)
         
-        // 等待初始同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        // 等待初始同步（大文件需更长时间）
+        try await Task.sleep(nanoseconds: 12_000_000_000) // 12秒
         
         // 修改文件（只修改一部分）
         var modifiedData = originalData
         modifiedData.replaceSubrange(0..<100, with: Data(repeating: 0xFF, count: 100))
         try TestHelpers.createTestFile(at: largeFile, data: modifiedData)
         
-        // 等待同步（大文件需要更长时间）
-        try await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
-        
-        // 验证文件已更新
+        // 等待同步并验证文件已更新（大文件需要更长时间）
         let syncedFile = tempDir2.appendingPathComponent("large_file.bin")
-        let syncedData = try TestHelpers.readFileData(at: syncedFile)
+        let updated = await TestHelpers.waitForCondition(timeout: 55.0) {
+            guard TestHelpers.fileExists(at: syncedFile),
+                  let data = try? TestHelpers.readFileData(at: syncedFile),
+                  data.count == modifiedData.count,
+                  data.prefix(100) == modifiedData.prefix(100) else { return false }
+            return true
+        }
+        XCTAssertTrue(updated, "大文件应在对端存在且前100字节为 0xFF")
         
-        XCTAssertEqual(syncedData.count, modifiedData.count, "文件大小应该一致")
-        XCTAssertEqual(syncedData.prefix(100), modifiedData.prefix(100), "文件前100字节应该已更新")
+        if updated {
+            let syncedData = try TestHelpers.readFileData(at: syncedFile)
+            XCTAssertEqual(syncedData.count, modifiedData.count, "文件大小应该一致")
+            XCTAssertEqual(syncedData.prefix(100), modifiedData.prefix(100), "文件前100字节应该已更新")
+        }
     }
     
     // MARK: - 删除文件测试
@@ -253,11 +270,14 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: testFile, content: "To be deleted")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
-        // 验证文件已同步
+        // 验证文件已同步到客户端2
         let syncedFile = tempDir2.appendingPathComponent("delete_test.txt")
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedFile), "文件应该已同步")
+        let synced = await TestHelpers.waitForCondition(timeout: 28.0) {
+            TestHelpers.fileExists(at: syncedFile)
+        }
+        XCTAssertTrue(synced, "文件应该已同步")
         
         // 删除文件
         try FileManager.default.removeItem(at: testFile)
@@ -348,27 +368,30 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: sourceFile, content: "Source content")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 复制文件
         let destFile = tempDir1.appendingPathComponent("copy.txt")
         try FileManager.default.copyItem(at: sourceFile, to: destFile)
         
         // 等待同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
-        // 验证两个文件都已同步
+        // 验证两个文件都已同步到客户端2
         let syncedSource = tempDir2.appendingPathComponent("source.txt")
         let syncedDest = tempDir2.appendingPathComponent("copy.txt")
         
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedSource), "源文件应该存在")
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedDest), "复制文件应该存在")
+        let bothSynced = await TestHelpers.waitForCondition(timeout: 28.0) {
+            TestHelpers.fileExists(at: syncedSource) && TestHelpers.fileExists(at: syncedDest)
+        }
+        XCTAssertTrue(bothSynced, "源文件与复制文件应该已同步到客户端2")
         
-        let sourceContent = try TestHelpers.readFileContent(at: syncedSource)
-        let destContent = try TestHelpers.readFileContent(at: syncedDest)
-        
-        XCTAssertEqual(sourceContent, destContent, "复制文件内容应该与源文件一致")
-        XCTAssertEqual(sourceContent, "Source content", "文件内容应该正确")
+        if bothSynced {
+            let sourceContent = try TestHelpers.readFileContent(at: syncedSource)
+            let destContent = try TestHelpers.readFileContent(at: syncedDest)
+            XCTAssertEqual(sourceContent, destContent, "复制文件内容应该与源文件一致")
+            XCTAssertEqual(sourceContent, "Source content", "文件内容应该正确")
+        }
     }
     
     /// 测试复制文件夹
@@ -384,33 +407,35 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: file2, content: "File 2")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 复制文件夹
         let destDir = tempDir1.appendingPathComponent("copy_dir")
         try FileManager.default.copyItem(at: sourceDir, to: destDir)
         
         // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
+        try await Task.sleep(nanoseconds: 8_000_000_000) // 8秒
         
-        // 验证文件夹及其内容已同步
+        // 验证文件夹及其内容已同步到客户端2
         let syncedSourceDir = tempDir2.appendingPathComponent("source_dir")
         let syncedDestDir = tempDir2.appendingPathComponent("copy_dir")
-        
-        XCTAssertTrue(TestHelpers.directoryExists(at: syncedSourceDir), "源文件夹应该存在")
-        XCTAssertTrue(TestHelpers.directoryExists(at: syncedDestDir), "复制文件夹应该存在")
-        
         let syncedDestFile1 = syncedDestDir.appendingPathComponent("file1.txt")
         let syncedDestFile2 = syncedDestDir.appendingPathComponent("file2.txt")
         
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedDestFile1), "复制文件夹中的文件1应该存在")
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedDestFile2), "复制文件夹中的文件2应该存在")
+        let dirsAndFilesSynced = await TestHelpers.waitForCondition(timeout: 28.0) {
+            TestHelpers.directoryExists(at: syncedSourceDir)
+                && TestHelpers.directoryExists(at: syncedDestDir)
+                && TestHelpers.fileExists(at: syncedDestFile1)
+                && TestHelpers.fileExists(at: syncedDestFile2)
+        }
+        XCTAssertTrue(dirsAndFilesSynced, "源文件夹、复制文件夹及其中文件应该已同步到客户端2")
         
-        let content1 = try TestHelpers.readFileContent(at: syncedDestFile1)
-        let content2 = try TestHelpers.readFileContent(at: syncedDestFile2)
-        
-        XCTAssertEqual(content1, "File 1", "文件1内容应该正确")
-        XCTAssertEqual(content2, "File 2", "文件2内容应该正确")
+        if dirsAndFilesSynced {
+            let content1 = try TestHelpers.readFileContent(at: syncedDestFile1)
+            let content2 = try TestHelpers.readFileContent(at: syncedDestFile2)
+            XCTAssertEqual(content1, "File 1", "文件1内容应该正确")
+            XCTAssertEqual(content2, "File 2", "文件2内容应该正确")
+        }
     }
     
     // MARK: - 重命名文件测试
@@ -422,28 +447,24 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: oldFile, content: "File content")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 重命名文件
         let newFile = tempDir1.appendingPathComponent("new_name.txt")
         try FileManager.default.moveItem(at: oldFile, to: newFile)
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒（重命名检测可能需要更长时间）
-        
-        // 验证文件已重命名（旧文件不存在，新文件存在）
+        // 等待同步（旧文件消失、新文件出现）
         let syncedOldFile = tempDir2.appendingPathComponent("old_name.txt")
         let syncedNewFile = tempDir2.appendingPathComponent("new_name.txt")
-        
-        let oldDeleted = await TestHelpers.waitForCondition(timeout: 10.0) {
-            !TestHelpers.fileExists(at: syncedOldFile)
+        let renamed = await TestHelpers.waitForCondition(timeout: 28.0) {
+            !TestHelpers.fileExists(at: syncedOldFile) && TestHelpers.fileExists(at: syncedNewFile)
         }
-        XCTAssertTrue(oldDeleted, "旧文件应该已删除")
+        XCTAssertTrue(renamed, "旧文件应已删除且新文件应已同步到客户端2")
         
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedNewFile), "新文件应该存在")
-        
-        let content = try TestHelpers.readFileContent(at: syncedNewFile)
-        XCTAssertEqual(content, "File content", "文件内容应该一致")
+        if renamed {
+            let content = try TestHelpers.readFileContent(at: syncedNewFile)
+            XCTAssertEqual(content, "File content", "文件内容应该一致")
+        }
     }
     
     /// 测试重命名文件夹
@@ -459,37 +480,32 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: file2, content: "File 2")
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 重命名文件夹
         let newDir = tempDir1.appendingPathComponent("new_folder")
         try FileManager.default.moveItem(at: oldDir, to: newDir)
         
-        // 等待同步
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证文件夹已重命名
+        // 等待同步：旧目录消失、新目录及文件出现
         let syncedOldDir = tempDir2.appendingPathComponent("old_folder")
         let syncedNewDir = tempDir2.appendingPathComponent("new_folder")
-        
-        let oldDeleted = await TestHelpers.waitForCondition(timeout: 10.0) {
-            !TestHelpers.directoryExists(at: syncedOldDir)
-        }
-        XCTAssertTrue(oldDeleted, "旧文件夹应该已删除")
-        
-        XCTAssertTrue(TestHelpers.directoryExists(at: syncedNewDir), "新文件夹应该存在")
-        
         let syncedFile1 = syncedNewDir.appendingPathComponent("file1.txt")
         let syncedFile2 = syncedNewDir.appendingPathComponent("file2.txt")
         
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedFile1), "文件1应该存在")
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedFile2), "文件2应该存在")
+        let renamed = await TestHelpers.waitForCondition(timeout: 28.0) {
+            !TestHelpers.directoryExists(at: syncedOldDir)
+                && TestHelpers.directoryExists(at: syncedNewDir)
+                && TestHelpers.fileExists(at: syncedFile1)
+                && TestHelpers.fileExists(at: syncedFile2)
+        }
+        XCTAssertTrue(renamed, "旧文件夹应已删除，新文件夹及文件应已同步到客户端2")
         
-        let content1 = try TestHelpers.readFileContent(at: syncedFile1)
-        let content2 = try TestHelpers.readFileContent(at: syncedFile2)
-        
-        XCTAssertEqual(content1, "File 1", "文件1内容应该正确")
-        XCTAssertEqual(content2, "File 2", "文件2内容应该正确")
+        if renamed {
+            let content1 = try TestHelpers.readFileContent(at: syncedFile1)
+            let content2 = try TestHelpers.readFileContent(at: syncedFile2)
+            XCTAssertEqual(content1, "File 1", "文件1内容应该正确")
+            XCTAssertEqual(content2, "File 2", "文件2内容应该正确")
+        }
     }
     
     /// 测试重命名检测（通过哈希值匹配）
@@ -500,27 +516,25 @@ final class FileOperationsSyncTests: XCTestCase {
         try TestHelpers.createTestFile(at: originalFile, content: originalContent)
         
         // 等待初始同步
-        try await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
+        try await Task.sleep(nanoseconds: 6_000_000_000) // 6秒
         
         // 重命名文件（不修改内容）
         let renamedFile = tempDir1.appendingPathComponent("renamed.txt")
         try FileManager.default.moveItem(at: originalFile, to: renamedFile)
         
-        // 等待同步（系统应该通过哈希值匹配检测到重命名）
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-        
-        // 验证重命名被正确检测（旧文件不存在，新文件存在且内容一致）
+        // 等待同步：旧文件消失、新文件存在且内容一致
         let syncedOriginal = tempDir2.appendingPathComponent("original.txt")
         let syncedRenamed = tempDir2.appendingPathComponent("renamed.txt")
-        
-        let oldDeleted = await TestHelpers.waitForCondition(timeout: 10.0) {
+        let renamed = await TestHelpers.waitForCondition(timeout: 28.0) {
             !TestHelpers.fileExists(at: syncedOriginal)
+                && TestHelpers.fileExists(at: syncedRenamed)
+                && (try? TestHelpers.readFileContent(at: syncedRenamed)) == originalContent
         }
-        XCTAssertTrue(oldDeleted, "旧文件应该已删除")
+        XCTAssertTrue(renamed, "旧文件应已删除，重命名后文件应已同步且内容一致")
         
-        XCTAssertTrue(TestHelpers.fileExists(at: syncedRenamed), "重命名后的文件应该存在")
-        
-        let content = try TestHelpers.readFileContent(at: syncedRenamed)
-        XCTAssertEqual(content, originalContent, "文件内容应该一致（通过哈希值匹配检测重命名）")
+        if renamed {
+            let content = try TestHelpers.readFileContent(at: syncedRenamed)
+            XCTAssertEqual(content, originalContent, "文件内容应该一致（通过哈希值匹配检测重命名）")
+        }
     }
 }

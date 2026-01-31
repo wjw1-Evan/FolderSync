@@ -570,24 +570,40 @@ class SyncEngine {
             var totalOps = 0
             var completedOps = 0
             var syncedFiles: [SyncLog.SyncedFileInfo] = []
-            var pendingTransfersRemaining = 0
+            var pendingUploadsRemaining = 0
+            var pendingDownloadsRemaining = 0
 
-            func registerPendingTransfers(_ count: Int) {
+            func registerPendingTransfers(_ count: Int, direction: SyncLog.Direction) {
                 guard count > 0 else { return }
-                pendingTransfersRemaining += count
-                syncManager.addPendingTransfers(count)
+                if direction == .upload {
+                    pendingUploadsRemaining += count
+                } else if direction == .download {
+                    pendingDownloadsRemaining += count
+                }
+                syncManager.addPendingTransfers(count, direction: direction)
             }
 
-            func markTransferCompleted() {
-                guard pendingTransfersRemaining > 0 else { return }
-                pendingTransfersRemaining -= 1
-                syncManager.completePendingTransfers()
+            func markTransferCompleted(direction: SyncLog.Direction) {
+                if direction == .upload {
+                    guard pendingUploadsRemaining > 0 else { return }
+                    pendingUploadsRemaining -= 1
+                } else if direction == .download {
+                    guard pendingDownloadsRemaining > 0 else { return }
+                    pendingDownloadsRemaining -= 1
+                }
+                syncManager.completePendingTransfers(1, direction: direction)
             }
 
             func cleanupPendingTransfers() {
-                if pendingTransfersRemaining > 0 {
-                    syncManager.completePendingTransfers(pendingTransfersRemaining)
-                    pendingTransfersRemaining = 0
+                if pendingUploadsRemaining > 0 {
+                    syncManager.completePendingTransfers(
+                        pendingUploadsRemaining, direction: .upload)
+                    pendingUploadsRemaining = 0
+                }
+                if pendingDownloadsRemaining > 0 {
+                    syncManager.completePendingTransfers(
+                        pendingDownloadsRemaining, direction: .download)
+                    pendingDownloadsRemaining = 0
                 }
             }
 
@@ -1365,9 +1381,11 @@ class SyncEngine {
             for (p, m) in conflictFiles { downloadItems.append((p, m, .conflict)) }
             for (p, m) in uploadConflictFiles { downloadItems.append((p, m, .conflict)) }
 
-            let transferOpsCount = downloadItems.count + filesToUpload.count
-            if transferOpsCount > 0 {
-                registerPendingTransfers(transferOpsCount)
+            if !downloadItems.isEmpty {
+                registerPendingTransfers(downloadItems.count, direction: .download)
+            }
+            if !filesToUpload.isEmpty {
+                registerPendingTransfers(filesToUpload.count, direction: .upload)
             }
             defer { cleanupPendingTransfers() }
 
@@ -1380,7 +1398,7 @@ class SyncEngine {
                         let result = await group.next()
                         activeDownloads -= 1
                         if let result = result {
-                            markTransferCompleted()
+                            markTransferCompleted(direction: .download)
                             if let (bytes, fileInfo) = result {
                                 totalDownloadBytes += bytes
                                 syncedFiles.append(fileInfo)
@@ -1492,7 +1510,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
-                    markTransferCompleted()
+                    markTransferCompleted(direction: .download)
                     if let (bytes, fileInfo) = result {
                         totalDownloadBytes += bytes
                         syncedFiles.append(fileInfo)
@@ -1515,7 +1533,7 @@ class SyncEngine {
                         let result = await group.next()
                         activeUploads -= 1
                         if let result = result {
-                            markTransferCompleted()
+                            markTransferCompleted(direction: .upload)
                             if let (bytes, fileInfo) = result {
                                 totalUploadBytes += bytes
                                 syncedFiles.append(fileInfo)
@@ -1613,7 +1631,7 @@ class SyncEngine {
                 }
 
                 for await result in group {
-                    markTransferCompleted()
+                    markTransferCompleted(direction: .upload)
                     if let (bytes, fileInfo) = result {
                         totalUploadBytes += bytes
                         syncedFiles.append(fileInfo)

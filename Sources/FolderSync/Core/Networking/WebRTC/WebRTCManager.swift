@@ -108,11 +108,12 @@ public class WebRTCManager: NSObject {
 
         if let state = state, state == .failed || state == .closed {
             AppLogger.syncPrint(
-                "[WebRTC] ❌ Cannot wait for DataChannel: Connection already in state \(state.rawValue)"
+                "[WebRTC] ❌ Cannot wait for DataChannel: Connection to \(peerID.prefix(8)) already in state \(state.rawValue)"
             )
             return false
         }
 
+        // 3. 进入等待逻辑
         return await withCheckedContinuation { continuation in
             let waiter = Waiter(continuation)
 
@@ -471,30 +472,40 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel
     ) {
         guard let peerID = getPeerID(for: peerConnection) else { return }
-        print("[WebRTC] DataChannel Received: \(dataChannel.label) from \(peerID)")
+        AppLogger.syncPrint(
+            "[WebRTC] 📥 DataChannel Received: \(dataChannel.label) from \(peerID.prefix(8)), state: \(dataChannel.readyState.rawValue)"
+        )
         dataChannel.delegate = self
         lock.lock()
         self.dataChannels[peerID] = dataChannel
         lock.unlock()
+
+        // 如果收到时已经是 open 状态，立即通知等待者
+        if dataChannel.readyState == .open {
+            resumeContinuations(for: peerID, result: true)
+        }
     }
 }
 
 extension WebRTCManager: RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
-        print("[WebRTC] DataChannel State Changed: \(dataChannel.readyState.rawValue)")
-
         // Find which peer this belongs to
-        var peerID: String?
+        var currentPeerID: String?
         lock.lock()
         for (pid, dc) in dataChannels {
             if dc === dataChannel {
-                peerID = pid
+                currentPeerID = pid
                 break
             }
         }
         lock.unlock()
 
-        if let peerID = peerID {
+        let peerLabel = currentPeerID?.prefix(8) ?? "unknown"
+        AppLogger.syncPrint(
+            "[WebRTC] 📶 DataChannel (\(peerLabel)) State Changed: \(dataChannel.readyState.rawValue)"
+        )
+
+        if let peerID = currentPeerID {
             if dataChannel.readyState == .open {
                 resumeContinuations(for: peerID, result: true)
             } else if dataChannel.readyState == .closed || dataChannel.readyState == .closing {

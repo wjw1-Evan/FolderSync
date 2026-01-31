@@ -6,6 +6,7 @@ struct ConflictCenter: View {
     @State private var conflicts: [ConflictFile] = []
     @State private var selectedConflict: ConflictFile?
     @State private var isResolving = false
+    @State private var showClearConfirm = false
 
     var body: some View {
         NavigationStack {
@@ -89,7 +90,7 @@ struct ConflictCenter: View {
                     Button(LocalizedString.close) { dismiss() }
                 }
                 if !conflicts.isEmpty {
-                    ToolbarItem(placement: .primaryAction) {
+                    ToolbarItemGroup(placement: .primaryAction) {
                         Menu {
                             Button(LocalizedString.keepAllLocal) {
                                 Task {
@@ -108,9 +109,30 @@ struct ConflictCenter: View {
                         } label: {
                             Label(LocalizedString.batchActions, systemImage: "ellipsis.circle")
                         }
+
+                        Button(role: .destructive) {
+                            showClearConfirm = true
+                        } label: {
+                            Label(LocalizedString.clearAll, systemImage: "trash")
+                        }
+                        .help(LocalizedString.clearAll)
+                        .foregroundStyle(.red)
                     }
                 }
             }
+            .confirmationDialog(
+                LocalizedString.clearAllConfirm,
+                isPresented: $showClearConfirm,
+                actions: {
+                    Button(LocalizedString.clearAll, role: .destructive) {
+                        Task { await clearAllConflicts() }
+                    }
+                    Button(LocalizedString.cancel, role: .cancel) {}
+                },
+                message: {
+                    Text(LocalizedString.clearAllMessage)
+                }
+            )
             .onAppear {
                 refresh()
                 if !conflicts.isEmpty {
@@ -156,6 +178,25 @@ struct ConflictCenter: View {
         }
 
         try? StorageManager.shared.resolveConflict(id: c.id)
+        await MainActor.run {
+            refresh()
+        }
+    }
+
+    private func clearAllConflicts() async {
+        guard !isResolving && !conflicts.isEmpty else { return }
+        isResolving = true
+        defer { isResolving = false }
+
+        for c in conflicts {
+            if let base = folderBase(for: c.syncID) {
+                // 清理行为：保留本机版本，删除冲突文件
+                let conflictURL = base.appendingPathComponent(c.conflictPath)
+                try? FileManager.default.removeItem(at: conflictURL)
+            }
+            try? StorageManager.shared.resolveConflict(id: c.id)
+        }
+
         await MainActor.run {
             refresh()
         }

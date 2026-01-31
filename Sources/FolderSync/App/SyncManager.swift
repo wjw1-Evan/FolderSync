@@ -8,7 +8,8 @@ public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
-    @Published var pendingTransferFileCount: Int = 0
+    @Published var pendingUploadCount: Int = 0
+    @Published var pendingDownloadCount: Int = 0
     let p2pNode = P2PNode()
 
     // 使用统一的 Peer 管理器

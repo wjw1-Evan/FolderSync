@@ -60,23 +60,47 @@ struct MainDashboard: View {
                             Divider()
                                 .frame(height: 30)
 
-                            // 待传输文件数量
+                            // 待上传文件数量
                             HStack(spacing: 6) {
-                                Image(systemName: "clock.arrow.circlepath")
+                                Image(systemName: "arrow.up.circle")
                                     .foregroundStyle(
-                                        syncManager.pendingTransferFileCount > 0
+                                        syncManager.pendingUploadCount > 0
                                             ? .orange : .secondary)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(LocalizedString.pendingTransfers)
+                                    Text(LocalizedString.upload)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                     Text(
-                                        "\(syncManager.pendingTransferFileCount)\(LocalizedString.files)"
+                                        "\(syncManager.pendingUploadCount)"
                                     )
                                     .font(.subheadline)
                                     .fontWeight(.medium)
                                     .foregroundStyle(
-                                        syncManager.pendingTransferFileCount > 0
+                                        syncManager.pendingUploadCount > 0
+                                            ? .orange : .secondary)
+                                }
+                            }
+
+                            Divider()
+                                .frame(height: 30)
+
+                            // 待下载文件数量
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.down.circle")
+                                    .foregroundStyle(
+                                        syncManager.pendingDownloadCount > 0
+                                            ? .orange : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(LocalizedString.download)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(
+                                        "\(syncManager.pendingDownloadCount)"
+                                    )
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(
+                                        syncManager.pendingDownloadCount > 0
                                             ? .orange : .secondary)
                                 }
                             }

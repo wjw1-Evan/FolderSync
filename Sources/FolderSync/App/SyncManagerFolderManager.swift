@@ -293,13 +293,40 @@ extension SyncManager {
         updateFolderStatus(id, status: .error, message: message, errorDetail: detail)
     }
 
-    func addPendingTransfers(_ count: Int) {
+    func addPendingTransfers(_ count: Int, direction: SyncLog.Direction) {
         guard count > 0 else { return }
-        pendingTransferFileCount += count
+        switch direction {
+        case .upload:
+            pendingUploadCount += count
+        case .download:
+            pendingDownloadCount += count
+        case .bidirectional:
+            // 理论上不会出现，作为兜底
+            break
+        }
     }
 
-    func completePendingTransfers(_ count: Int = 1) {
+    func completePendingTransfers(_ count: Int = 1, direction: SyncLog.Direction) {
         guard count > 0 else { return }
-        pendingTransferFileCount = max(0, pendingTransferFileCount - count)
+        switch direction {
+        case .upload:
+            pendingUploadCount = max(0, pendingUploadCount - count)
+        case .download:
+            pendingDownloadCount = max(0, pendingDownloadCount - count)
+        case .bidirectional:
+            break
+        }
+    }
+
+    func resetPendingTransfers(direction: SyncLog.Direction) {
+        switch direction {
+        case .upload:
+            pendingUploadCount = 0
+        case .download:
+            pendingDownloadCount = 0
+        case .bidirectional:
+            pendingUploadCount = 0
+            pendingDownloadCount = 0
+        }
     }
 }

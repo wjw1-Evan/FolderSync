@@ -100,6 +100,9 @@ enum LocalizedString {
     static let syncIDLabel = "同步ID".localized
     static let showInFinder = "在 Finder 中显示".localized
     static let viewConflictFile = "查看冲突文件".localized
+    static let clearAll = "清理全部".localized
+    static let clearAllConfirm = "确认清理".localized
+    static let clearAllMessage = "确定要清理所有未处理的冲突吗？此操作将忽略所有冲突文件并将其从列表中移除，本机文件将保持不变。".localized
 
     // MARK: - 同步历史
     static let searchSyncHistory = "搜索同步历史...".localized

@@ -793,14 +793,15 @@ class SyncEngine {
                                 // 比较删除记录的 VC 和文件的 VC
                                 let comparison = remoteDel.vectorClock.compare(to: localVC)
                                 switch comparison {
-                                case .successor, .equal:
-                                    // 删除记录的 VC 更新或相等，删除本地文件
+                                case .successor:
+                                    // 删除记录的 VC 更新，删除本地文件
                                     AppLogger.syncPrint(
                                         "[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录，VC 更新）: \(deletedPath)")
                                     await MainActor.run {
                                         syncManager.deleteFileAtomically(
                                             path: deletedPath, syncID: syncID, peerID: myPeerID)
                                     }
+
                                 case .antecedent:
                                     // 删除记录的 VC 更旧，文件是在删除之后重新创建的，保留文件并清除删除记录
                                     AppLogger.syncPrint(
@@ -815,14 +816,64 @@ class SyncEngine {
                                         stateStore.removeState(path: deletedPath)
                                         deletedSet.remove(deletedPath)
                                     }
-                                case .concurrent:
-                                    // 并发冲突，保守处理：删除文件
-                                    AppLogger.syncPrint(
-                                        "[SyncEngine] ⚠️ 并发冲突，保守处理：删除文件: \(deletedPath)")
-                                    await MainActor.run {
-                                        syncManager.deleteFileAtomically(
-                                            path: deletedPath, syncID: syncID, peerID: myPeerID)
+
+                                case .equal:
+                                    // VC 相等：可能是恢复操作的竞态条件
+                                    // 使用 mtime 启发式判断：如果本地文件明显比删除记录新，视为复活
+                                    let timeDiff = localMeta.mtime.timeIntervalSince(
+                                        remoteDel.deletedAt)
+                                    if timeDiff > 1.0 {
+                                        AppLogger.syncPrint(
+                                            "[SyncEngine] ✅ 保留文件（VC 相等但本地文件更新，复活）: \(deletedPath), diff=\(timeDiff)s"
+                                        )
+                                        // 清除本地删除记录（如果存在）
+                                        let stateStore = await MainActor.run {
+                                            syncManager.getFileStateStore(for: syncID)
+                                        }
+                                        if let localState = stateStore.getState(for: deletedPath),
+                                            case .deleted = localState
+                                        {
+                                            stateStore.removeState(path: deletedPath)
+                                            deletedSet.remove(deletedPath)
+                                        }
+                                    } else {
+                                        // 否则，认为是已被确认的删除
+                                        AppLogger.syncPrint(
+                                            "[SyncEngine] 🗑️ 删除本地文件（根据远程删除记录，VC 相等）: \(deletedPath)")
+                                        await MainActor.run {
+                                            syncManager.deleteFileAtomically(
+                                                path: deletedPath, syncID: syncID, peerID: myPeerID)
+                                        }
                                     }
+
+                                case .concurrent:
+                                    // 并发冲突：如果本地文件明显比删除记录新，倾向于认为是恢复/新建操作，保留文件
+                                    let timeDiff = localMeta.mtime.timeIntervalSince(
+                                        remoteDel.deletedAt)
+                                    if timeDiff > 1.0 {
+                                        AppLogger.syncPrint(
+                                            "[SyncEngine] ✅ 保留文件（并发删除，但本地文件更新，复活）: \(deletedPath), diff=\(timeDiff)s"
+                                        )
+                                        // 清除本地删除记录（如果存在）
+                                        let stateStore = await MainActor.run {
+                                            syncManager.getFileStateStore(for: syncID)
+                                        }
+                                        if let localState = stateStore.getState(for: deletedPath),
+                                            case .deleted = localState
+                                        {
+                                            stateStore.removeState(path: deletedPath)
+                                            deletedSet.remove(deletedPath)
+                                        }
+                                    } else {
+                                        // 否则保守处理：删除文件（防止复活旧文件）
+                                        AppLogger.syncPrint(
+                                            "[SyncEngine] ⚠️ 并发冲突，保守处理：删除文件: \(deletedPath)")
+                                        await MainActor.run {
+                                            syncManager.deleteFileAtomically(
+                                                path: deletedPath, syncID: syncID, peerID: myPeerID)
+                                        }
+                                    }
+
                                 }
                             } else {
                                 // 文件存在但没有 VC，保守处理：删除文件

@@ -1454,10 +1454,13 @@ class SyncEngine {
                                             at: dirURL, withIntermediateDirectories: true,
                                             attributes: nil)
 
-                                        // 设置 mtime
-                                        let attributes = [
+                                        // 设置 mtime 和 creationDate
+                                        var attributes: [FileAttributeKey: Any] = [
                                             FileAttributeKey.modificationDate: remoteMeta.mtime
                                         ]
+                                        if let creationDate = remoteMeta.creationDate {
+                                            attributes[FileAttributeKey.creationDate] = creationDate
+                                        }
                                         try fm.setAttributes(attributes, ofItemAtPath: dirURL.path)
                                     }
 

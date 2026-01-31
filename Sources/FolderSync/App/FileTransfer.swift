@@ -94,6 +94,15 @@ class FileTransfer {
         syncManager.markSyncCooldown(syncID: folder.syncID, path: path)
         try data.write(to: localURL)
 
+        // 设置文件的修改时间和创建时间与远程一致
+        var attributes: [FileAttributeKey: Any] = [
+            FileAttributeKey.modificationDate: remoteMeta.mtime
+        ]
+        if let creationDate = remoteMeta.creationDate {
+            attributes[FileAttributeKey.creationDate] = creationDate
+        }
+        try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
+
         // 合并 Vector Clock（使用 VectorClockManager）
         let localVC = localMetadata[path]?.vectorClock
         let remoteVC = remoteMeta.vectorClock
@@ -299,6 +308,15 @@ class FileTransfer {
         // 标记同步写入冷却：即将把“下载数据”落地到本地，避免 FSEvents 把它误判为本地编辑
         syncManager.markSyncCooldown(syncID: folder.syncID, path: path)
         try fileData.write(to: localURL, options: [.atomic])
+
+        // 设置文件的修改时间和创建时间与远程一致
+        var attributes: [FileAttributeKey: Any] = [
+            FileAttributeKey.modificationDate: remoteMeta.mtime
+        ]
+        if let creationDate = remoteMeta.creationDate {
+            attributes[FileAttributeKey.creationDate] = creationDate
+        }
+        try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
 
         // 合并 Vector Clock（使用 VectorClockManager）
         let localVC = localMetadata[path]?.vectorClock

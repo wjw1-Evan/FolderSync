@@ -36,18 +36,21 @@ extension SyncRequest: CustomStringConvertible {
 public struct FileMetadata: Codable {
     public let hash: String
     public let mtime: Date
+    public var creationDate: Date?  // 可选，兼容旧版本
     public var vectorClock: VectorClock?
     public var isDirectory: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case hash, mtime, vectorClock, isDirectory
+        case hash, mtime, creationDate, vectorClock, isDirectory
     }
 
     public init(
-        hash: String, mtime: Date, vectorClock: VectorClock? = nil, isDirectory: Bool = false
+        hash: String, mtime: Date, creationDate: Date? = nil, vectorClock: VectorClock? = nil,
+        isDirectory: Bool = false
     ) {
         self.hash = hash
         self.mtime = mtime
+        self.creationDate = creationDate
         self.vectorClock = vectorClock
         self.isDirectory = isDirectory
     }
@@ -56,6 +59,7 @@ public struct FileMetadata: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         hash = try container.decode(String.self, forKey: .hash)
         mtime = try container.decode(Date.self, forKey: .mtime)
+        creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate)
         vectorClock = try container.decodeIfPresent(VectorClock.self, forKey: .vectorClock)
         // 使用 decodeIfPresent 并提供默认值 false，以兼容旧版本
         isDirectory = try container.decodeIfPresent(Bool.self, forKey: .isDirectory) ?? false

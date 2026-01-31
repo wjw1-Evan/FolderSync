@@ -146,7 +146,7 @@ class FolderStatistics {
         // 先收集所有文件路径（避免在枚举过程中处理）
         var filePaths: [(URL, String)] = []
         let resourceKeys: [URLResourceKey] = [
-            .nameKey, .isDirectoryKey, .contentModificationDateKey,
+            .nameKey, .isDirectoryKey, .contentModificationDateKey, .creationDateKey,
         ]
         let enumerator = fileManager.enumerator(
             at: url, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
@@ -183,6 +183,7 @@ class FolderStatistics {
                     let resourceValues = try canonicalFileURL.resourceValues(
                         forKeys: Set(resourceKeys))
                     let mtime = resourceValues.contentModificationDate ?? Date()
+                    let creationDate = resourceValues.creationDate
                     let vc =
                         VectorClockManager.getVectorClock(
                             folderID: folder.id, syncID: syncID, path: relativePath)
@@ -192,6 +193,7 @@ class FolderStatistics {
                     let dirMeta = FileMetadata(
                         hash: "DIRECTORY",  // 固定哈希，支持重命名检测
                         mtime: mtime,
+                        creationDate: creationDate,
                         vectorClock: vc,
                         isDirectory: true
                     )
@@ -244,6 +246,7 @@ class FolderStatistics {
                     do {
                         let resourceValues = try fileURL.resourceValues(forKeys: Set(resourceKeys))
                         let mtime = resourceValues.contentModificationDate ?? Date()
+                        let creationDate = resourceValues.creationDate
                         let vc =
                             VectorClockManager.getVectorClock(
                                 folderID: folder.id, syncID: syncID, path: relativePath)
@@ -266,7 +269,9 @@ class FolderStatistics {
                             // 指纹匹配，复用已有的哈希值，跳过昂贵的 IO 计算
                             return (
                                 relativePath,
-                                FileMetadata(hash: cached.hash, mtime: mtime, vectorClock: vc),
+                                FileMetadata(
+                                    hash: cached.hash, mtime: mtime, creationDate: creationDate,
+                                    vectorClock: vc),
                                 fileSize
                             )
                         }
@@ -275,7 +280,10 @@ class FolderStatistics {
                         let hash = try await syncManager.computeFileHash(fileURL: fileURL)
 
                         return (
-                            relativePath, FileMetadata(hash: hash, mtime: mtime, vectorClock: vc),
+                            relativePath,
+                            FileMetadata(
+                                hash: hash, mtime: mtime, creationDate: creationDate,
+                                vectorClock: vc),
                             fileSize
                         )
                     } catch {

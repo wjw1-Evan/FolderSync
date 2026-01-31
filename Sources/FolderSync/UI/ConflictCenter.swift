@@ -106,17 +106,19 @@ struct ConflictCenter: View {
                                     }
                                 }
                             }
-
-                            Divider()
-
-                            Button(role: .destructive) {
-                                showClearConfirm = true
-                            } label: {
-                                Label(LocalizedString.clearAll, systemImage: "trash")
-                            }
                         } label: {
                             Label(LocalizedString.batchActions, systemImage: "ellipsis.circle")
                         }
+                    }
+
+                    ToolbarItem(placement: .primaryAction) {
+                        Button(role: .destructive) {
+                            showClearConfirm = true
+                        } label: {
+                            Image(systemName: "trash")
+                                .foregroundStyle(.red)
+                        }
+                        .help(LocalizedString.clearAll)
                     }
                 }
             }

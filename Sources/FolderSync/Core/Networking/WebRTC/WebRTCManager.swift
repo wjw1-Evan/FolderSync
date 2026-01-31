@@ -109,6 +109,12 @@ public class WebRTCManager: NSObject {
         return peerConnections[peerID] != nil
     }
 
+    public func getPeerConnection(for peerID: String) -> RTCPeerConnection? {
+        lock.lock()
+        defer { lock.unlock() }
+        return peerConnections[peerID]
+    }
+
     /// 检查 DataChannel 是否就绪（已打开）
     public func isDataChannelReady(for peerID: String) -> Bool {
         lock.lock()
@@ -342,11 +348,11 @@ public class WebRTCManager: NSObject {
 
         guard let pc = peerConnection else { return }
 
-        pc.setRemoteDescription(rtcSdp) { error in
             if let error = error {
-                print("[WebRTC] Set Remote Description Error: \(error)")
+                AppLogger.syncPrint("[WebRTC] ❌ Set Remote Description Error for \(peerID.prefix(8)): \(error.localizedDescription)")
                 return
             }
+            AppLogger.syncPrint("[WebRTC] ✅ Set Remote Description Success for \(peerID.prefix(8))")
 
             // 如果是 Offer，则创建 Answer
             if rtcSdp.type == .offer {

@@ -14,6 +14,23 @@ public enum SyncRequest: Codable {
     case putChunkData(syncID: String, chunkHash: String, data: Data)  // 上传单个块数据
 }
 
+extension SyncRequest: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .getMST(let id): return "getMST(\(id))"
+        case .getFiles(let id): return "getFiles(\(id))"
+        case .getFileData(let id, let path): return "getFileData(\(id), \(path))"
+        case .putFileData(let id, let path, _, _): return "putFileData(\(id), \(path))"
+        case .deleteFiles(let id, let paths): return "deleteFiles(\(id), \(paths.count) files)"
+        case .getFileChunks(let id, let path): return "getFileChunks(\(id), \(path))"
+        case .getChunkData(let id, let hash): return "getChunkData(\(id), \(hash))"
+        case .putFileChunks(let id, let path, let hashes, _):
+            return "putFileChunks(\(id), \(path), \(hashes.count) chunks)"
+        case .putChunkData(let id, let hash, _): return "putChunkData(\(id), \(hash))"
+        }
+    }
+}
+
 public struct FileMetadata: Codable {
     public let hash: String
     public let mtime: Date

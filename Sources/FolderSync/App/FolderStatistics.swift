@@ -25,6 +25,9 @@ class FolderStatistics {
             (MerkleSearchTree, [String: FileMetadata], folderCount: Int, totalSize: Int64), Never
         >] = [:]
 
+    // UI 刷新防抖任务
+    private var refreshTasks: [UUID: Task<Void, Never>] = [:]
+
     init(syncManager: SyncManager, folderMonitor: FolderMonitor?) {
         self.syncManager = syncManager
         self.folderMonitor = folderMonitor
@@ -36,63 +39,44 @@ class FolderStatistics {
 
         let folderID = folder.id
 
-        // 检查是否已有统计正在进行，避免重复统计
-        if statisticsInProgress.contains(folderID) {
-            return
-        }
+        // 取消之前的刷新任务，实现防抖
+        refreshTasks[folderID]?.cancel()
 
-        // 标记统计开始
-        statisticsInProgress.insert(folderID)
-
-        // 在后台任务中执行统计
-        Task.detached { [weak self, weak syncManager] in
-            guard let syncManager = syncManager else { return }
-
-            // 获取最新的 folder 对象
-            let currentFolder = await MainActor.run {
-                return syncManager.folders.first(where: { $0.id == folderID })
+        refreshTasks[folderID] = Task {
+            // 收到变更后等待 1 秒，如果这段时间内没有新变更再执行统计
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return  // 被取消了
             }
 
-            guard let currentFolder = currentFolder else {
-                _ = await MainActor.run { [weak self] in
-                    self?.statisticsInProgress.remove(folderID)
-                }
+            if Task.isCancelled { return }
+
+            // 计算统计值（复用 self 的计算任务和缓存）
+            let (_, metadata, folderCount, totalSize) = await self.calculateFullState(
+                for: folder)
+
+            if Task.isCancelled { return }
+
+            // 更新 UI
+            guard let index = syncManager.folders.firstIndex(where: { $0.id == folderID })
+            else {
                 return
             }
 
-            // 使用 defer 确保统计锁被清理
-            defer {
-                Task { @MainActor in
-                    self?.statisticsInProgress.remove(folderID)
-                }
+            var updatedFolder = syncManager.folders[index]
+            updatedFolder.fileCount = metadata.count
+            updatedFolder.folderCount = folderCount
+            updatedFolder.totalSize = totalSize
+            syncManager.folders[index] = updatedFolder
+            syncManager.objectWillChange.send()
+
+            // 保存到存储
+            Task.detached {
+                try? StorageManager.shared.saveFolder(updatedFolder)
             }
 
-            // 计算统计值
-            let tempStatistics = await MainActor.run {
-                return FolderStatistics(syncManager: syncManager, folderMonitor: nil)
-            }
-            let (_, metadata, folderCount, totalSize) = await tempStatistics.calculateFullState(
-                for: currentFolder)
-
-            // 更新统计值
-            await MainActor.run {
-                guard let index = syncManager.folders.firstIndex(where: { $0.id == folderID })
-                else {
-                    return
-                }
-
-                var updatedFolder = syncManager.folders[index]
-                updatedFolder.fileCount = metadata.count
-                updatedFolder.folderCount = folderCount
-                updatedFolder.totalSize = totalSize
-                syncManager.folders[index] = updatedFolder
-                syncManager.objectWillChange.send()
-
-                // 保存到存储
-                Task.detached {
-                    try? StorageManager.shared.saveFolder(updatedFolder)
-                }
-            }
+            self.refreshTasks.removeValue(forKey: folderID)
         }
     }
 

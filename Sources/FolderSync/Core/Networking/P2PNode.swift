@@ -427,8 +427,8 @@ public class P2PNode: NSObject {
                 do {
                     try await webRTC.sendData(frameData, to: peerID)
 
-                    // Timeout logic
-                    try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                    // Timeout logic: 增加到 120秒，给大文件夹初始扫描留出充足时间
+                    try await Task.sleep(nanoseconds: 120 * 1_000_000_000)
                     self.requestsQueue.async {
                         if let storedContinuation = self.pendingRequests.removeValue(
                             forKey: requestID)

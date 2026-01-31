@@ -4,50 +4,7 @@ import Foundation
 
 /// 边界情况测试
 @MainActor
-final class EdgeCasesTests: XCTestCase {
-    var tempDir1: URL!
-    var tempDir2: URL!
-    var syncManager1: SyncManager!
-    var syncManager2: SyncManager!
-    var syncID: String!
-    
-    override func setUp() async throws {
-        try await super.setUp()
-        
-        tempDir1 = try TestHelpers.createTempDirectory()
-        tempDir2 = try TestHelpers.createTempDirectory()
-        syncID = "test\(UUID().uuidString.prefix(8))"
-        
-        syncManager1 = SyncManager()
-        syncManager2 = SyncManager()
-        
-        // 等待 P2P 节点启动
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 添加文件夹
-        let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
-        syncManager1.addFolder(folder1)
-        
-        let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
-        syncManager2.addFolder(folder2)
-        
-        // 等待文件夹添加和发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-    }
-    
-    override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源
-        try? await syncManager1?.p2pNode.stop()
-        try? await syncManager2?.p2pNode.stop()
-        
-        syncManager1 = nil
-        syncManager2 = nil
-        
-        TestHelpers.cleanupTempDirectory(tempDir1)
-        TestHelpers.cleanupTempDirectory(tempDir2)
-        
-        try await super.tearDown()
-    }
+final class EdgeCasesTests: TwoClientTestCase {
     
     // MARK: - 空文件夹同步测试
     

@@ -1,5 +1,5 @@
-import Foundation
 import CoreServices
+import Foundation
 
 /// 本地变更记录扩展
 /// 负责记录和处理本地文件系统的变更事件
@@ -36,13 +36,14 @@ extension SyncManager {
 
         let fileManager = FileManager.default
         let exists = fileManager.fileExists(atPath: canonicalAbsolutePath)
-        
+
         // 检查是否为目录，如果是目录则忽略（只记录文件变更）
         // 但需要清除该路径的删除记录（如果存在），因为目录的创建意味着该路径不再被删除
         if exists {
             var isDirectory: ObjCBool = false
             if fileManager.fileExists(atPath: canonicalAbsolutePath, isDirectory: &isDirectory),
-               isDirectory.boolValue {
+                isDirectory.boolValue
+            {
                 // 检查是否有删除记录，如果有则清除（目录创建意味着路径不再被删除）
                 // 同时需要从 lastKnownMetadata 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
                 let stateStore = getFileStateStore(for: folder.syncID)
@@ -57,6 +58,7 @@ extension SyncManager {
                     dp.remove(relativePath)
                     updateDeletedPaths(dp, for: folder.syncID)
                 }
+
                 // 从 lastKnownMetadata 和 lastKnownLocalPaths 中移除该路径的元数据（如果存在），因为目录不应该有文件元数据
                 // 这样可以防止系统尝试将目录作为文件上传
                 if lastKnownMetadata[folder.syncID]?[relativePath] != nil {
@@ -78,7 +80,7 @@ extension SyncManager {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略冲突文件: \(relativePath)")
             return
         }
-        
+
         // 忽略排除规则或隐藏文件
         if isIgnored(relativePath, folder: folder) {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略文件（排除规则）: \(relativePath)")
@@ -89,7 +91,7 @@ extension SyncManager {
         // 重要：只处理当前文件夹的过期条目，避免影响其他文件夹的状态
         let now = Date()
         var expiredRenames: [String] = []  // 存储过期的重命名操作的路径
-        
+
         // 只过滤当前文件夹的过期条目，保留其他文件夹的条目
         let currentFolderPrefix = "\(folder.syncID):"
         pendingRenames = pendingRenames.filter { key, value in
@@ -97,7 +99,7 @@ extension SyncManager {
             guard key.hasPrefix(currentFolderPrefix) else {
                 return true  // 保留其他文件夹的条目
             }
-            
+
             let isExpired = now.timeIntervalSince(value.timestamp) > renameDetectionWindow
             if isExpired {
                 // 提取路径（移除 syncID 前缀）
@@ -107,14 +109,16 @@ extension SyncManager {
             }
             return true  // 保留未过期的条目
         }
-        
+
         // 将过期的重命名操作转换为删除操作（只处理当前文件夹）
         for expiredPath in expiredRenames {
             // 检查文件是否真的不存在（可能已经被删除）
             let expiredFileURL = folder.localPath.appendingPathComponent(expiredPath)
             if !fileManager.fileExists(atPath: expiredFileURL.path) {
                 // 文件不存在，这是真正的删除，不是重命名
-                AppLogger.syncPrint("[recordLocalChange] ⏰ 重命名操作超时，转换为删除操作: \(expiredPath) (syncID: \(folder.syncID))")
+                AppLogger.syncPrint(
+                    "[recordLocalChange] ⏰ 重命名操作超时，转换为删除操作: \(expiredPath) (syncID: \(folder.syncID))"
+                )
                 let change = LocalChange(
                     folderID: folder.id,
                     path: expiredPath,
@@ -127,14 +131,14 @@ extension SyncManager {
                 lastKnownLocalPaths[folder.syncID]?.remove(expiredPath)
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: expiredPath)
                 AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(expiredPath)")
-                
+
                 Task.detached {
                     try? StorageManager.shared.addLocalChange(change)
                     AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录（从过期重命名转换）: \(expiredPath)")
                 }
             }
         }
-        
+
         // 去重检查：短时间内的重复事件通常可忽略，但“创建→写入完成”的场景可能在 1 秒内发生多次变更。
         // 若内容哈希已发生变化，则不应去重，否则会导致 VectorClock 未更新、进而被误判为冲突（VC 相等但 hash 不同）。
         let changeKey = "\(folder.syncID):\(relativePath)"
@@ -142,14 +146,20 @@ extension SyncManager {
             now.timeIntervalSince(lastProcessed) < changeDeduplicationWindow
         {
             if exists, let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
-                let currentHash = (try? computeFileHash(fileURL: URL(fileURLWithPath: canonicalAbsolutePath))) ?? knownMeta.hash
+                let currentHash =
+                    (try? computeFileHash(fileURL: URL(fileURLWithPath: canonicalAbsolutePath)))
+                    ?? knownMeta.hash
                 if currentHash == knownMeta.hash {
-                    AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
+                    AppLogger.syncPrint(
+                        "[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)"
+                    )
                     return
                 }
                 // 哈希不同：允许继续处理该事件（避免漏记真实变更）
             } else {
-                AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)")
+                AppLogger.syncPrint(
+                    "[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)"
+                )
                 return
             }
         }
@@ -166,27 +176,33 @@ extension SyncManager {
 
         // 检查文件是否在已知路径列表中，用于区分新建和修改
         let isKnownPath = lastKnownLocalPaths[folder.syncID]?.contains(relativePath) ?? false
-        
+
         // 解析 FSEvents 标志
-        let hasRemovedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved) != 0)
-        let hasCreatedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated) != 0)
-        let hasModifiedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified) != 0)
-        let hasRenamedFlag = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0)
-        
+        let hasRemovedFlag =
+            (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved) != 0)
+        let hasCreatedFlag =
+            (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated) != 0)
+        let hasModifiedFlag =
+            (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified) != 0)
+        let hasRenamedFlag =
+            (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0)
+
         AppLogger.syncPrint("[recordLocalChange] 📝 开始处理变更:")
         AppLogger.syncPrint("  - 文件路径: \(relativePath)")
         AppLogger.syncPrint("  - 绝对路径: \(absolutePath)")
         AppLogger.syncPrint("  - 文件存在: \(exists)")
         AppLogger.syncPrint("  - 文件大小: \(size ?? 0) bytes")
         AppLogger.syncPrint("  - 在已知路径: \(isKnownPath)")
-        AppLogger.syncPrint("  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)")
-        
+        AppLogger.syncPrint(
+            "  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)"
+        )
+
         // 逻辑判断：基于文件状态和已知路径列表确定变更类型
         // 1. 优先检查删除：如果文件不存在，且设置了 Removed 或 Renamed 标志
         // 注意：如果设置了 Renamed 标志且文件在已知路径中，可能是重命名操作，需要延迟判断
         if !exists {
             AppLogger.syncPrint("[recordLocalChange] 🔍 文件不存在，检查删除逻辑...")
-            
+
             // 如果文件在已知路径中且设置了 Renamed 标志，可能是重命名操作
             // 但是，如果同时设置了 Removed 标志，这是明确的删除操作，不应该等待重命名
             // 只有在只有 Renamed 标志且没有 Removed 标志时，才可能等待重命名
@@ -196,27 +212,36 @@ extension SyncManager {
                     let pendingKey = "\(folder.syncID):\(relativePath)"
                     if let existingPending = pendingRenames[pendingKey] {
                         // 如果已经有待处理的重命名操作，检查是否超时
-                        if now.timeIntervalSince(existingPending.timestamp) > renameDetectionWindow {
+                        if now.timeIntervalSince(existingPending.timestamp) > renameDetectionWindow
+                        {
                             // 超时了，这是真正的删除，不是重命名
-                            AppLogger.syncPrint("[recordLocalChange] ⏰ 待处理的重命名操作已超时，转换为删除操作: \(relativePath)")
+                            AppLogger.syncPrint(
+                                "[recordLocalChange] ⏰ 待处理的重命名操作已超时，转换为删除操作: \(relativePath)")
                             pendingRenames.removeValue(forKey: pendingKey)
                             // 继续执行删除逻辑（不返回）
                         } else {
                             // 还在时间窗口内，继续等待新文件出现
-                            AppLogger.syncPrint("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
+                            AppLogger.syncPrint(
+                                "[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)"
+                            )
                             // 暂时不记录，等待新文件出现
                             return
                         }
                     } else {
                         // 没有待处理的重命名操作，保存哈希值等待新文件出现
                         pendingRenames[pendingKey] = (hash: knownMeta.hash, timestamp: now)
-                        AppLogger.syncPrint("[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)")
+                        schedulePendingRenameTimeout(
+                            folder: folder, relativePath: relativePath, pendingKey: pendingKey,
+                            scheduledAt: now)
+                        AppLogger.syncPrint(
+                            "[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)"
+                        )
                         // 暂时不记录，等待新文件出现
                         return
                     }
                 }
             }
-            
+
             // 重要：如果文件不在已知路径中但设置了 Renamed 标志，可能是重命名操作的旧路径
             // 这种情况下，不应该立即记录为删除，而应该等待新文件出现
             // 如果新文件出现且哈希值匹配，则记录为重命名；否则记录为删除
@@ -226,14 +251,29 @@ extension SyncManager {
                 // 但是，由于文件不在已知路径中，我们无法获取其哈希值
                 // 所以，这种情况下，应该跳过，不记录任何操作
                 // 如果新文件出现，会在新文件的处理逻辑中检测重命名
-                AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Renamed 标志，等待新文件出现以检测重命名: \(relativePath)")
+                AppLogger.syncPrint(
+                    "[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Renamed 标志，等待新文件出现以检测重命名: \(relativePath)"
+                )
                 return
             }
-            
+
             // 如果文件在已知路径列表中，或者设置了 Removed 标志，记录为删除
             // 注意：如果只设置了 Renamed 标志但文件不在已知路径中，不应该记录为删除（已在上面处理）
             if isKnownPath || hasRemovedFlag {
-                AppLogger.syncPrint("[recordLocalChange] ✅ 记录为删除: isKnownPath=\(isKnownPath), hasRemovedFlag=\(hasRemovedFlag), hasRenamedFlag=\(hasRenamedFlag)")
+                AppLogger.syncPrint(
+                    "[recordLocalChange] ✅ 记录为删除: isKnownPath=\(isKnownPath), hasRemovedFlag=\(hasRemovedFlag), hasRenamedFlag=\(hasRenamedFlag)"
+                )
+
+                // 写入删除记录与 VectorClock，确保删除可同步到远端
+                if let myPeerID = p2pNode.peerID, !myPeerID.isEmpty {
+                    deleteFileAtomically(
+                        path: relativePath, syncID: folder.syncID, peerID: myPeerID)
+                } else {
+                    var dp = deletedPaths(for: folder.syncID)
+                    dp.insert(relativePath)
+                    updateDeletedPaths(dp, for: folder.syncID)
+                }
+
                 let change = LocalChange(
                     folderID: folder.id,
                     path: relativePath,
@@ -246,7 +286,7 @@ extension SyncManager {
                 lastKnownLocalPaths[folder.syncID]?.remove(relativePath)
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
                 AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(relativePath)")
-                
+
                 Task.detached {
                     try? StorageManager.shared.addLocalChange(change)
                     AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录: \(relativePath)")
@@ -257,20 +297,22 @@ extension SyncManager {
             // 如果文件不在已知列表中，且没有 Removed/Renamed 标志，可能是从未存在过的文件，不记录
             return
         }
-        
+
         // 2. 文件存在的情况
         // 如果文件在已知路径列表中，需要验证是否真的变化了
         if isKnownPath {
             AppLogger.syncPrint("[recordLocalChange] 🔍 文件在已知路径中，检查是否真的变化...")
-            
+
             // 检查文件内容是否真的变化了（通过比较哈希值）
             if let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
-                AppLogger.syncPrint("[recordLocalChange] 📊 找到已知元数据，哈希值: \(knownMeta.hash.prefix(16))...")
+                AppLogger.syncPrint(
+                    "[recordLocalChange] 📊 找到已知元数据，哈希值: \(knownMeta.hash.prefix(16))...")
                 do {
                     let fileURL = URL(fileURLWithPath: absolutePath)
                     let currentHash = try computeFileHash(fileURL: fileURL)
-                    AppLogger.syncPrint("[recordLocalChange] 📊 当前文件哈希值: \(currentHash.prefix(16))...")
-                    
+                    AppLogger.syncPrint(
+                        "[recordLocalChange] 📊 当前文件哈希值: \(currentHash.prefix(16))...")
+
                     if currentHash == knownMeta.hash {
                         // 文件内容没有变化，可能是文件系统触发的误报（如复制操作时原文件触发事件）
                         // 不记录任何变更
@@ -323,7 +365,7 @@ extension SyncManager {
                 return
             }
         }
-        
+
         // 3. 文件不在已知路径列表中，是新文件
         // 但需要检查是否有明确的 Created 标志，避免误判
         // 如果明确设置了 Removed 标志，不应该记录为新建（即使文件存在，可能是中间状态）
@@ -333,14 +375,14 @@ extension SyncManager {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Removed 标志（可能是删除中间状态）")
             return
         }
-        
+
         // 检查是否是重命名（通过 Renamed 标志或哈希值匹配）
         let changeType: LocalChange.ChangeType
-        
+
         // 首先检查是否有待处理的重命名操作（通过哈希值匹配）
         var matchedRename: String? = nil
         var isOldPathOfRename: Bool = false  // 标记是否是重命名操作的旧路径
-        
+
         // 如果文件不在已知路径中，需要检查是否是重命名操作的旧路径
         // 即使没有 Renamed 标志，也要检查（因为从远程同步回来的文件可能没有该标志）
         if !isKnownPath {
@@ -348,7 +390,7 @@ extension SyncManager {
             do {
                 let fileURL = URL(fileURLWithPath: absolutePath)
                 let currentHash = try computeFileHash(fileURL: fileURL)
-                
+
                 // 检查是否有待处理的重命名操作（旧文件哈希值匹配）
                 // 重要：如果新文件设置了 Renamed 标志，应该优先检查 pendingRenames
                 if hasRenamedFlag {
@@ -357,31 +399,41 @@ extension SyncManager {
                         if keyParts.count == 2, keyParts[0] == folder.syncID {
                             let oldPath = String(keyParts[1])
                             // 检查时间窗口和哈希值
-                            if now.timeIntervalSince(pendingInfo.timestamp) <= renameDetectionWindow,
-                               pendingInfo.hash == currentHash {
+                            if now.timeIntervalSince(pendingInfo.timestamp)
+                                <= renameDetectionWindow,
+                                pendingInfo.hash == currentHash
+                            {
                                 // 找到匹配的重命名操作
                                 matchedRename = oldPath
-                                AppLogger.syncPrint("[recordLocalChange] 🔄 检测到重命名操作: \(oldPath) -> \(relativePath) (哈希值匹配)")
+                                AppLogger.syncPrint(
+                                    "[recordLocalChange] 🔄 检测到重命名操作: \(oldPath) -> \(relativePath) (哈希值匹配)"
+                                )
                                 // 从待处理列表中移除
                                 pendingRenames.removeValue(forKey: pendingKey)
                                 break
                             }
                         }
                     }
-                    
-                    // 如果设置了 Renamed 标志但没有找到匹配的 pendingRenames，检查是否有最近删除的文件
-                    // 这可能是因为旧文件不在已知路径中，所以无法添加到 pendingRenames
-                    // 在这种情况下，我们需要通过其他方式检测重命名
+
+                    // 如果设置了 Renamed 标志但没有找到匹配的 pendingRenames，尝试用已知元数据哈希匹配
+                    if matchedRename == nil, let knownMetadata = lastKnownMetadata[folder.syncID] {
+                        if let (oldPath, _) = knownMetadata.first(where: {
+                            $0.value.hash == currentHash
+                        }) {
+                            matchedRename = oldPath
+                            AppLogger.syncPrint(
+                                "[recordLocalChange] 🔄 通过已知元数据哈希匹配检测到重命名: \(oldPath) -> \(relativePath)"
+                            )
+                        }
+                    }
+
                     if matchedRename == nil {
-                        // 检查是否有最近删除的文件（在时间窗口内）
-                        // 如果新文件设置了 Renamed 标志，且不在已知路径中，可能是重命名操作
-                        // 但是，由于旧文件不在已知路径中，我们无法获取其哈希值
-                        // 所以，这种情况下，我们应该记录为新建，而不是重命名
-                        // 但是，如果旧文件在已知路径中，应该已经在 pendingRenames 中找到了
-                        AppLogger.syncPrint("[recordLocalChange] ⚠️ 新文件设置了 Renamed 标志但没有找到匹配的 pendingRenames，可能是旧文件不在已知路径中")
+                        AppLogger.syncPrint(
+                            "[recordLocalChange] ⚠️ 新文件设置了 Renamed 标志但没有找到匹配的 pendingRenames，可能是旧文件不在已知路径中"
+                        )
                     }
                 }
-                
+
                 // 重要：如果文件不在已知路径中，且哈希值与某个 pendingRenames 中的旧路径匹配，
                 // 需要区分两种情况：
                 // 1. 如果文件设置了 Renamed 标志，说明这是重命名操作的新路径，应该记录为重命名
@@ -397,21 +449,25 @@ extension SyncManager {
                                     // 文件设置了 Renamed 标志，说明这是重命名操作的新路径
                                     // 应该记录为重命名，而不是跳过
                                     matchedRename = oldPath
-                                    AppLogger.syncPrint("[recordLocalChange] 🔄 检测到重命名操作（通过 pendingRenames 和 Renamed 标志）: \(oldPath) -> \(relativePath) (哈希值匹配)")
+                                    AppLogger.syncPrint(
+                                        "[recordLocalChange] 🔄 检测到重命名操作（通过 pendingRenames 和 Renamed 标志）: \(oldPath) -> \(relativePath) (哈希值匹配)"
+                                    )
                                     // 从待处理列表中移除
                                     pendingRenames.removeValue(forKey: pendingKey)
                                     break
                                 } else {
                                     // 没有 Renamed 标志，说明这是重命名操作的旧路径，不应该被记录为新建
                                     isOldPathOfRename = true
-                                    AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配，但无 Renamed 标志），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))")
+                                    AppLogger.syncPrint(
+                                        "[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配，但无 Renamed 标志），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))"
+                                    )
                                     break
                                 }
                             }
                         }
                     }
                 }
-                
+
                 // 重要：如果文件不在已知路径中，且哈希值与某个已知文件（可能是重命名的新路径）的哈希值匹配，
                 // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
                 // 注意：这个检查应该在 pendingRenames 检查之后，因为如果 pendingRenames 中有匹配，说明重命名操作正在进行中
@@ -425,7 +481,9 @@ extension SyncManager {
                                 // 但需要确认这不是同一个文件（路径不同）
                                 if knownPath != relativePath {
                                     isOldPathOfRename = true
-                                    AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与已知文件匹配），不应该被记录为新建: \(relativePath) (新路径: \(knownPath))")
+                                    AppLogger.syncPrint(
+                                        "[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与已知文件匹配），不应该被记录为新建: \(relativePath) (新路径: \(knownPath))"
+                                    )
                                     break
                                 }
                             }
@@ -436,16 +494,17 @@ extension SyncManager {
                 AppLogger.syncPrint("[recordLocalChange] ⚠️ 无法计算哈希值以检测重命名: \(error)")
             }
         }
-        
+
         // 如果是重命名操作的旧路径，跳过处理
         if isOldPathOfRename {
             return
         }
-        
+
         if let oldPath = matchedRename {
             // 这是重命名操作（通过哈希值匹配确认）
             changeType = .renamed
-            AppLogger.syncPrint("[recordLocalChange] ✅ 记录为重命名：通过哈希值匹配检测到 \(oldPath) -> \(relativePath)")
+            AppLogger.syncPrint(
+                "[recordLocalChange] ✅ 记录为重命名：通过哈希值匹配检测到 \(oldPath) -> \(relativePath)")
         } else if hasCreatedFlag {
             // 明确设置了 Created 标志，记录为新建
             changeType = .created
@@ -474,10 +533,11 @@ extension SyncManager {
                 path: relativePath,
                 peerID: myPeerID
             )
-            VectorClockManager.saveVectorClock(folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
+            VectorClockManager.saveVectorClock(
+                folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
             updatedVC = vc
         }
-        
+
         let change = LocalChange(
             folderID: folder.id,
             path: relativePath,
@@ -495,13 +555,13 @@ extension SyncManager {
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: oldPath)
                 AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除旧路径: \(oldPath)")
             }
-            
+
             // 新建或重命名：添加到已知路径列表
             if lastKnownLocalPaths[folder.syncID] == nil {
                 lastKnownLocalPaths[folder.syncID] = Set<String>()
             }
             lastKnownLocalPaths[folder.syncID]?.insert(relativePath)
-            
+
             // 计算并保存元数据
             if exists {
                 do {
@@ -509,7 +569,7 @@ extension SyncManager {
                     let hash = try computeFileHash(fileURL: fileURL)
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
-                    
+
                     if lastKnownMetadata[folder.syncID] == nil {
                         lastKnownMetadata[folder.syncID] = [:]
                     }
@@ -531,7 +591,7 @@ extension SyncManager {
                     let hash = try computeFileHash(fileURL: fileURL)
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
-                    
+
                     if lastKnownMetadata[folder.syncID] == nil {
                         lastKnownMetadata[folder.syncID] = [:]
                     }
@@ -554,7 +614,59 @@ extension SyncManager {
 
         Task.detached {
             try? StorageManager.shared.addLocalChange(change)
-            AppLogger.syncPrint("[recordLocalChange] 💾 已保存\(changeType == .created ? "新建" : changeType == .renamed ? "重命名" : changeType == .deleted ? "删除" : "修改")记录: \(relativePath)")
+            AppLogger.syncPrint(
+                "[recordLocalChange] 💾 已保存\(changeType == .created ? "新建" : changeType == .renamed ? "重命名" : changeType == .deleted ? "删除" : "修改")记录: \(relativePath)"
+            )
+        }
+    }
+
+    /// 在重命名检测窗口到期后兜底处理删除（避免没有后续事件导致删除不被记录）
+    private func schedulePendingRenameTimeout(
+        folder: SyncFolder,
+        relativePath: String,
+        pendingKey: String,
+        scheduledAt: Date
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.renameDetectionWindow * 1_000_000_000))
+            guard let pending = self.pendingRenames[pendingKey], pending.timestamp == scheduledAt
+            else {
+                return
+            }
+
+            let fileURL = folder.localPath.appendingPathComponent(relativePath)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                return
+            }
+
+            AppLogger.syncPrint(
+                "[recordLocalChange] ⏰ 重命名等待超时，确认为删除: \(relativePath) (syncID: \(folder.syncID))")
+
+            if let myPeerID = self.p2pNode.peerID, !myPeerID.isEmpty {
+                self.deleteFileAtomically(
+                    path: relativePath, syncID: folder.syncID, peerID: myPeerID)
+            } else {
+                var dp = self.deletedPaths(for: folder.syncID)
+                dp.insert(relativePath)
+                self.updateDeletedPaths(dp, for: folder.syncID)
+            }
+
+            let change = LocalChange(
+                folderID: folder.id,
+                path: relativePath,
+                changeType: .deleted,
+                size: nil,
+                timestamp: Date(),
+                sequence: nil
+            )
+
+            Task.detached {
+                try? StorageManager.shared.addLocalChange(change)
+                AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录（重命名超时兜底）: \(relativePath)")
+            }
+
+            self.pendingRenames.removeValue(forKey: pendingKey)
         }
     }
 }

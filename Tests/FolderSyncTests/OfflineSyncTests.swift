@@ -4,61 +4,7 @@ import Foundation
 
 /// 离线场景测试
 @MainActor
-final class OfflineSyncTests: XCTestCase {
-    var tempDir1: URL!
-    var tempDir2: URL!
-    var syncManager1: SyncManager!
-    var syncManager2: SyncManager!
-    var syncID: String!
-    
-    override func setUp() async throws {
-        try await super.setUp()
-        
-        tempDir1 = try TestHelpers.createTempDirectory()
-        tempDir2 = try TestHelpers.createTempDirectory()
-        syncID = "test\(UUID().uuidString.prefix(8))"
-        
-        syncManager1 = SyncManager()
-        syncManager2 = SyncManager()
-        
-        // 等待 P2P 节点启动
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 添加文件夹
-        let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
-        syncManager1.addFolder(folder1)
-        
-        let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
-        syncManager2.addFolder(folder2)
-        
-        // 等待文件夹添加和发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-    }
-    
-    override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源（stop 可重复调用，已停止时无副作用）
-        try? await syncManager1?.p2pNode.stop()
-        try? await syncManager2?.p2pNode.stop()
-        
-        syncManager1 = nil
-        syncManager2 = nil
-        
-        if tempDir1 != nil { TestHelpers.cleanupTempDirectory(tempDir1) }
-        if tempDir2 != nil { TestHelpers.cleanupTempDirectory(tempDir2) }
-        
-        try await super.tearDown()
-    }
-    
-    /// 模拟客户端2离线（通过停止其 P2P 网络服务实现）
-    func simulateClient2Offline() async throws {
-        try await syncManager2.p2pNode.stop()
-    }
-    
-    /// 模拟客户端2上线（重新启动其 P2P 网络服务）
-    func simulateClient2Online() async throws {
-        try await syncManager2.p2pNode.start()
-        try? await Task.sleep(nanoseconds: 3_000_000_000) // 等待重新发现
-    }
+final class OfflineSyncTests: TwoClientTestCase {
     
     // MARK: - 离线添加测试
     

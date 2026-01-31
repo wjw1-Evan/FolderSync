@@ -4,71 +4,10 @@ import Foundation
 
 /// 重新上线测试
 @MainActor
-final class ReconnectSyncTests: XCTestCase {
-    var tempDir1: URL!
-    var tempDir2: URL!
-    var syncManager1: SyncManager!
-    var syncManager2: SyncManager!
-    var syncID: String!
+final class ReconnectSyncTests: TwoClientTestCase {
     
-    override func setUp() async throws {
-        try await super.setUp()
-        
-        tempDir1 = try TestHelpers.createTempDirectory()
-        tempDir2 = try TestHelpers.createTempDirectory()
-        syncID = "test\(UUID().uuidString.prefix(8))"
-        
-        syncManager1 = SyncManager()
-        syncManager2 = SyncManager()
-        
-        // 等待 P2P 节点启动
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 添加文件夹
-        let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
-        syncManager1.addFolder(folder1)
-        
-        let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
-        syncManager2.addFolder(folder2)
-        
-        // 等待文件夹添加和 peer 发现（双节点需更长时间完成发现与注册）
-        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
-    }
-    
-    override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源
-        try? await syncManager1?.p2pNode.stop()
-        try? await syncManager2?.p2pNode.stop()
-        
-        syncManager1 = nil
-        syncManager2 = nil
-        
-        if let d1 = tempDir1 { TestHelpers.cleanupTempDirectory(d1) }
-        if let d2 = tempDir2 { TestHelpers.cleanupTempDirectory(d2) }
-        tempDir1 = nil
-        tempDir2 = nil
-        
-        try await super.tearDown()
-    }
-    
-    /// 模拟客户端2离线
-    func simulateClient2Offline() async throws {
-        try await syncManager2.p2pNode.stop()
-    }
-    
-    /// 模拟客户端2上线
-    func simulateClient2Online() async throws {
-        try await syncManager2.p2pNode.start()
-        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
-    }
-    
-    /// 等待 client1 发现重连的 client2 并显式触发同步（client2 重启后为新 PeerID，需发现后再同步）
-    func waitDiscoveryAndTriggerSyncFromClient1() async {
-        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3秒
-        if let folder1 = syncManager1.folders.first(where: { $0.syncID == syncID }) {
-            _ = await TestHelpers.triggerSyncAndWait(syncManager: syncManager1, folder: folder1, timeout: 25.0)
-        }
-    }
+    /// 双节点需更长时间完成发现与注册
+    override var folderDiscoveryWait: UInt64 { TestDuration.longSync }
     
     // MARK: - 重新上线后同步测试
     

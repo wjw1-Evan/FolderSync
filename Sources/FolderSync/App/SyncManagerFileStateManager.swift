@@ -11,7 +11,7 @@ extension SyncManager {
         fileStateStores[syncID] = store
         return store
     }
-    
+
     /// 原子性删除文件
     /// - Parameters:
     ///   - path: 文件相对路径
@@ -25,40 +25,71 @@ extension SyncManager {
         let currentVC =
             VectorClockManager.getVectorClock(folderID: folderID, syncID: syncID, path: path)
             ?? VectorClock()
-        
+
         // 2. 递增 Vector Clock（标记删除操作）
         var updatedVC = currentVC
         updatedVC.increment(for: peerID)
-        
+
         // 3. 创建删除记录
         let deletionRecord = DeletionRecord(
             deletedAt: Date(),
             deletedBy: peerID,
             vectorClock: updatedVC
         )
-        
+
         // 4. 原子性更新状态
         let stateStore = getFileStateStore(for: syncID)
         stateStore.setDeleted(path: path, record: deletionRecord)
-        
+
         // 5. 删除文件（如果存在）
         let fileURL = folder.localPath.appendingPathComponent(path)
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: fileURL.path) {
             try? fileManager.removeItem(at: fileURL)
         }
-        
+
+        // 5.1 清理空父目录（避免重命名后旧目录残留）
+        removeEmptyParentDirectories(root: folder.localPath, relativePath: path)
+
         // 6. 保存 Vector Clock（标记为删除状态）
-        VectorClockManager.saveVectorClock(folderID: folderID, syncID: syncID, path: path, vc: updatedVC)
-        
+        VectorClockManager.saveVectorClock(
+            folderID: folderID, syncID: syncID, path: path, vc: updatedVC)
+
         // 7. 更新旧的删除记录（兼容性）
         var dp = deletedPaths(for: syncID)
         dp.insert(path)
         updateDeletedPaths(dp, for: syncID)
-        
+
         AppLogger.syncPrint("[SyncManager] ✅ 原子性删除文件: \(path) (syncID: \(syncID))")
     }
-    
+
+    /// 删除空父目录（从文件所在目录向上递归，直到遇到非空或到达根目录）
+    private func removeEmptyParentDirectories(root: URL, relativePath: String) {
+        let parentPath = (relativePath as NSString).deletingLastPathComponent
+        guard !parentPath.isEmpty else { return }
+
+        let fileManager = FileManager.default
+        var currentURL = root.appendingPathComponent(parentPath)
+
+        while currentURL.path.hasPrefix(root.path), currentURL.path != root.path {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: currentURL.path, isDirectory: &isDirectory),
+                isDirectory.boolValue
+            else {
+                break
+            }
+
+            if let contents = try? fileManager.contentsOfDirectory(atPath: currentURL.path),
+                contents.isEmpty
+            {
+                try? fileManager.removeItem(at: currentURL)
+                currentURL.deleteLastPathComponent()
+                continue
+            }
+            break
+        }
+    }
+
     func deletedPaths(for syncID: String) -> Set<String> {
         // 优先从新的状态存储获取
         let stateStore = getFileStateStore(for: syncID)

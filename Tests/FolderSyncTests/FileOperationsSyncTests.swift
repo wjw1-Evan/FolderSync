@@ -4,50 +4,10 @@ import Foundation
 
 /// 文件操作同步测试
 @MainActor
-final class FileOperationsSyncTests: XCTestCase {
-    var tempDir1: URL!
-    var tempDir2: URL!
-    var syncManager1: SyncManager!
-    var syncManager2: SyncManager!
-    var syncID: String!
+final class FileOperationsSyncTests: TwoClientTestCase {
     
-    override func setUp() async throws {
-        try await super.setUp()
-        
-        tempDir1 = try TestHelpers.createTempDirectory()
-        tempDir2 = try TestHelpers.createTempDirectory()
-        syncID = "test\(UUID().uuidString.prefix(8))"
-        
-        syncManager1 = SyncManager()
-        syncManager2 = SyncManager()
-        
-        // 等待 P2P 节点启动
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 添加文件夹
-        let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
-        syncManager1.addFolder(folder1)
-        
-        let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
-        syncManager2.addFolder(folder2)
-        
-        // 等待文件夹添加和 peer 发现（双节点需更长时间完成发现与注册）
-        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10秒
-    }
-    
-    override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源
-        try? await syncManager1?.p2pNode.stop()
-        try? await syncManager2?.p2pNode.stop()
-        
-        syncManager1 = nil
-        syncManager2 = nil
-        
-        TestHelpers.cleanupTempDirectory(tempDir1)
-        TestHelpers.cleanupTempDirectory(tempDir2)
-        
-        try await super.tearDown()
-    }
+    /// 双节点需更长时间完成发现与注册
+    override var folderDiscoveryWait: UInt64 { TestDuration.longSync }
     
     // MARK: - 添加文件测试
     

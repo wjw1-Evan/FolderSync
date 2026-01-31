@@ -9,19 +9,23 @@ public struct PeerInfo {
     public var isOnline: Bool
     public var discoveryTime: Date
     public var lastSeenTime: Date
-    public var syncIDs: [String] // 从广播消息中获取的 syncID 列表
-    
-    public init(peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false, isOnline: Bool = false, discoveryTime: Date? = nil, lastSeenTime: Date? = nil, syncIDs: [String] = []) {
+    public var syncIDs: [String]  // 从广播消息中获取的 syncID 列表
+
+    public init(
+        peerID: PeerID, addresses: [Multiaddr] = [], isRegistered: Bool = false,
+        isOnline: Bool = false, discoveryTime: Date? = nil, lastSeenTime: Date? = nil,
+        syncIDs: [String] = []
+    ) {
         self.peerID = peerID
         self.peerIDString = peerID.b58String
         self.addresses = addresses
         self.isRegistered = isRegistered
         self.isOnline = isOnline
         self.discoveryTime = discoveryTime ?? Date()
-       self.lastSeenTime = lastSeenTime ?? Date()
+        self.lastSeenTime = lastSeenTime ?? Date()
         self.syncIDs = syncIDs
     }
-    
+
     /// 更新地址
     mutating func updateAddresses(_ newAddresses: [Multiaddr]) {
         let oldSet = Set(self.addresses.map { $0.description })
@@ -31,7 +35,7 @@ public struct PeerInfo {
             self.lastSeenTime = Date()
         }
     }
-    
+
     /// 更新在线状态
     mutating func updateOnlineStatus(_ online: Bool) {
         if self.isOnline != online {
@@ -41,7 +45,7 @@ public struct PeerInfo {
             }
         }
     }
-    
+
     /// 标记为已注册
     mutating func markAsRegistered() {
         self.isRegistered = true
@@ -51,10 +55,10 @@ public struct PeerInfo {
 
 /// 设备状态
 public enum DeviceStatus {
-    case offline          // 离线
-    case online           // 在线
-    case connecting       // 连接中
-    case disconnected     // 已断开
+    case offline  // 离线
+    case online  // 在线
+    case connecting  // 连接中
+    case disconnected  // 已断开
 }
 
 /// 统一的 Peer 管理器 - 管理所有已知设备
@@ -62,40 +66,45 @@ public enum DeviceStatus {
 public class PeerManager: ObservableObject {
     /// 所有已知的 Peer（PeerID String -> PeerInfo）
     @Published private(set) var peers: [String: PeerInfo] = [:]
-    
+
     /// 设备状态（PeerID String -> DeviceStatus）
     @Published private(set) var deviceStatuses: [String: DeviceStatus] = [:]
-    
+
     /// 线程安全的队列，用于处理并发访问
     private let queue = DispatchQueue(label: "com.foldersync.peermanager", attributes: .concurrent)
-    
+
     /// 持久化存储
     private let persistentStore = PersistentPeerStore.shared
-    
+
     /// 保存防抖：避免频繁保存
     private var saveTask: Task<Void, Never>?
     private let saveDebounceDelay: TimeInterval = 2.0
-    
+
     /// Peer 注册服务（可选，如果设置则自动同步注册状态）
     public weak var registrationService: PeerRegistrationService?
-    
+
     public init() {
-        // 从持久化存储加载 peer 信息
-        loadPersistedPeers()
+        // 测试环境禁用持久化，避免跨用例污染
+        if !AppPaths.isRunningTests {
+            // 从持久化存储加载 peer 信息
+            loadPersistedPeers()
+        }
     }
-    
+
     /// 从持久化存储加载 peer 信息
     private func loadPersistedPeers() {
         do {
             let persistentPeers = try persistentStore.loadPeers()
             for persistent in persistentPeers {
-                if let (peerID, addresses, isRegistered) = persistentStore.convertToPeerInfo(persistent) {
+                if let (peerID, addresses, isRegistered) = persistentStore.convertToPeerInfo(
+                    persistent)
+                {
                     // 恢复时间戳
                     let peerInfo = PeerInfo(
                         peerID: peerID,
                         addresses: addresses,
                         isRegistered: isRegistered,
-                        isOnline: false, // 从持久化恢复时默认为离线，等待状态检查
+                        isOnline: false,  // 从持久化恢复时默认为离线，等待状态检查
                         discoveryTime: persistent.discoveryTime,
                         lastSeenTime: persistent.lastSeenTime
                     )
@@ -103,7 +112,9 @@ public class PeerManager: ObservableObject {
                     peers[peerIDString] = peerInfo
                     // 初始化设备状态为离线（等待状态检查）
                     deviceStatuses[peerIDString] = .offline
-                    AppLogger.syncPrint("[PeerManager] ✅ 已恢复 peer: \(peerIDString.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))")
+                    AppLogger.syncPrint(
+                        "[PeerManager] ✅ 已恢复 peer: \(peerIDString.prefix(12))... (已注册: \(isRegistered), 地址数: \(addresses.count))"
+                    )
                 }
             }
             if !persistentPeers.isEmpty {
@@ -113,47 +124,50 @@ public class PeerManager: ObservableObject {
             AppLogger.syncPrint("[PeerManager] ❌ 加载持久化 peer 失败: \(error)")
         }
     }
-    
+
     /// 获取需要预注册到 libp2p 的 peer 列表（已注册但需要重新注册的）
     public func getPeersForPreRegistration() -> [(peerID: PeerID, addresses: [Multiaddr])] {
         return peers.values
             .filter { $0.isRegistered && !$0.addresses.isEmpty }
             .map { (peerID: $0.peerID, addresses: $0.addresses) }
     }
-    
+
     /// 保存 peer 信息到持久化存储（带防抖）
     private func savePeersDebounced() {
+        guard !AppPaths.isRunningTests else { return }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(self?.saveDebounceDelay ?? 2.0) * 1_000_000_000)
+            try? await Task.sleep(
+                nanoseconds: UInt64(self?.saveDebounceDelay ?? 2.0) * 1_000_000_000)
             guard !Task.isCancelled else { return }
             await self?.savePeers()
         }
     }
-    
+
     /// 保存 peer 信息到持久化存储
     private func savePeers() async {
+        guard !AppPaths.isRunningTests else { return }
         do {
             try persistentStore.savePeers(peers)
         } catch {
             AppLogger.syncPrint("[PeerManager] ❌ 保存 peer 到持久化存储失败: \(error)")
         }
     }
-    
+
     // MARK: - 查询方法
-    
+
     /// 获取所有 Peer 列表
     public var allPeers: [PeerInfo] {
         return Array(peers.values)
     }
-    
+
     /// 获取在线 Peer 列表（基于 deviceStatuses，这是权威状态源）
     public var onlinePeers: [PeerInfo] {
         return peers.values.filter { peerInfo in
             deviceStatuses[peerInfo.peerIDString] == .online
         }
     }
-    
+
     /// 获取离线 Peer 列表（基于 deviceStatuses，这是权威状态源）
     /// 注意：只统计明确为 .offline 状态的 peer，不包括 .connecting 和 .disconnected
     public var offlinePeers: [PeerInfo] {
@@ -162,22 +176,22 @@ public class PeerManager: ObservableObject {
             return status == .offline
         }
     }
-    
+
     /// 根据 PeerID 获取 Peer 信息
     public func getPeer(_ peerIDString: String) -> PeerInfo? {
         return peers[peerIDString]
     }
-    
+
     /// 根据 PeerID 对象获取 Peer 信息
     public func getPeer(_ peerID: PeerID) -> PeerInfo? {
         return peers[peerID.b58String]
     }
-    
+
     /// 检查 Peer 是否存在
     public func hasPeer(_ peerIDString: String) -> Bool {
         return peers[peerIDString] != nil
     }
-    
+
     /// 检查 Peer 是否正在注册
     public func isRegistering(_ peerIDString: String) -> Bool {
         // 如果设置了 registrationService，使用它来检查
@@ -189,7 +203,7 @@ public class PeerManager: ObservableObject {
         }
         return false
     }
-    
+
     /// 检查 Peer 是否已注册
     public func isRegistered(_ peerIDString: String) -> Bool {
         // 优先从 registrationService 获取状态
@@ -198,29 +212,29 @@ public class PeerManager: ObservableObject {
         }
         return peers[peerIDString]?.isRegistered ?? false
     }
-    
+
     /// 检查 Peer 是否在线
     public func isOnline(_ peerIDString: String) -> Bool {
         return deviceStatuses[peerIDString] == .online
     }
-    
+
     /// 获取设备状态
     public func getDeviceStatus(_ peerIDString: String) -> DeviceStatus {
         return deviceStatuses[peerIDString] ?? .offline
     }
-    
+
     /// 获取 Peer 的地址
     public func getAddresses(for peerIDString: String) -> [Multiaddr] {
         let addresses = peers[peerIDString]?.addresses ?? []
         // 移除日志输出，因为此方法会被频繁调用（同步过程中），避免日志重复
         return addresses
     }
-    
+
     /// 获取设备统计
     public var deviceCounts: (online: Int, offline: Int) {
         var online = 0
         var offline = 0
-        
+
         // 遍历所有 peers，统计在线和离线设备
         for peerInfo in peers.values {
             let status = deviceStatuses[peerInfo.peerIDString] ?? .offline
@@ -232,18 +246,18 @@ public class PeerManager: ObservableObject {
             // 注意：.connecting 和 .disconnected 状态不统计到在线或离线中
             // 这样可以避免在连接过程中统计错误
         }
-        
+
         return (online, offline)
     }
-    
+
     // MARK: - 更新方法
-    
+
     /// 添加或更新 Peer
     @discardableResult
     public func addOrUpdatePeer(_ peerID: PeerID, addresses: [Multiaddr] = []) -> PeerInfo {
         let peerIDString = peerID.b58String
         var shouldSave = false
-        
+
         if var existing = peers[peerIDString] {
             // 更新现有 Peer
             // 只有当新地址不为空时才更新地址，避免用空数组覆盖已有地址
@@ -266,29 +280,29 @@ public class PeerManager: ObservableObject {
             }
             shouldSave = true
         }
-        
+
         // 保存到持久化存储（带防抖）
         if shouldSave {
             savePeersDebounced()
         }
-        
+
         return peers[peerIDString]!
     }
-    
+
     /// 更新 Peer 地址
     public func updateAddresses(_ peerIDString: String, addresses: [Multiaddr]) {
         guard var peer = peers[peerIDString] else { return }
         let oldAddressSet = Set(peer.addresses.map { $0.description })
         peer.updateAddresses(addresses)
         peers[peerIDString] = peer
-        
+
         // 如果地址发生变化，保存到持久化存储（带防抖）
         let newAddressSet = Set(peer.addresses.map { $0.description })
         if oldAddressSet != newAddressSet {
             savePeersDebounced()
         }
     }
-    
+
     /// 标记 Peer 为已注册
     public func markAsRegistered(_ peerIDString: String) {
         guard var peer = peers[peerIDString] else { return }
@@ -297,7 +311,7 @@ public class PeerManager: ObservableObject {
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }
-    
+
     /// 更新 Peer 的 syncIDs（从广播消息中获取）
     public func updateSyncIDs(_ peerIDString: String, syncIDs: [String]) {
         guard var peer = peers[peerIDString] else { return }
@@ -308,32 +322,32 @@ public class PeerManager: ObservableObject {
             peers[peerIDString] = peer
         }
     }
-    
+
     /// 更新 Peer 在线状态
     public func updateOnlineStatus(_ peerIDString: String, isOnline: Bool) {
         guard var peer = peers[peerIDString] else { return }
         peer.updateOnlineStatus(isOnline)
         peers[peerIDString] = peer
         deviceStatuses[peerIDString] = isOnline ? .online : .offline
-        
+
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }
-    
+
     /// 更新设备状态
     public func updateDeviceStatus(_ peerIDString: String, status: DeviceStatus) {
         deviceStatuses[peerIDString] = status
-        
+
         // 同步更新 PeerInfo 的在线状态
         if var peer = peers[peerIDString] {
             let isOnline = (status == .online)
             peer.updateOnlineStatus(isOnline)
             peers[peerIDString] = peer
         }
-        
+
         savePeersDebounced()
     }
-    
+
     /// 移除 Peer
     public func removePeer(_ peerIDString: String) {
         peers.removeValue(forKey: peerIDString)
@@ -343,7 +357,7 @@ public class PeerManager: ObservableObject {
             await savePeers()
         }
     }
-    
+
     /// 清除所有 Peer
     public func clearAll() {
         peers.removeAll()
@@ -353,11 +367,12 @@ public class PeerManager: ObservableObject {
             await savePeers()
         }
     }
-    
+
     /// 更新所有 Peer 的最后可见时间
     public func updateLastSeen(_ peerIDString: String) {
         guard var peer = peers[peerIDString] else {
-            AppLogger.syncPrint("[PeerManager] ⚠️ 尝试更新不存在的 peer 的 lastSeenTime: \(peerIDString.prefix(12))...")
+            AppLogger.syncPrint(
+                "[PeerManager] ⚠️ 尝试更新不存在的 peer 的 lastSeenTime: \(peerIDString.prefix(12))...")
             return
         }
         let oldTime = peer.lastSeenTime
@@ -365,14 +380,17 @@ public class PeerManager: ObservableObject {
         peers[peerIDString] = peer
         let timeDiff = Date().timeIntervalSince(oldTime)
         if timeDiff > 5.0 {
-            AppLogger.syncPrint("[PeerManager] ✅ 更新 lastSeenTime: \(peerIDString.prefix(12))... (距离上次: \(Int(timeDiff))秒)")
+            AppLogger.syncPrint(
+                "[PeerManager] ✅ 更新 lastSeenTime: \(peerIDString.prefix(12))... (距离上次: \(Int(timeDiff))秒)"
+            )
         }
         // 保存到持久化存储（带防抖）
         savePeersDebounced()
     }
-    
+
     /// 立即保存所有 peer 到持久化存储（用于应用关闭时）
     public func saveAllPeers() async {
+        guard !AppPaths.isRunningTests else { return }
         await savePeers()
     }
 }

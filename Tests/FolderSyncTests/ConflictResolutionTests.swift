@@ -4,68 +4,7 @@ import Foundation
 
 /// 冲突处理测试
 @MainActor
-final class ConflictResolutionTests: XCTestCase {
-    var tempDir1: URL!
-    var tempDir2: URL!
-    var syncManager1: SyncManager!
-    var syncManager2: SyncManager!
-    var syncID: String!
-    
-    override func setUp() async throws {
-        try await super.setUp()
-        
-        tempDir1 = try TestHelpers.createTempDirectory()
-        tempDir2 = try TestHelpers.createTempDirectory()
-        syncID = "test\(UUID().uuidString.prefix(8))"
-        
-        syncManager1 = SyncManager()
-        syncManager2 = SyncManager()
-        
-        // 等待 P2P 节点启动
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒
-        
-        // 添加文件夹
-        let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
-        syncManager1.addFolder(folder1)
-        
-        let folder2 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir2)
-        syncManager2.addFolder(folder2)
-        
-        // 等待文件夹添加和发现
-        try? await Task.sleep(nanoseconds: 5_000_000_000) // 5秒
-    }
-    
-    override func tearDown() async throws {
-        // 停止 P2P 节点以清理资源（先完成者返回，最多等 5 秒，避免 hang）
-        let stopTimeout: UInt64 = 5_000_000_000 // 5秒
-        if let sm1 = syncManager1 {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { try? await sm1.p2pNode.stop() }
-                group.addTask { try? await Task.sleep(nanoseconds: stopTimeout) }
-                for await _ in group {
-                    group.cancelAll()
-                    break
-                }
-            }
-        }
-        if let sm2 = syncManager2 {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { try? await sm2.p2pNode.stop() }
-                group.addTask { try? await Task.sleep(nanoseconds: stopTimeout) }
-                for await _ in group {
-                    group.cancelAll()
-                    break
-                }
-            }
-        }
-        syncManager1 = nil
-        syncManager2 = nil
-        
-        TestHelpers.cleanupTempDirectory(tempDir1)
-        TestHelpers.cleanupTempDirectory(tempDir2)
-        
-        try await super.tearDown()
-    }
+final class ConflictResolutionTests: TwoClientTestCase {
     
     // MARK: - 并发修改冲突测试
     

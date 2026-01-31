@@ -234,22 +234,40 @@ class SyncEngine {
                 return
             }
 
-            // 尝试使用 WebRTC 服务
+            // 尝试使用 WebRTC 服务 (带重试机制)
             var rootRes: SyncResponse?
-            do {
-                rootRes = try await syncManager.p2pNode.sendRequest(
-                    .getMST(syncID: syncID),
-                    to: peerID
-                )
-            } catch {
-                let errorString = String(describing: error)
-                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] WebRTC 请求失败: \(errorString)")
+            var lastError: Error?
+            let maxRetries = 3
 
-                // 简化逻辑：仅使用广播判断peer有效性，连接失败不删除peer
-                // 如果peer仍在发送广播，说明它是在线的，连接失败可能是临时网络问题
-                // peer的有效性由广播时间戳判断，不在同步过程中删除peer
+            for attempt in 1...maxRetries {
+                do {
+                    rootRes = try await syncManager.p2pNode.sendRequest(
+                        .getMST(syncID: syncID),
+                        to: peerID
+                    )
+                    lastError = nil
+                    break  // 成功，退出重试
+                } catch {
+                    lastError = error
+                    let errorString = String(describing: error)
+                    AppLogger.syncPrint(
+                        "[SyncEngine] ⚠️ [performSync] 获取 MST 根尝试 \(attempt)/\(maxRetries) 失败: \(errorString)"
+                    )
+
+                    if attempt < maxRetries {
+                        // 延迟 1-2 秒后重试
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                    }
+                }
+            }
+
+            if let error = lastError {
+                let errorString = String(describing: error)
+                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] WebRTC 请求最终失败: \(errorString)")
+
                 syncManager.updateFolderStatus(
-                    currentFolder.id, status: .error, message: "对等点连接失败，等待下次发现", progress: 0.0)
+                    currentFolder.id, status: .error,
+                    message: "对等点连接失败 (多次重试后): \(error.localizedDescription)", progress: 0.0)
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -428,26 +446,42 @@ class SyncEngine {
                 return
             }
 
-            // 2. Roots differ, get remote file list
-            // 本地和远程哈希不同，需要同步
+            // 2. Roots differ, get remote file list (带重试逻辑)
             syncManager.updateFolderStatus(
                 currentFolder.id, status: .syncing, message: "正在获取远程文件列表...", progress: 0.1)
 
-            let filesRes: SyncResponse
-            do {
-                filesRes = try await syncManager.sendSyncRequest(
-                    .getFiles(syncID: syncID),
-                    to: peer,
-                    peerID: peerID,
-                    timeout: 90.0,
-                    maxRetries: 3,
-                    folder: currentFolder
-                )
-            } catch {
-                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] 获取远程文件列表失败: \(error)")
+            var filesRes: SyncResponse?
+            var filesError: Error?
+
+            for attempt in 1...maxRetries {
+                do {
+                    filesRes = try await syncManager.p2pNode.sendRequest(
+                        .getFiles(syncID: syncID),
+                        to: peerID
+                    )
+                    filesError = nil
+                    break
+                } catch {
+                    filesError = error
+                    AppLogger.syncPrint(
+                        "[SyncEngine] ⚠️ [performSync] 获取远程文件列表尝试 \(attempt)/\(maxRetries) 失败: \(error)"
+                    )
+                    if attempt < maxRetries {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)  // 重试间隔稍长一些
+                    }
+                }
+            }
+
+            guard let finalFilesRes = filesRes else {
+                let error =
+                    filesError
+                    ?? NSError(
+                        domain: "SyncEngine", code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Unknown error"])
+                AppLogger.syncPrint("[SyncEngine] ❌ [performSync] 获取远程文件列表最终失败: \(error)")
                 syncManager.updateFolderStatus(
                     currentFolder.id, status: .error,
-                    message: "获取远程文件列表失败: \(error.localizedDescription)")
+                    message: "获取远程文件列表失败 (多次重试后): \(error.localizedDescription)")
                 // 记录错误日志
                 let log = SyncLog(
                     syncID: syncID, folderID: folderID, peerID: peerID, direction: .bidirectional,
@@ -457,12 +491,14 @@ class SyncEngine {
                 return
             }
 
+            let filesResValue = finalFilesRes  // 重命名以便后续使用逻辑匹配
+
             // 处理新的统一状态格式（filesV2）或旧格式（files）
             var remoteEntries: [String: FileMetadata] = [:]
             var remoteDeletedPaths: [String] = []
             var remoteStates: [String: FileState] = [:]
 
-            switch filesRes {
+            switch filesResValue {
             case .filesV2(_, let states):
                 // 新格式：统一状态表示
                 remoteStates = states

@@ -267,14 +267,30 @@ public class WebRTCManager: NSObject {
         let dc = dataChannels[peerID]
         lock.unlock()
 
-        guard let dc = dc, dc.readyState == .open else {
+        guard let dc = dc else {
             throw NSError(
                 domain: "WebRTCManager", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "DataChannel not ready"])
+                userInfo: [NSLocalizedDescriptionKey: "DataChannel not found for \(peerID)"])
+        }
+
+        guard dc.readyState == .open else {
+            throw NSError(
+                domain: "WebRTCManager", code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "DataChannel not ready: \(dc.readyState.rawValue)"
+                ])
         }
 
         let buffer = RTCDataBuffer(data: data, isBinary: true)
-        dc.sendData(buffer)
+        let success = dc.sendData(buffer)
+        if !success {
+            throw NSError(
+                domain: "WebRTCManager", code: -2,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Failed to send data via DataChannel (buffer full or channel closed)"
+                ])
+        }
     }
 
     // MARK: - Helper for Mapping

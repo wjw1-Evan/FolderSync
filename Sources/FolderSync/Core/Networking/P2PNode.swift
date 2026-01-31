@@ -249,11 +249,14 @@ public class P2PNode: NSObject {
 
                 // Timeout logic
                 Task {
-                    try await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                    try await Task.sleep(nanoseconds: 45 * 1_000_000_000)
                     self.requestsQueue.async {
                         if let storedContinuation = self.pendingRequests.removeValue(
                             forKey: requestID)
                         {
+                            AppLogger.syncPrint(
+                                "[P2PNode] ⚠️ Request timed out: \(requestID) (peer: \(peerID.prefix(8)))"
+                            )
                             storedContinuation.resume(
                                 throwing: NSError(
                                     domain: "P2PNode", code: -2,
@@ -348,39 +351,51 @@ extension P2PNode: WebRTCManagerDelegate {
     }
 
     func webRTCManager(_ manager: WebRTCManager, didReceiveData data: Data, from peerID: String) {
-        guard let frame = try? JSONDecoder().decode(WebRTCFrame.self, from: data) else { return }
+        let decoder = JSONDecoder()
+
+        guard
+            let frame: WebRTCFrame = {
+                do {
+                    return try decoder.decode(WebRTCFrame.self, from: data)
+                } catch {
+                    AppLogger.syncPrint("[P2PNode] ❌ Failed to decode WebRTCFrame: \(error)")
+                    return nil
+                }
+            }()
+        else { return }
 
         if frame.type == "req" {
             // Handle Request
             Task {
                 guard let messageHandler = messageHandler else { return }
-                if let request = try? JSONDecoder().decode(SyncRequest.self, from: frame.payload) {
-                    do {
-                        let response = try await messageHandler(request)
-                        let responseData = try JSONEncoder().encode(response)
-                        let responseFrame = WebRTCFrame(
-                            id: frame.id, type: "res", payload: responseData)
-                        let responseFrameData = try JSONEncoder().encode(responseFrame)
-                        try self.webRTC.sendData(responseFrameData, to: peerID)
-                    } catch {
-                        print("Handler error: \(error)")
-                    }
+                do {
+                    let request = try decoder.decode(SyncRequest.self, from: frame.payload)
+                    let response = try await messageHandler(request)
+                    let responseData = try JSONEncoder().encode(response)
+                    let responseFrame = WebRTCFrame(
+                        id: frame.id, type: "res", payload: responseData)
+                    let responseFrameData = try JSONEncoder().encode(responseFrame)
+                    try self.webRTC.sendData(responseFrameData, to: peerID)
+                } catch {
+                    AppLogger.syncPrint("[P2PNode] ❌ Handler error for req \(frame.id): \(error)")
                 }
             }
         } else if frame.type == "res" {
             // Handle Response
             requestsQueue.async {
                 if let continuation = self.pendingRequests.removeValue(forKey: frame.id) {
-                    if let response = try? JSONDecoder().decode(
-                        SyncResponse.self, from: frame.payload)
-                    {
+                    do {
+                        let response = try decoder.decode(SyncResponse.self, from: frame.payload)
                         continuation.resume(returning: response)
-                    } else {
+                    } catch {
+                        AppLogger.syncPrint(
+                            "[P2PNode] ❌ Failed to decode response \(frame.id) payload: \(error)")
                         continuation.resume(
                             throwing: NSError(
                                 domain: "P2PNode", code: -3,
                                 userInfo: [
-                                    NSLocalizedDescriptionKey: "Failed to decode response payload"
+                                    NSLocalizedDescriptionKey:
+                                        "Failed to decode response payload: \(error.localizedDescription)"
                                 ]))
                     }
                 }

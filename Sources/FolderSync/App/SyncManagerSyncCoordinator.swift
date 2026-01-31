@@ -21,10 +21,24 @@ extension SyncManager {
         maxRetries: Int = 3,
         folder: SyncFolder? = nil
     ) async throws -> SyncResponse {
-        // 使用 WebRTC
-        // P2PNode 内部处理重试和超时（如果需要更复杂的策略可以在此层添加）
-        // 目前 P2PNode.sendRequest 实现了基本的超时
-        return try await p2pNode.sendRequest(message, to: peerID)
+        var lastError: Error?
+        for attempt in 1...maxRetries {
+            do {
+                return try await p2pNode.sendRequest(message, to: peerID)
+            } catch {
+                lastError = error
+                AppLogger.syncPrint(
+                    "[SyncManager] ⚠️ 请求尝试 \(attempt)/\(maxRetries) 失败 (\(peerID.prefix(8))): \(error.localizedDescription)"
+                )
+                if attempt < maxRetries {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+                }
+            }
+        }
+        throw lastError
+            ?? NSError(
+                domain: "SyncManager", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Request failed after \(maxRetries) retries"])
     }
 
     /// 检查是否应该为特定对等点和文件夹触发同步

@@ -55,6 +55,30 @@ class TwoClientTestCase: XCTestCase {
         // 等待 P2P 节点启动
         try? await Task.sleep(nanoseconds: TestDuration.p2pStartup)
 
+        // 手动注册 peer（同一机器上 LAN Discovery 可能无法正常工作）
+        if let p1: PeerID = syncManager1.p2pNode.peerID,
+            let p2: PeerID = syncManager2.p2pNode.peerID,
+            let port1 = syncManager1.p2pNode.signalingPort,
+            let port2 = syncManager2.p2pNode.signalingPort
+        {
+
+            // 使用实际端口地址
+            let addr1 = Multiaddr(string: "/ip4/127.0.0.1/tcp/\(port1)")!
+            let addr2 = Multiaddr(string: "/ip4/127.0.0.1/tcp/\(port2)")!
+
+            // 客户端2 注册 客户端1
+            syncManager2.peerManager.addOrUpdatePeer(p1, addresses: [addr1])
+            syncManager2.p2pNode.registrationService.registerPeer(peerID: p1, addresses: [addr1])
+            syncManager2.peerManager.updateOnlineStatus(p1.b58String, isOnline: true)
+            syncManager2.peerManager.updateSyncIDs(p1.b58String, syncIDs: [syncID!])
+
+            // 客户端1 注册 客户端2
+            syncManager1.peerManager.addOrUpdatePeer(p2, addresses: [addr2])
+            syncManager1.p2pNode.registrationService.registerPeer(peerID: p2, addresses: [addr2])
+            syncManager1.peerManager.updateOnlineStatus(p2.b58String, isOnline: true)
+            syncManager1.peerManager.updateSyncIDs(p2.b58String, syncIDs: [syncID!])
+        }
+
         // 添加文件夹
         let folder1 = TestHelpers.createTestSyncFolder(syncID: syncID, localPath: tempDir1)
         syncManager1.addFolder(folder1)

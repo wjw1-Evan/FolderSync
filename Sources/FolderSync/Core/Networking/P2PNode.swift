@@ -14,6 +14,8 @@ public class P2PNode: NSObject {
 
     // My PeerID (Backing property)
     public private(set) var peerID: PeerID?
+    /// The actual port the signaling server is listening on
+    public private(set) var signalingPort: UInt16?
 
     // PeerID, Addresses, SyncIDs
     public var onPeerDiscovered: ((PeerID, [String], [String]) -> Void)?
@@ -93,6 +95,7 @@ public class P2PNode: NSObject {
 
         // Start TCP Signaling Server (Port for exchanging SDP)
         let signalingPort = try signaling.startServer()
+        self.signalingPort = signalingPort
         AppLogger.syncPrint("[P2PNode] ✅ Signaling Server started on port: \(signalingPort)")
 
         // Setup LAN Discovery

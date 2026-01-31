@@ -128,7 +128,7 @@ public class WebRTCManager: NSObject {
 
         // 1. 立即检查
         if isDataChannelReady(for: peerID) {
-            AppLogger.syncPrint("[WebRTC] ✅ DataChannel already ready for \(peerID.prefix(8))")
+            // 已就绪，不再打印日志以减少大量点对点传输时的日志量
             return true
         }
 

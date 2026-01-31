@@ -31,7 +31,7 @@ class FolderMonitor {
             // 文件变化时直接触发统计
             Task { @MainActor in
                 if let updatedFolder = syncManager.folders.first(where: { $0.id == folder.id }) {
-                    syncManager.recordLocalChange(
+                    await syncManager.recordLocalChange(
                         for: updatedFolder, absolutePath: path, flags: flags)
                     syncManager.refreshFileCount(for: updatedFolder)
                 }

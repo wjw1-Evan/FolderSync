@@ -1,10 +1,12 @@
-import Foundation
 import Crypto
+import Foundation
 
 /// 在写入文件前准备路径，处理「同名文件/目录」冲突（如 same_name 既是文件又是目录）
 /// - 若目标路径已存在且为目录，则删除（将以文件覆盖）
 /// - 若父路径或祖先路径已存在且为文件，则删除（将创建为目录）
-func preparePathForWritingFile(fileURL: URL, baseDir: URL, fileManager: FileManager = .default) throws {
+func preparePathForWritingFile(fileURL: URL, baseDir: URL, fileManager: FileManager = .default)
+    throws
+{
     // 1. 目标路径已存在且为目录 → 删除
     if fileManager.fileExists(atPath: fileURL.path) {
         var isDir: ObjCBool = false
@@ -59,7 +61,7 @@ extension SyncManager {
     }
 
     /// 流式计算文件哈希（避免一次性加载大文件到内存）
-    nonisolated func computeFileHash(fileURL: URL) throws -> String {
+    nonisolated func computeFileHash(fileURL: URL) async throws -> String {
         let fileHandle = try FileHandle(forReadingFrom: fileURL)
         defer { try? fileHandle.close() }
 
@@ -67,9 +69,17 @@ extension SyncManager {
         let bufferSize = 64 * 1024  // 64KB 缓冲区
 
         while true {
-            let data = fileHandle.readData(ofLength: bufferSize)
+            // 在循环中检查取消，并稍微释放线程
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+
+            let data = try fileHandle.read(upToCount: bufferSize) ?? Data()
             if data.isEmpty { break }
             hasher.update(data: data)
+
+            // 大文件计算时出让 CPU，避免长时间占用
+            await Task.yield()
         }
 
         let hash = hasher.finalize()
@@ -81,7 +91,7 @@ extension SyncManager {
     ) {
         return await folderStatistics.calculateFullState(for: folder)
     }
-    
+
     /// 通过 syncID 查找文件夹（异步辅助方法）
     /// - Parameter syncID: 同步 ID
     /// - Returns: 找到的文件夹，如果不存在则返回 nil

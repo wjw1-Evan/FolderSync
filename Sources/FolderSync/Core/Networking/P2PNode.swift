@@ -406,8 +406,10 @@ public class P2PNode: NSObject {
         // 确保连接已启动
         await ensureConnected(to: peerID)
 
-        // 先等待 DataChannel 就绪
-        AppLogger.syncPrint("[P2PNode] ⏳ Waiting for DataChannel to \(peerID.prefix(8))...")
+        // 仅在 DataChannel 未就绪时才打印等待日志
+        if !webRTC.isDataChannelReady(for: peerID) {
+            AppLogger.syncPrint("[P2PNode] ⏳ Waiting for DataChannel to \(peerID.prefix(8))...")
+        }
         let isReady = await webRTC.waitForDataChannelReady(for: peerID, timeout: 30.0)
         guard isReady else {
             // 在抛出异常前记录底层状态
@@ -605,8 +607,10 @@ extension P2PNode: WebRTCManagerDelegate {
                         )
                     }
 
-                    // 确保 DataChannel 就绪后再发送响应
-                    _ = await self.webRTC.waitForDataChannelReady(for: peerID, timeout: 5.0)
+                    // 确保 DataChannel 就绪后再发送响应（仅在未就绪时等待并记录）
+                    if !self.webRTC.isDataChannelReady(for: peerID) {
+                        _ = await self.webRTC.waitForDataChannelReady(for: peerID, timeout: 5.0)
+                    }
                     try await self.webRTC.sendData(responseFrameData, to: peerID)
                 } catch {
                     AppLogger.syncPrint("[P2PNode] ❌ Handler error for req \(frame.id): \(error)")

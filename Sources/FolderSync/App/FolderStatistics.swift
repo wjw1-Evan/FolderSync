@@ -139,6 +139,10 @@ class FolderStatistics {
         var totalSize: Int64 = 0
         let fileManager = FileManager.default
 
+        // 优化：获取上个版本的元数据缓存，用于快速指纹比对
+        // 这里可以直接使用 syncManager 的缓存，它是持久化的结果
+        let lastMetadata = syncManager.lastKnownMetadata[syncID] ?? [:]
+
         // 先收集所有文件路径（避免在枚举过程中处理）
         var filePaths: [(URL, String)] = []
         let resourceKeys: [URLResourceKey] = [
@@ -244,8 +248,21 @@ class FolderStatistics {
                             fileSize = size
                         }
 
+                        // 增量哈希优化：检查文件元数据的指纹（mtime）是否变化
+                        // 我们在这里不仅比较 mtime，还可以进一步确保 vectorClock 的一致性
+                        if let cached = lastMetadata[relativePath],
+                            abs(cached.mtime.timeIntervalSince(mtime)) < 0.001
+                        {
+                            // 指纹匹配，复用已有的哈希值，跳过昂贵的 IO 计算
+                            return (
+                                relativePath,
+                                FileMetadata(hash: cached.hash, mtime: mtime, vectorClock: vc),
+                                fileSize
+                            )
+                        }
+
                         // 使用流式哈希计算（避免大文件一次性加载到内存）
-                        let hash = try self.computeFileHash(fileURL: fileURL)
+                        let hash = try await syncManager.computeFileHash(fileURL: fileURL)
 
                         return (
                             relativePath, FileMetadata(hash: hash, mtime: mtime, vectorClock: vc),
@@ -273,23 +290,7 @@ class FolderStatistics {
         return (mst, metadata, folderCount, totalSize)
     }
 
-    /// 流式计算文件哈希（避免一次性加载大文件到内存）
-    nonisolated private func computeFileHash(fileURL: URL) throws -> String {
-        let fileHandle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? fileHandle.close() }
+    /// 已删除：computeFileHash 移到了 SyncManagerUtilities.swift，避免重复定义
+    /// 并且现在的实现是异步的。
 
-        var hasher = SHA256()
-        let bufferSize = 64 * 1024  // 64KB 缓冲区
-
-        while true {
-            let data = fileHandle.readData(ofLength: bufferSize)
-            if data.isEmpty {
-                break
-            }
-            hasher.update(data: data)
-        }
-
-        let hash = hasher.finalize()
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
-    }
 }

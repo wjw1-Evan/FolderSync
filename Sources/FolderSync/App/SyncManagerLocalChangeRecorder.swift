@@ -6,7 +6,7 @@ import Foundation
 extension SyncManager {
     func recordLocalChange(
         for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags
-    ) {
+    ) async {
         // macOS 上 `/var` 是 `/private/var` 的符号链接，FSEvents 可能返回不同前缀。
         // 这里统一做路径规范化，避免出现类似 "private/xxx" 的错误相对路径，进而导致同步找不到文件。
         let basePath = folder.localPath.resolvingSymlinksInPath().standardizedFileURL.path
@@ -142,6 +142,16 @@ extension SyncManager {
             }
         }
 
+        // 内部缓存哈希计算结果，避免在同一个函数中多次重复计算 IO
+        var cachedHash: String? = nil
+        let getHash = { () async throws -> String in
+            if let h = cachedHash { return h }
+            let h = try await self.computeFileHash(
+                fileURL: URL(fileURLWithPath: canonicalAbsolutePath))
+            cachedHash = h
+            return h
+        }
+
         // 去重检查：短时间内的重复事件通常可忽略，但“创建→写入完成”的场景可能在 1 秒内发生多次变更。
         // 若内容哈希已发生变化，则不应去重，否则会导致 VectorClock 未更新、进而被误判为冲突（VC 相等但 hash 不同）。
         let changeKey = "\(folder.syncID):\(relativePath)"
@@ -149,19 +159,28 @@ extension SyncManager {
             now.timeIntervalSince(lastProcessed) < changeDeduplicationWindow
         {
             if exists, let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
-                let currentHash =
-                    (try? computeFileHash(fileURL: URL(fileURLWithPath: canonicalAbsolutePath)))
-                    ?? knownMeta.hash
+                // 指纹优化：如果 mtime 没变，认为哈希也没变
+                let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
+                let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
+
+                if abs(knownMeta.mtime.timeIntervalSince(mtime)) < 0.001 {
+                    AppLogger.syncPrint(
+                        "[recordLocalChange] ⏭️ 跳过重复事件（mtime 未变）: \(relativePath)"
+                    )
+                    return
+                }
+
+                let currentHash = (try? await getHash()) ?? knownMeta.hash
                 if currentHash == knownMeta.hash {
                     AppLogger.syncPrint(
-                        "[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)"
+                        "[recordLocalChange] ⏭️ 跳过重复事件（哈希未变）: \(relativePath)"
                     )
                     return
                 }
                 // 哈希不同：允许继续处理该事件（避免漏记真实变更）
             } else {
                 AppLogger.syncPrint(
-                    "[recordLocalChange] ⏭️ 跳过重复事件（去重）: \(relativePath) (距离上次处理 \(String(format: "%.2f", now.timeIntervalSince(lastProcessed))) 秒)"
+                    "[recordLocalChange] ⏭️ 跳过重复事件（近期已处理且无基准元数据）: \(relativePath)"
                 )
                 return
             }
@@ -311,8 +330,7 @@ extension SyncManager {
                 AppLogger.syncPrint(
                     "[recordLocalChange] 📊 找到已知元数据，哈希值: \(knownMeta.hash.prefix(16))...")
                 do {
-                    let fileURL = URL(fileURLWithPath: absolutePath)
-                    let currentHash = try computeFileHash(fileURL: fileURL)
+                    let currentHash = try await getHash()
                     AppLogger.syncPrint(
                         "[recordLocalChange] 📊 当前文件哈希值: \(currentHash.prefix(16))...")
 
@@ -391,8 +409,7 @@ extension SyncManager {
         if !isKnownPath {
             // 计算当前文件的哈希值
             do {
-                let fileURL = URL(fileURLWithPath: absolutePath)
-                let currentHash = try computeFileHash(fileURL: fileURL)
+                let currentHash = try await getHash()
 
                 // 检查是否有待处理的重命名操作（旧文件哈希值匹配）
                 // 重要：如果新文件设置了 Renamed 标志，应该优先检查 pendingRenames
@@ -576,8 +593,7 @@ extension SyncManager {
             // 计算并保存元数据
             if exists {
                 do {
-                    let fileURL = URL(fileURLWithPath: canonicalAbsolutePath)
-                    let hash = try computeFileHash(fileURL: fileURL)
+                    let hash = try await getHash()
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
 
@@ -598,8 +614,7 @@ extension SyncManager {
             // 修改：更新元数据
             if exists {
                 do {
-                    let fileURL = URL(fileURLWithPath: canonicalAbsolutePath)
-                    let hash = try computeFileHash(fileURL: fileURL)
+                    let hash = try await getHash()
                     let attrs = try? fileManager.attributesOfItem(atPath: canonicalAbsolutePath)
                     let mtime = (attrs?[.modificationDate] as? Date) ?? Date()
 

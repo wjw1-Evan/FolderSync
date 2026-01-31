@@ -1731,6 +1731,10 @@ class SyncEngine {
             } catch {
                 AppLogger.syncPrint("[SyncEngine] ⚠️ 无法保存同步日志: \(error)")
             }
+
+            // 重要：即使同步失败也设置冷却时间，防止在高频广播或错误重试中陷入持续同步的任务风暴
+            let cooldownKey = "\(peerID):\(syncID)"
+            syncManager.peerSyncCooldown[cooldownKey] = Date()
         }
     }
 

@@ -203,6 +203,14 @@ public class SyncManager: ObservableObject {
                         // Always update addresses if provided
                         self.peerManager.addOrUpdatePeer(peer, addresses: multiaddrs)
                     }
+
+                    // 关键修复：在发现 peer 时就注册到 registrationService
+                    // 这样后续的 triggerSync 才能找到已注册的 peer
+                    if !multiaddrs.isEmpty {
+                        self.p2pNode.registrationService.registerPeer(
+                            peerID: peer, addresses: multiaddrs)
+                    }
+
                     // 更新在线状态（无论新旧 peer 都需要更新）
                     // 收到广播表示设备在线，更新 lastSeenTime 和在线状态
 

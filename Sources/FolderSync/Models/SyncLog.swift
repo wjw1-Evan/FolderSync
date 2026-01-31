@@ -26,6 +26,7 @@ public struct SyncLog: Identifiable, Codable {
             case download
             case delete
             case conflict
+            case create
         }
 
         public init(

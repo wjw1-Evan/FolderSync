@@ -1425,6 +1425,50 @@ class SyncEngine {
 
                         switch kind {
                         case .normal:
+                            // 检查是否是目录
+                            if remoteMeta.isDirectory {
+                                do {
+                                    let dirURL = latestFolder.localPath.appendingPathComponent(path)
+                                    let fm = FileManager.default
+
+                                    if !fm.fileExists(atPath: dirURL.path) {
+                                        try fm.createDirectory(
+                                            at: dirURL, withIntermediateDirectories: true,
+                                            attributes: nil)
+
+                                        // 设置 mtime
+                                        let attributes = [
+                                            FileAttributeKey.modificationDate: remoteMeta.mtime
+                                        ]
+                                        try fm.setAttributes(attributes, ofItemAtPath: dirURL.path)
+                                    }
+
+                                    // 保存 Vector Clock
+                                    if let vc = remoteMeta.vectorClock {
+                                        VectorClockManager.saveVectorClock(
+                                            folderID: folderID, syncID: syncID, path: path, vc: vc)
+                                    }
+
+                                    let fileName = (path as NSString).lastPathComponent
+                                    let pathDir = (path as NSString).deletingLastPathComponent
+                                    let folderName =
+                                        pathDir.isEmpty
+                                        ? nil : (pathDir as NSString).lastPathComponent
+
+                                    return (
+                                        0,
+                                        SyncLog.SyncedFileInfo(
+                                            path: path, fileName: fileName, folderName: folderName,
+                                            size: 0, operation: .create)
+                                    )
+                                } catch {
+                                    AppLogger.syncPrint(
+                                        "[SyncEngine] ❌ 创建目录失败: \(path) - \(error.localizedDescription)"
+                                    )
+                                    return nil
+                                }
+                            }
+
                             let ft = await MainActor.run { self.fileTransfer }
                             guard let ft = ft else { return nil }
                             let localURL = latestFolder.localPath.appendingPathComponent(path)
@@ -1578,14 +1622,40 @@ class SyncEngine {
                                 return nil
                             }
 
-                            // 检查是否为目录，如果是目录则跳过（目录不应该被上传）
+                            // 检查是否为目录
                             var isDirectory: ObjCBool = false
                             if fileManager.fileExists(
                                 atPath: resolvedURL.path, isDirectory: &isDirectory),
                                 isDirectory.boolValue
                             {
-                                AppLogger.syncPrint("[SyncEngine] ⏭️ 跳过目录上传: \(path)")
-                                return nil
+                                // 发送创建目录请求
+                                let sm = await MainActor.run { self.syncManager }
+                                guard let sm = sm else { return nil }
+
+                                do {
+                                    let req = SyncRequest.createDirectory(
+                                        syncID: syncID, path: path,
+                                        vectorClock: localMeta.vectorClock)
+                                    let resp = try await sm.sendSyncRequest(
+                                        req, to: peer, peerID: peerID, folder: latestFolder)
+
+                                    if case .putAck = resp {
+                                        let fileName = (path as NSString).lastPathComponent
+                                        return (
+                                            0,
+                                            SyncLog.SyncedFileInfo(
+                                                path: path, fileName: fileName, folderName: nil,
+                                                size: 0, operation: .create)
+                                        )
+                                    } else {
+                                        AppLogger.syncPrint("[SyncEngine] ❌ 目录创建请求失败: \(path)")
+                                        return nil
+                                    }
+                                } catch {
+                                    AppLogger.syncPrint(
+                                        "[SyncEngine] ❌ 发送目录创建请求错误: \(path) - \(error)")
+                                    return nil
+                                }
                             }
 
                             guard fileManager.isReadableFile(atPath: resolvedURL.path) else {

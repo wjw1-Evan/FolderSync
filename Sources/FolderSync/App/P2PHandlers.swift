@@ -96,6 +96,40 @@ class P2PHandlers {
             return await handlePutFileData(
                 syncID: syncID, relativePath: relativePath, data: data, vectorClock: vectorClock)
 
+        case .createDirectory(let syncID, let relativePath, let vectorClock):
+            guard let folder = await syncManager.findFolder(by: syncID) else {
+                return .error("Folder not found")
+            }
+            let dirURL = folder.localPath.appendingPathComponent(relativePath)
+            let fileManager = FileManager.default
+
+            // 远端写入，立即使缓存失效
+            folderStatistics.invalidateCache(for: syncID)
+
+            // 标记同步写入冷却
+            syncManager.markSyncCooldown(syncID: syncID, path: relativePath)
+
+            do {
+                if !fileManager.fileExists(atPath: dirURL.path) {
+                    try fileManager.createDirectory(
+                        at: dirURL, withIntermediateDirectories: true, attributes: nil)
+                }
+
+                // 处理 Vector Clock
+                if let vc = vectorClock {
+                    let localVC = VectorClockManager.getVectorClock(
+                        folderID: folder.id, syncID: syncID, path: relativePath)
+                    let mergedVC = VectorClockManager.mergeVectorClocks(
+                        localVC: localVC, remoteVC: vc)
+                    VectorClockManager.saveVectorClock(
+                        folderID: folder.id, syncID: syncID, path: relativePath, vc: mergedVC)
+                }
+
+                return .putAck(syncID: syncID, path: relativePath)
+            } catch {
+                return .error("无法创建目录: \(error.localizedDescription)")
+            }
+
         case .deleteFiles(let syncID, let paths):
             return await handleDeleteFiles(syncID: syncID, paths: paths)
 

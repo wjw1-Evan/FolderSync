@@ -157,20 +157,47 @@ class FolderStatistics {
             do {
                 let canonicalFileURL = fileURL.resolvingSymlinksInPath().standardizedFileURL
 
-                // 先检查是否为目录，如果是目录则跳过（目录不应该被同步）
+                // 获取相对路径
+                // 通过标准化后的绝对路径计算相对路径，避免 replace 不匹配导致的 `private/...`
+                guard canonicalFileURL.path.hasPrefix(basePath) else { continue }
+                var relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
+                if relativePath.hasPrefix("/") { relativePath.removeFirst() }
+
+                if relativePath.isEmpty { continue }
+
+                // 检查是否为目录
                 var isDirectory: ObjCBool = false
                 guard
                     fileManager.fileExists(atPath: canonicalFileURL.path, isDirectory: &isDirectory)
                 else {
                     continue
                 }
+
+                if syncManager.isIgnored(relativePath, folder: folder) { continue }
+
                 if isDirectory.boolValue {
-                    // 目录：只统计数量，不添加到文件列表
-                    let relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                    if !relativePath.isEmpty {
-                        folderCount += 1
-                    }
+                    // 目录：统计数量并添加到元数据
+                    folderCount += 1
+
+                    // 获取目录属性 (mtime)
+                    let resourceValues = try canonicalFileURL.resourceValues(
+                        forKeys: Set(resourceKeys))
+                    let mtime = resourceValues.contentModificationDate ?? Date()
+                    let vc =
+                        VectorClockManager.getVectorClock(
+                            folderID: folder.id, syncID: syncID, path: relativePath)
+                        ?? VectorClock()
+
+                    // 创建目录元数据
+                    let dirMeta = FileMetadata(
+                        hash: "DIRECTORY",  // 固定哈希，支持重命名检测
+                        mtime: mtime,
+                        vectorClock: vc,
+                        isDirectory: true
+                    )
+
+                    metadata[relativePath] = dirMeta
+                    mst.insert(key: relativePath, value: dirMeta.hash)
                     continue
                 }
 
@@ -178,24 +205,9 @@ class FolderStatistics {
                     continue
                 }
 
-                let resourceValues = try canonicalFileURL.resourceValues(forKeys: Set(resourceKeys))
-
-                // 通过标准化后的绝对路径计算相对路径，避免 replace 不匹配导致的 `private/...`
-                guard canonicalFileURL.path.hasPrefix(basePath) else { continue }
-                var relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
-                if relativePath.hasPrefix("/") { relativePath.removeFirst() }
-
-                if syncManager.isIgnored(relativePath, folder: folder) { continue }
-
-                if resourceValues.isDirectory == true {
-                    if !relativePath.isEmpty {
-                        folderCount += 1
-                    }
-                } else {
-                    // 文件路径：排除冲突文件（冲突文件不应该被同步）
-                    if !ConflictFileFilter.isConflictFile(relativePath) {
-                        filePaths.append((canonicalFileURL, relativePath))
-                    }
+                // 文件路径：排除冲突文件（冲突文件不应该被同步）
+                if !ConflictFileFilter.isConflictFile(relativePath) {
+                    filePaths.append((canonicalFileURL, relativePath))
                 }
             } catch {
                 AppLogger.syncPrint("[FolderStatistics] ⚠️ 无法读取文件属性: \(fileURL.path) - \(error)")

@@ -5,6 +5,7 @@ public enum SyncRequest: Codable {
     case getFiles(syncID: String)
     case getFileData(syncID: String, path: String)
     case putFileData(syncID: String, path: String, data: Data, vectorClock: VectorClock?)
+    case createDirectory(syncID: String, path: String, vectorClock: VectorClock?)
     case deleteFiles(syncID: String, paths: [String: VectorClock?])
     // 块级别增量同步
     case getFileChunks(syncID: String, path: String)  // 获取文件的块列表
@@ -21,6 +22,7 @@ extension SyncRequest: CustomStringConvertible {
         case .getFiles(let id): return "getFiles(\(id))"
         case .getFileData(let id, let path): return "getFileData(\(id), \(path))"
         case .putFileData(let id, let path, _, _): return "putFileData(\(id), \(path))"
+        case .createDirectory(let id, let path, _): return "createDirectory(\(id), \(path))"
         case .deleteFiles(let id, let paths): return "deleteFiles(\(id), \(paths.count) files)"
         case .getFileChunks(let id, let path): return "getFileChunks(\(id), \(path))"
         case .getChunkData(let id, let hash): return "getChunkData(\(id), \(hash))"
@@ -35,11 +37,28 @@ public struct FileMetadata: Codable {
     public let hash: String
     public let mtime: Date
     public var vectorClock: VectorClock?
+    public var isDirectory: Bool = false
 
-    public init(hash: String, mtime: Date, vectorClock: VectorClock? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case hash, mtime, vectorClock, isDirectory
+    }
+
+    public init(
+        hash: String, mtime: Date, vectorClock: VectorClock? = nil, isDirectory: Bool = false
+    ) {
         self.hash = hash
         self.mtime = mtime
         self.vectorClock = vectorClock
+        self.isDirectory = isDirectory
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hash = try container.decode(String.self, forKey: .hash)
+        mtime = try container.decode(Date.self, forKey: .mtime)
+        vectorClock = try container.decodeIfPresent(VectorClock.self, forKey: .vectorClock)
+        // 使用 decodeIfPresent 并提供默认值 false，以兼容旧版本
+        isDirectory = try container.decodeIfPresent(Bool.self, forKey: .isDirectory) ?? false
     }
 }
 

@@ -34,6 +34,30 @@ final class FileOperationsSyncTests: TwoClientTestCase {
         }
     }
 
+    /// 测试添加空文件夹
+    func testAddFile_EmptyFolder() async throws {
+        // 创建空文件夹
+        let emptyDir = tempDir1.appendingPathComponent("empty_folder")
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+
+        // 等待 FSEvents 记录与同步
+        try await Task.sleep(nanoseconds: 6_000_000_000)  // 6秒
+
+        // 验证空文件夹已同步到客户端2
+        let syncedEmptyDir = tempDir2.appendingPathComponent("empty_folder")
+        let folderExists = await TestHelpers.waitForCondition(timeout: 28.0) {
+            TestHelpers.directoryExists(at: syncedEmptyDir)
+        }
+
+        XCTAssertTrue(folderExists, "空文件夹应该已同步到客户端2")
+
+        // 验证里面确实是空的
+        if folderExists {
+            let contents = try FileManager.default.contentsOfDirectory(atPath: syncedEmptyDir.path)
+            XCTAssertTrue(contents.isEmpty, "同步的文件夹应该是空的")
+        }
+    }
+
     /// 测试多客户端同时添加不同文件
     func testAddFile_MultipleClients() async throws {
         // 客户端1添加文件1

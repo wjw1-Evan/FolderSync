@@ -313,6 +313,7 @@ private struct SyncLogRow: View {
         case .download: return "arrow.down.circle.fill"
         case .delete: return "trash.circle.fill"
         case .conflict: return "exclamationmark.triangle.fill"
+        case .create: return "folder.badge.plus"
         }
     }
 
@@ -322,6 +323,7 @@ private struct SyncLogRow: View {
         case .download: return .green
         case .delete: return .red
         case .conflict: return .orange
+        case .create: return .purple
         }
     }
 }

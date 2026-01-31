@@ -8,7 +8,7 @@ class SyncEngine {
     weak var fileTransfer: FileTransfer?
     weak var folderStatistics: FolderStatistics?
 
-    private let chunkSyncThreshold: Int64 = 1 * 1024 * 1024  // 1MB，超过此大小的文件使用块级增量同步
+    private let chunkSyncThreshold: Int64 = 256 * 1024  // 256KB，超过此大小的文件使用块级增量同步
     private let maxConcurrentTransfers = 8  // 最大并发传输数（上传/下载）
 
     init(syncManager: SyncManager, fileTransfer: FileTransfer, folderStatistics: FolderStatistics) {

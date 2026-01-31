@@ -1,5 +1,5 @@
 import Foundation
-import WebRTC
+@preconcurrency import WebRTC
 
 @MainActor
 protocol WebRTCManagerDelegate: AnyObject {
@@ -15,6 +15,7 @@ protocol WebRTCManagerDelegate: AnyObject {
     func webRTCManager(_ manager: WebRTCManager, didReceiveData data: Data, from peerID: String)
 }
 
+@MainActor
 public class WebRTCManager: NSObject {
     private let factory: RTCPeerConnectionFactory
     // peerID -> RTCPeerConnection
@@ -26,7 +27,6 @@ public class WebRTCManager: NSObject {
     private class Waiter {
         let continuation: CheckedContinuation<Bool, Never>
         private var _hasResumed = false
-        private let lock = NSLock()
 
         init(_ continuation: CheckedContinuation<Bool, Never>) {
             self.continuation = continuation
@@ -35,27 +35,20 @@ public class WebRTCManager: NSObject {
         /// 尝试 resume continuation，如果已经 resumed 则返回 false
         /// 这是线程安全的
         func tryResume(returning result: Bool) -> Bool {
-            lock.lock()
             if _hasResumed {
-                lock.unlock()
                 return false
             }
             _hasResumed = true
-            lock.unlock()
             continuation.resume(returning: result)
             return true
         }
 
         var hasResumed: Bool {
-            lock.lock()
-            defer { lock.unlock() }
             return _hasResumed
         }
     }
     // peerID -> Continuations waiting for connection
     private var pendingReadyContinuations: [String: [Waiter]] = [:]
-
-    private let lock = NSLock()
 
     weak var delegate: WebRTCManagerDelegate?
 
@@ -83,14 +76,12 @@ public class WebRTCManager: NSObject {
     }
 
     public func stop() {
-        lock.lock()
         let pcValues = Array(peerConnections.values)
         let dcValues = Array(dataChannels.values)
         let peerIDs = Array(peerConnections.keys)
         peerConnections.removeAll()
         dataChannels.removeAll()
         pcToPeerID.removeAll()
-        lock.unlock()
 
         for peerID in peerIDs {
             resumeContinuations(for: peerID, result: false)
@@ -105,21 +96,15 @@ public class WebRTCManager: NSObject {
     }
 
     public func hasConnection(for peerID: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
         return peerConnections[peerID] != nil
     }
 
     public func getPeerConnection(for peerID: String) -> RTCPeerConnection? {
-        lock.lock()
-        defer { lock.unlock() }
         return peerConnections[peerID]
     }
 
     /// 检查 DataChannel 是否就绪（已打开）
     public func isDataChannelReady(for peerID: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
         guard let dc = dataChannels[peerID] else { return false }
         return dc.readyState == .open
     }
@@ -139,10 +124,8 @@ public class WebRTCManager: NSObject {
         }
 
         // 2. 检查是否有对应的 PeerConnection
-        lock.lock()
         let pc = peerConnections[peerID]
         let initialState = pc?.iceConnectionState
-        lock.unlock()
 
         if pc == nil {
             AppLogger.syncPrint(
@@ -169,14 +152,12 @@ public class WebRTCManager: NSObject {
             // 安全的 resume 辅助函数，使用 Waiter.tryResume() 确保只 resume 一次
             func safeResume(result: Bool, reason: String) {
                 // 从等待列表中移除（无论是否成功 resume）
-                self.lock.lock()
                 if var currentList = self.pendingReadyContinuations[peerID],
                     let index = currentList.firstIndex(where: { $0 === waiter })
                 {
                     currentList.remove(at: index)
                     self.pendingReadyContinuations[peerID] = currentList
                 }
-                self.lock.unlock()
 
                 // 尝试 resume，如果已经被 resume 过则返回 false
                 if waiter.tryResume(returning: result) {
@@ -188,10 +169,8 @@ public class WebRTCManager: NSObject {
             }
 
             // 添加到等待列表（用于事件驱动的通知）
-            lock.lock()
             // 再次检查就绪状态（在锁内检查以避免竞态）
             if let dc = dataChannels[peerID], dc.readyState == .open {
-                lock.unlock()
                 safeResume(result: true, reason: "already open (rechecked)")
                 return
             }
@@ -199,7 +178,6 @@ public class WebRTCManager: NSObject {
             var list = pendingReadyContinuations[peerID] ?? []
             list.append(waiter)
             pendingReadyContinuations[peerID] = list
-            lock.unlock()
 
             // 启动主动轮询任务
             Task {
@@ -222,11 +200,9 @@ public class WebRTCManager: NSObject {
                     }
 
                     // 检查 ICE 连接状态
-                    self.lock.lock()
                     let currentPC = self.peerConnections[peerID]
                     let currentState = currentPC?.iceConnectionState
                     let dcState = self.dataChannels[peerID]?.readyState
-                    self.lock.unlock()
 
                     // 如果 PeerConnection 已被移除，终止等待
                     if currentPC == nil {
@@ -256,21 +232,17 @@ public class WebRTCManager: NSObject {
     }
 
     private func resumeContinuations(for peerID: String, result: Bool, onlyOne: Bool = false) {
-        lock.lock()
         guard var list = pendingReadyContinuations[peerID], !list.isEmpty else {
-            lock.unlock()
             return
         }
 
         if onlyOne {
             let first = list.removeFirst()
             pendingReadyContinuations[peerID] = list
-            lock.unlock()
             // 使用 tryResume 确保只 resume 一次
             _ = first.tryResume(returning: result)
         } else {
             pendingReadyContinuations[peerID] = []
-            lock.unlock()
             for waiter in list {
                 // 使用 tryResume 确保只 resume 一次
                 _ = waiter.tryResume(returning: result)
@@ -303,12 +275,10 @@ public class WebRTCManager: NSObject {
         let dcConfig = RTCDataChannelConfiguration()
         if let dc = peerConnection.dataChannel(forLabel: "sync-data", configuration: dcConfig) {
             dc.delegate = self
-            lock.lock()
             self.dataChannels[peerID] = dc
-            lock.unlock()
         }
 
-        peerConnection.offer(for: constraints) { [weak self] sdp, error in
+        peerConnection.offer(for: constraints) { sdp, error in
             guard let sdp = sdp else { return }
             peerConnection.setLocalDescription(sdp) { error in
                 if error == nil {
@@ -327,9 +297,7 @@ public class WebRTCManager: NSObject {
         let rtcSdp = sessionDescription.rtcSessionDescription
 
         // 检查是否存在现有的 PeerConnection
-        lock.lock()
         var peerConnection = peerConnections[peerID]
-        lock.unlock()
 
         if peerConnection == nil {
             // 被动方 (Answerer) 初始化
@@ -362,8 +330,7 @@ public class WebRTCManager: NSObject {
             if rtcSdp.type == .offer {
                 let constraints = RTCMediaConstraints(
                     mandatoryConstraints: nil, optionalConstraints: nil)
-                pc.answer(for: constraints) {
-                    [weak self] (sdp: RTCSessionDescription?, error: Error?) in
+                pc.answer(for: constraints) { (sdp: RTCSessionDescription?, error: Error?) in
                     guard let sdp = sdp else { return }
                     pc.setLocalDescription(sdp) { error in
                         if error == nil {
@@ -378,18 +345,14 @@ public class WebRTCManager: NSObject {
     }
 
     func handleRemoteCandidate(_ candidate: IceCandidate, from peerID: String) {
-        lock.lock()
         let pc = peerConnections[peerID]
-        lock.unlock()
 
         guard let pc = pc else { return }
-        pc.add(candidate.rtcIceCandidate)
+        pc.addIceCandidate(candidate.rtcIceCandidate, completionHandler: nil)
     }
 
     func sendData(_ data: Data, to peerID: String) async throws {
-        lock.lock()
         let dc = dataChannels[peerID]
-        lock.unlock()
 
         guard let dc = dc else {
             throw NSError(
@@ -405,26 +368,39 @@ public class WebRTCManager: NSObject {
                 ])
         }
 
-        // Flow control: If buffer is too full (> 2MB), wait until it's sent
+        // Flow control: If buffer is too full (> 512KB), wait until it's sent
         var waitCount = 0
-        while dc.bufferedAmount > 2 * 1024 * 1024 {
-            try await Task.sleep(nanoseconds: 100 * 1_000_000)  // 100ms
+        while dc.bufferedAmount > 512 * 1024 {
+            try await Task.sleep(nanoseconds: 50 * 1_000_000)  // 50ms
             waitCount += 1
-            if waitCount > 100 {  // 10s timeout for flow control
+            if waitCount > 100 {  // 5s timeout for flow control
                 AppLogger.syncPrint(
-                    "[WebRTC] ⚠️ Flow control timeout, buffer still full for \(peerID.prefix(8))")
+                    "[WebRTC] ⚠️ Flow control timeout, buffer still full (\(dc.bufferedAmount) bytes) for \(peerID.prefix(8))"
+                )
                 break
             }
+        }
+
+        guard dc.readyState == .open else {
+            throw NSError(
+                domain: "WebRTCManager", code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "DataChannel closed during wait: \(dc.readyState.rawValue)"
+                ])
         }
 
         let buffer = RTCDataBuffer(data: data, isBinary: true)
         let success = dc.sendData(buffer)
         if !success {
+            AppLogger.syncPrint(
+                "[WebRTC] ❌ Failed to send \(data.count) bytes to \(peerID.prefix(8)). State: \(dc.readyState.rawValue), Buffered: \(dc.bufferedAmount)"
+            )
             throw NSError(
                 domain: "WebRTCManager", code: -2,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Failed to send data via DataChannel (buffer full or channel closed)"
+                        "Failed to send data via DataChannel (buffer full or channel closed). Size: \(data.count)"
                 ])
         }
     }
@@ -434,20 +410,17 @@ public class WebRTCManager: NSObject {
     private var pcToPeerID: [ObjectIdentifier: String] = [:]
 
     private func register(peerConnection: RTCPeerConnection, for peerID: String) {
-        lock.lock()
-        defer { lock.unlock() }
         peerConnections[peerID] = peerConnection
         pcToPeerID[ObjectIdentifier(peerConnection)] = peerID
     }
 
     public func removeConnection(for peerID: String) {
-        lock.lock()
         let pc = peerConnections.removeValue(forKey: peerID)
-        let dc = dataChannels.removeValue(forKey: peerID)
+        _ = dataChannels.removeValue(forKey: peerID)
         if let pc = pc {
             pcToPeerID.removeValue(forKey: ObjectIdentifier(pc))
         }
-        lock.unlock()
+    }
 
         dc?.close()
         pc?.close()
@@ -456,15 +429,13 @@ public class WebRTCManager: NSObject {
     }
 
     private func getPeerID(for peerConnection: RTCPeerConnection) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
         return pcToPeerID[ObjectIdentifier(peerConnection)]
     }
 }
 
 // MARK: - Delegates
 
-extension WebRTCManager: RTCPeerConnectionDelegate {
+extension WebRTCManager: @preconcurrency RTCPeerConnectionDelegate {
     public func peerConnection(
         _ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState
     ) {}
@@ -521,9 +492,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
             "[WebRTC] 📥 DataChannel Received: \(dataChannel.label) from \(peerID.prefix(8)), state: \(dataChannel.readyState.rawValue)"
         )
         dataChannel.delegate = self
-        lock.lock()
         self.dataChannels[peerID] = dataChannel
-        lock.unlock()
 
         // 如果收到时已经是 open 状态，立即通知等待者
         if dataChannel.readyState == .open {
@@ -532,18 +501,16 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     }
 }
 
-extension WebRTCManager: RTCDataChannelDelegate {
+extension WebRTCManager: @preconcurrency RTCDataChannelDelegate {
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         // Find which peer this belongs to
         var currentPeerID: String?
-        lock.lock()
         for (pid, dc) in dataChannels {
             if dc === dataChannel {
                 currentPeerID = pid
                 break
             }
         }
-        lock.unlock()
 
         let peerLabel = currentPeerID?.prefix(8) ?? "unknown"
         AppLogger.syncPrint(
@@ -574,14 +541,12 @@ extension WebRTCManager: RTCDataChannelDelegate {
         // We'd need to map DataChannel -> PeerID as well if we have many.
         // For now, simpler scan:
         var peerID: String?
-        lock.lock()
         for (pid, dc) in dataChannels {
             if dc === dataChannel {
                 peerID = pid
                 break
             }
         }
-        lock.unlock()
 
         if let peerID = peerID {
             DispatchQueue.main.async { [weak self] in

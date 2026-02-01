@@ -5,7 +5,20 @@ import SwiftUI
 
 @MainActor
 public class SyncManager: ObservableObject {
-    @Published var folders: [SyncFolder] = []
+    /// 是否有任何文件夹正在同步 (Explicit Published property for reliable UI updates)
+    @Published var isSyncing: Bool = false
+
+    @Published var folders: [SyncFolder] = [] {
+        didSet {
+            let newState = folders.contains { $0.status == .syncing }
+            if newState != isSyncing {
+                isSyncing = newState
+                #if DEBUG
+                    print("[SyncManager] 🔄 Menu Bar Animation State: \(isSyncing ? "ON" : "OFF")")
+                #endif
+            }
+        }
+    }
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
     @Published var uploadSpeedHistory: [Double] = Array(repeating: 0, count: 60)
@@ -26,11 +39,6 @@ public class SyncManager: ObservableObject {
 
     // 兼容性：提供 peers 属性（从 peerManager 获取）
     @Published var peers: [PeerID] = []
-
-    /// 是否有任何文件夹正在同步
-    public var isSyncing: Bool {
-        folders.contains { $0.status == .syncing }
-    }
 
     // 速度统计
     var uploadSamples: [(Date, Int64)] = []

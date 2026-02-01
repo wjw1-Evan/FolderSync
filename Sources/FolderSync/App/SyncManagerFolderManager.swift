@@ -296,38 +296,54 @@ extension SyncManager {
 
     func addPendingTransfers(_ count: Int, direction: SyncLog.Direction) {
         guard count > 0 else { return }
-        switch direction {
-        case .upload:
-            pendingUploadCount += count
-        case .download:
-            pendingDownloadCount += count
-        case .bidirectional:
-            // 理论上不会出现，作为兜底
-            break
+
+        Task { @MainActor in
+            switch direction {
+            case .upload:
+                self.pendingUploadCount += count
+                AppLogger.syncPrint(
+                    "[SyncManager] 📈 Pending Uploads Increased: +\(count) -> \(self.pendingUploadCount)"
+                )
+            case .download:
+                self.pendingDownloadCount += count
+                AppLogger.syncPrint(
+                    "[SyncManager] 📉 Pending Downloads Increased: +\(count) -> \(self.pendingDownloadCount)"
+                )
+            case .bidirectional:
+                // 理论上不会出现，作为兜底
+                break
+            }
         }
     }
 
     func completePendingTransfers(_ count: Int = 1, direction: SyncLog.Direction) {
         guard count > 0 else { return }
-        switch direction {
-        case .upload:
-            pendingUploadCount = max(0, pendingUploadCount - count)
-        case .download:
-            pendingDownloadCount = max(0, pendingDownloadCount - count)
-        case .bidirectional:
-            break
+
+        Task { @MainActor in
+            switch direction {
+            case .upload:
+                self.pendingUploadCount = max(0, self.pendingUploadCount - count)
+            // AppLogger.syncPrint("[SyncManager] 📤 Upload Completed: -\(count) -> \(self.pendingUploadCount)")
+            case .download:
+                self.pendingDownloadCount = max(0, self.pendingDownloadCount - count)
+            // AppLogger.syncPrint("[SyncManager] 📥 Download Completed: -\(count) -> \(self.pendingDownloadCount)")
+            case .bidirectional:
+                break
+            }
         }
     }
 
     func resetPendingTransfers(direction: SyncLog.Direction) {
-        switch direction {
-        case .upload:
-            pendingUploadCount = 0
-        case .download:
-            pendingDownloadCount = 0
-        case .bidirectional:
-            pendingUploadCount = 0
-            pendingDownloadCount = 0
+        Task { @MainActor in
+            switch direction {
+            case .upload:
+                self.pendingUploadCount = 0
+            case .download:
+                self.pendingDownloadCount = 0
+            case .bidirectional:
+                self.pendingUploadCount = 0
+                self.pendingDownloadCount = 0
+            }
         }
     }
 }

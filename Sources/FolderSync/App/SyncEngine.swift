@@ -282,6 +282,15 @@ class SyncEngine {
 
             if let error = lastError {
                 let errorString = String(describing: error)
+                let isUnreachable =
+                    (error as NSError).code == -3 || errorString.contains("DataChannel not ready")
+
+                if isUnreachable {
+                    // 对于无法访问的情况，我们已经在重试循环中打印了 ℹ️ 日志，这里直接退出即可
+                    // 不需要更新文件夹状态为 .error，因为这被视为常规网络波动
+                    return
+                }
+
                 AppLogger.syncPrint("[SyncEngine] ❌ [performSync] WebRTC 请求最终失败: \(errorString)")
 
                 syncManager.updateFolderStatus(

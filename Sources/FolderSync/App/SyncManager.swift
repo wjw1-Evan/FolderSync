@@ -27,6 +27,11 @@ public class SyncManager: ObservableObject {
     // 兼容性：提供 peers 属性（从 peerManager 获取）
     @Published var peers: [PeerID] = []
 
+    /// 是否有任何文件夹正在同步
+    public var isSyncing: Bool {
+        folders.contains { $0.status == .syncing }
+    }
+
     // 速度统计
     var uploadSamples: [(Date, Int64)] = []
     var downloadSamples: [(Date, Int64)] = []

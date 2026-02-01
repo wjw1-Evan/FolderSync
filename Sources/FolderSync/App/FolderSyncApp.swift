@@ -92,7 +92,7 @@ struct FolderSyncApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("FolderSync", systemImage: "arrow.triangle.2.circlepath") {
+        MenuBarExtra {
             Button(LocalizedString.showMainWindow) {
                 // 将应用设置为常规模式，显示 Dock 图标和菜单栏
                 NSApplication.shared.setActivationPolicy(.regular)
@@ -135,6 +135,15 @@ struct FolderSyncApp: App {
             }
             Button(LocalizedString.quit) {
                 quitApplication()
+            }
+        } label: {
+            if #available(macOS 15.0, *) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .symbolEffect(.rotate, isActive: syncManager.isSyncing)
+            } else {
+                // macOS 14.0 fallback: 使用变色效果表示正在同步
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .symbolEffect(.variableColor.iterative, isActive: syncManager.isSyncing)
             }
         }
 

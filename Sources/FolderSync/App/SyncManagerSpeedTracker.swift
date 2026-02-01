@@ -7,19 +7,9 @@ extension SyncManager {
         pendingUploadBytes += n
         let now = Date()
         if now.timeIntervalSince(lastUploadUpdate) > 0.1 || pendingUploadBytes > 1024 * 1024 {
-            // Commit pending bytes to samples
-            // 使用当前 pendingBytes 作为样本值（这段时间内的增量）
             uploadSamples.append((now, pendingUploadBytes))
-
-            // 重置待处理
             pendingUploadBytes = 0
             lastUploadUpdate = now
-
-            // 计算速度
-            let cutoff = now.addingTimeInterval(-speedWindow)
-            uploadSamples.removeAll { $0.0 < cutoff }
-            let sum = uploadSamples.reduce(Int64(0)) { $0 + $1.1 }
-            uploadSpeedBytesPerSec = Double(sum) / speedWindow
         }
     }
 
@@ -27,18 +17,50 @@ extension SyncManager {
         pendingDownloadBytes += n
         let now = Date()
         if now.timeIntervalSince(lastDownloadUpdate) > 0.1 || pendingDownloadBytes > 1024 * 1024 {
-            // Commit pending bytes to samples
             downloadSamples.append((now, pendingDownloadBytes))
-
-            // 重置待处理
             pendingDownloadBytes = 0
             lastDownloadUpdate = now
+        }
+    }
 
-            // 计算速度
-            let cutoff = now.addingTimeInterval(-speedWindow)
-            downloadSamples.removeAll { $0.0 < cutoff }
-            let sum = downloadSamples.reduce(Int64(0)) { $0 + $1.1 }
-            downloadSpeedBytesPerSec = Double(sum) / speedWindow
+    /// 每秒调用一次，更新当前速度和历史纪录
+    func updateSpeedHistory() {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-speedWindow)
+
+        // 更新上传速度
+        uploadSamples.removeAll { $0.0 < cutoff }
+        let uploadSum = uploadSamples.reduce(Int64(0)) { $0 + $1.1 }
+        let currentUploadSpeed = Double(uploadSum) / speedWindow
+        uploadSpeedBytesPerSec = currentUploadSpeed
+
+        // 更新上传历史
+        uploadSpeedHistory.append(currentUploadSpeed)
+        if uploadSpeedHistory.count > 60 {
+            uploadSpeedHistory.removeFirst()
+        }
+
+        // 更新下载速度
+        downloadSamples.removeAll { $0.0 < cutoff }
+        let downloadSum = downloadSamples.reduce(Int64(0)) { $0 + $1.1 }
+        let currentDownloadSpeed = Double(downloadSum) / speedWindow
+        downloadSpeedBytesPerSec = currentDownloadSpeed
+
+        // 更新下载历史
+        downloadSpeedHistory.append(currentDownloadSpeed)
+        if downloadSpeedHistory.count > 60 {
+            downloadSpeedHistory.removeFirst()
+        }
+
+        // 更新待处理文件数量历史
+        pendingUploadHistory.append(Double(pendingUploadCount))
+        if pendingUploadHistory.count > 60 {
+            pendingUploadHistory.removeFirst()
+        }
+
+        pendingDownloadHistory.append(Double(pendingDownloadCount))
+        if pendingDownloadHistory.count > 60 {
+            pendingDownloadHistory.removeFirst()
         }
     }
 }

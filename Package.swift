@@ -31,8 +31,7 @@ let package = Package(
                 "FolderSync",
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
-            path: "Tests/FolderSyncTests",
-            exclude: ["README.md"]
+            path: "Tests/FolderSyncTests"
         ),
     ]
 )

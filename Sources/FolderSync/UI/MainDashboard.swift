@@ -33,6 +33,9 @@ struct MainDashboard: View {
                                     Text(byteRate(syncManager.uploadSpeedBytesPerSec))
                                         .font(.subheadline)
                                         .fontWeight(.medium)
+                                    StatChartView(
+                                        history: syncManager.uploadSpeedHistory, color: .blue,
+                                        title: LocalizedString.upload)
                                 }
                             }
 
@@ -54,6 +57,9 @@ struct MainDashboard: View {
                                     Text(byteRate(syncManager.downloadSpeedBytesPerSec))
                                         .font(.subheadline)
                                         .fontWeight(.medium)
+                                    StatChartView(
+                                        history: syncManager.downloadSpeedHistory, color: .green,
+                                        title: LocalizedString.download)
                                 }
                             }
 
@@ -78,6 +84,9 @@ struct MainDashboard: View {
                                     .foregroundStyle(
                                         syncManager.pendingUploadCount > 0
                                             ? .orange : .secondary)
+                                    StatChartView(
+                                        history: syncManager.pendingUploadHistory, color: .orange,
+                                        title: LocalizedString.upload)
                                 }
                             }
 
@@ -102,6 +111,9 @@ struct MainDashboard: View {
                                     .foregroundStyle(
                                         syncManager.pendingDownloadCount > 0
                                             ? .orange : .secondary)
+                                    StatChartView(
+                                        history: syncManager.pendingDownloadHistory, color: .orange,
+                                        title: LocalizedString.download)
                                 }
                             }
 

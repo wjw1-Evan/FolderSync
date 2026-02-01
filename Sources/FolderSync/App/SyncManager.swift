@@ -8,6 +8,10 @@ public class SyncManager: ObservableObject {
     @Published var folders: [SyncFolder] = []
     @Published var uploadSpeedBytesPerSec: Double = 0
     @Published var downloadSpeedBytesPerSec: Double = 0
+    @Published var uploadSpeedHistory: [Double] = Array(repeating: 0, count: 60)
+    @Published var downloadSpeedHistory: [Double] = Array(repeating: 0, count: 60)
+    @Published var pendingUploadHistory: [Double] = Array(repeating: 0, count: 60)
+    @Published var pendingDownloadHistory: [Double] = Array(repeating: 0, count: 60)
     @Published var pendingUploadCount: Int = 0
     @Published var pendingDownloadCount: Int = 0
     let p2pNode = P2PNode()
@@ -51,6 +55,7 @@ public class SyncManager: ObservableObject {
     var peerStatusCheckTask: Task<Void, Never>?
     var peersSyncTask: Task<Void, Never>?  // 定期同步 peers 数组的任务
     var peerDiscoveryTask: Task<Void, Never>?  // 对等点发现处理任务
+    var speedUpdateTask: Task<Void, Never>?  // 速度历史更新任务
 
     // 同步写入冷却：对“某个 syncID 下的某个路径”的最近一次同步落地写入打标。
     // 用于忽略该路径由同步写入引发的 FSEvents，避免把远端落地误判为本地编辑。
@@ -379,6 +384,13 @@ public class SyncManager: ObservableObject {
             // 启动定期检查设备在线状态
             startPeerStatusMonitoring()
 
+            // 启动速度历史更新任务
+            speedUpdateTask = Task { @MainActor in
+                while !Task.isCancelled {
+                    self.updateSpeedHistory()
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 每秒更新一次
+                }
+            }
         }
     }
 

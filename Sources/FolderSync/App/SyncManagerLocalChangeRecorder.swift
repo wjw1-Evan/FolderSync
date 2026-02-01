@@ -575,7 +575,7 @@ extension SyncManager {
             )
             // 如果 saveToDisk 为 true，则立即保存；否则返回给调用者处理
             if saveToDisk {
-                await VectorClockManager.saveVectorClock(
+                VectorClockManager.saveVectorClock(
                     folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
             }
             updatedVC = vc

@@ -181,13 +181,7 @@ class FolderStatistics {
         var updatedMetadata = cache.metadata
         var updatedFolderCount = cache.folderCount
         var updatedTotalSize = cache.totalSize
-        let updatedMST = cache.mst  // MST 是类引用类型? 检查 MST定义。通常 MerkleSearchTree 如果是类，这里需要深拷贝或确保它是 Copy-on-Write 的。
-        // 假设 MST 是类，我们需要小心。如果 MST 是类，直接修改会影响缓存。
-        // 查看 MST 定义，如果是 Class，我们需要 Clone。即便 MST 是类，为了安全起见，我们最好新建一个 MST 或支持快照。
-        // 为了简化和安全，增量更新时，我们通常是从 metadata重建 MST (内存操作，很快)，或者 MST 支持增量修改。
-        // 考虑到 MST 实现复杂度，最稳妥的方式是：修改 metadata，然后基于新 metadata 重建 MST。
-        // 对于 10k 文件，内存中构建 MST 非常快 (毫秒级)。
-
+        // 2. 处理每个变更路径
         let fileManager = FileManager.default
         let url = folder.localPath.resolvingSymlinksInPath().standardizedFileURL
 

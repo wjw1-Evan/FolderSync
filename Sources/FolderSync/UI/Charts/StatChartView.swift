@@ -27,7 +27,7 @@ struct StatChartView: View {
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
-            .chartYScale(domain: 0...max(history.max() ?? 1024, 1024))
+            .chartYScale(domain: 0...max(history.max() ?? 1, 1))
             .frame(height: 30)
             .animation(.easeInOut, value: history)
         }

@@ -198,6 +198,9 @@ class P2PHandlers {
             return .error("无法读取文件")
         }
 
+        // 记入上传流量（被动方上传对主动方是下载，但在被动方视角是上传）
+        syncManager.addUploadBytes(Int64(data.count))
+
         return .fileData(syncID: syncID, path: relativePath, data: data)
     }
 
@@ -256,6 +259,9 @@ class P2PHandlers {
             // 写入文件
             syncManager.markSyncCooldown(syncID: syncID, path: relativePath)
             try data.write(to: fileURL)
+
+            // 记入下载流量
+            syncManager.addDownloadBytes(Int64(data.count))
 
             // 文件写入成功后，保存 Vector Clock
             if let vc = mergedVC {
@@ -334,6 +340,8 @@ class P2PHandlers {
     private func handleGetChunkData(syncID: String, chunkHash: String) async -> SyncResponse {
         // 尝试从块存储中获取
         if let data = try? StorageManager.shared.getBlock(hash: chunkHash) {
+            // 记入上传流量
+            syncManager?.addUploadBytes(Int64(data.count))
             return .chunkData(syncID: syncID, chunkHash: chunkHash, data: data)
         }
 
@@ -417,6 +425,8 @@ class P2PHandlers {
     {
         do {
             try StorageManager.shared.saveBlock(hash: chunkHash, data: data)
+            // 记入下载流量
+            syncManager?.addDownloadBytes(Int64(data.count))
             return .chunkAck(syncID: syncID, chunkHash: chunkHash)
         } catch {
             return .error("保存块失败: \(error.localizedDescription)")

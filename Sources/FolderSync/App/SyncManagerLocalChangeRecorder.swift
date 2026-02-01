@@ -622,7 +622,7 @@ extension SyncManager {
                     }
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
-                        mtime: mtime,
+                        mtime: mtime, size: size ?? 0,
                         creationDate: creationDate,
                         vectorClock: updatedVC
                     )
@@ -645,7 +645,7 @@ extension SyncManager {
                     }
                     lastKnownMetadata[folder.syncID]?[relativePath] = FileMetadata(
                         hash: hash,
-                        mtime: mtime,
+                        mtime: mtime, size: size ?? 0,
                         creationDate: creationDate,
                         vectorClock: updatedVC
                     )

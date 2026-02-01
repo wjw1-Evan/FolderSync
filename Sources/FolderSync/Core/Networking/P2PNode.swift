@@ -423,8 +423,9 @@ public class P2PNode: NSObject {
 
     // MARK: - Sending Data
 
-    public func sendRequest(_ request: SyncRequest, to peerID: String) async throws -> SyncResponse
-    {
+    public func sendRequest(
+        _ request: SyncRequest, to peerID: String, timeout: TimeInterval = 60.0
+    ) async throws -> SyncResponse {
         // 确保连接已启动
         await ensureConnected(to: peerID)
 
@@ -474,16 +475,18 @@ public class P2PNode: NSObject {
                 do {
                     try await webRTC.sendData(frameData, to: peerID)
 
-                    // Timeout logic: 增加到 120秒，给大文件夹初始扫描留出充足时间
-                    try await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+                    // 使用指定的超时时间
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     if let storedContinuation = await self.requestTracker.remove(id: requestID) {
                         AppLogger.syncPrint(
-                            "[P2PNode] ⚠️ Request timed out: \(requestID) (peer: \(peerID.prefix(8)))"
+                            "[P2PNode] ⚠️ Request timed out: \(requestID) (peer: \(peerID.prefix(8))) after \(timeout)s"
                         )
                         storedContinuation.resume(
                             throwing: NSError(
                                 domain: "P2PNode", code: -2,
-                                userInfo: [NSLocalizedDescriptionKey: "Request timed out"]))
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: "Request timed out after \(timeout)s"
+                                ]))
                     }
                 } catch {
                     if let continuation = await self.requestTracker.remove(id: requestID) {

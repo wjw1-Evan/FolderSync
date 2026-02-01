@@ -406,27 +406,41 @@ public class WebRTCManager: NSObject {
                 "[WebRTC] 📤 Sending large message to \(peerID.prefix(8)): \(data.count / 1024) KB, \(totalChunks) chunks"
             )
 
-            for i in 0..<totalChunks {
-                let start = i * maxChunkSize
-                let end = min(start + maxChunkSize, data.count)
-                let chunkData = data.subdata(in: start..<end)
+            // 使用 Task.detached 避免在 MainActor 上执行耗时的分块和流量控制循环
+            try await Task.detached(priority: .medium) { [weak self] in
+                guard let self = self else { return }
 
-                var packet = Data([1])  // Type 1: Chunk
-                // Message ID (use first 8 chars for brevity, or full string)
-                if let idData = messageID.data(using: .utf8) {
-                    let idLen = UInt8(idData.count)
-                    packet.append(Data([idLen]))
-                    packet.append(idData)
+                for i in 0..<totalChunks {
+                    // 再次检查通道状态
+                    let readyState = await MainActor.run { dc.readyState }
+                    guard readyState == .open else {
+                        throw NSError(
+                            domain: "WebRTCManager", code: -1,
+                            userInfo: [
+                                NSLocalizedDescriptionKey: "DataChannel closed during transfer"
+                            ])
+                    }
+
+                    let start = i * self.maxChunkSize
+                    let end = min(start + self.maxChunkSize, data.count)
+                    let chunkData = data.subdata(in: start..<end)
+
+                    var packet = Data([1])  // Type 1: Chunk
+                    if let idData = messageID.data(using: .utf8) {
+                        let idLen = UInt8(idData.count)
+                        packet.append(Data([idLen]))
+                        packet.append(idData)
+                    }
+
+                    var index = Int32(i).bigEndian
+                    var total = Int32(totalChunks).bigEndian
+                    packet.append(Data(bytes: &index, count: MemoryLayout<Int32>.size))
+                    packet.append(Data(bytes: &total, count: MemoryLayout<Int32>.size))
+                    packet.append(chunkData)
+
+                    try await self.sendRawData(packet, to: dc, peerID: peerID)
                 }
-
-                var index = Int32(i).bigEndian
-                var total = Int32(totalChunks).bigEndian
-                packet.append(Data(bytes: &index, count: MemoryLayout<Int32>.size))
-                packet.append(Data(bytes: &total, count: MemoryLayout<Int32>.size))
-                packet.append(chunkData)
-
-                try await sendRawData(packet, to: dc, peerID: peerID)
-            }
+            }.value
         }
     }
 

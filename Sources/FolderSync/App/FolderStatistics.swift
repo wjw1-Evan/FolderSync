@@ -193,6 +193,7 @@ class FolderStatistics {
                     let dirMeta = FileMetadata(
                         hash: "DIRECTORY",  // 固定哈希，支持重命名检测
                         mtime: mtime,
+                        size: 0,
                         creationDate: creationDate,
                         vectorClock: vc,
                         isDirectory: true
@@ -270,7 +271,8 @@ class FolderStatistics {
                             return (
                                 relativePath,
                                 FileMetadata(
-                                    hash: cached.hash, mtime: mtime, creationDate: creationDate,
+                                    hash: cached.hash, mtime: mtime, size: fileSize,
+                                    creationDate: creationDate,
                                     vectorClock: vc),
                                 fileSize
                             )
@@ -282,7 +284,8 @@ class FolderStatistics {
                         return (
                             relativePath,
                             FileMetadata(
-                                hash: hash, mtime: mtime, creationDate: creationDate,
+                                hash: hash, mtime: mtime, size: fileSize,
+                                creationDate: creationDate,
                                 vectorClock: vc),
                             fileSize
                         )

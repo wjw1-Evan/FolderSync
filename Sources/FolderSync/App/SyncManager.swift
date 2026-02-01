@@ -445,6 +445,7 @@ public class SyncManager: ObservableObject {
                             metadata[path] = FileMetadata(
                                 hash: fileSnapshot.hash,
                                 mtime: fileSnapshot.mtime,
+                                size: fileSnapshot.size,
                                 vectorClock: fileSnapshot.vectorClock
                             )
                         }

@@ -1434,6 +1434,28 @@ class SyncEngine {
             var totalDownloadBytes: Int64 = 0
             var totalUploadBytes: Int64 = 0
 
+            // 字节级进度追踪
+            var totalExpectedBytes: Int64 = 0
+            var currentTransferredBytes: Int64 = 0
+
+            func updateProgressWithBytes(_ additionalBytes: Int64) {
+                currentTransferredBytes += additionalBytes
+                let progress = Double(currentTransferredBytes) / Double(max(totalExpectedBytes, 1))
+                let message: String
+                if totalOps > 0 {
+                    message = "正在同步: \(completedOps)/\(totalOps) (\(Int(progress * 100))%)"
+                } else {
+                    message = "正在更新统计信息..."
+                }
+
+                Task { @MainActor in
+                    syncManager.updateFolderStatus(
+                        currentFolder.id, status: .syncing,
+                        message: message,
+                        progress: progress)
+                }
+            }
+
             let filesToDownload = changedFiles.filter { path, _ in
                 !locallyDeleted.contains(path) && !deletedSet.contains(path)
                     && !renamedFiles.keys.contains(path)
@@ -1450,10 +1472,24 @@ class SyncEngine {
 
             if !downloadItems.isEmpty {
                 registerPendingTransfers(downloadItems.count, direction: .download)
+                for item in downloadItems {
+                    totalExpectedBytes += item.remoteMeta.size
+                }
             }
             if !filesToUpload.isEmpty {
                 registerPendingTransfers(filesToUpload.count, direction: .upload)
+                for item in filesToUpload {
+                    totalExpectedBytes += item.1.size
+                }
             }
+            // 加上冲突文件的预期大小
+            for item in uploadConflictFiles {
+                totalExpectedBytes += item.1.size
+            }
+
+            // 初始状态更新
+            updateProgressWithBytes(0)
+
             defer { cleanupPendingTransfers() }
 
             await withTaskGroup(of: (Int64, SyncLog.SyncedFileInfo, Bool)?.self) { group in
@@ -1473,12 +1509,7 @@ class SyncEngine {
                                 if !statsUpdated {
                                     await MainActor.run { syncManager.addDownloadBytes(bytes) }
                                 }
-                                await MainActor.run {
-                                    syncManager.updateFolderStatus(
-                                        currentFolder.id, status: .syncing,
-                                        message: "下载完成: \(completedOps)/\(totalOps)",
-                                        progress: Double(completedOps) / Double(max(totalOps, 1)))
-                                }
+                                updateProgressWithBytes(bytes)
                             }
                         }
                     }
@@ -1782,10 +1813,7 @@ class SyncEngine {
                         syncedFiles.append(fileInfo)
                         completedOps += 1
 
-                        syncManager.updateFolderStatus(
-                            currentFolder.id, status: .syncing,
-                            message: "上传完成: \(completedOps)/\(totalOps)",
-                            progress: Double(completedOps) / Double(max(totalOps, 1)))
+                        updateProgressWithBytes(bytes)
                     }
                 }
             }
@@ -1888,28 +1916,13 @@ class SyncEngine {
         folderCount: Int,
         totalSize: Int64
     ) async {
-        guard let syncManager = syncManager else { return }
-
-        // 获取文件大小信息（用于快照）
-        var fileSizes: [String: Int64] = [:]
-        if let currentFolder = syncManager.folders.first(where: { $0.id == folderID }) {
-            let fileManager = FileManager.default
-            for (path, _) in metadata {
-                let fileURL = currentFolder.localPath.appendingPathComponent(path)
-                if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                    let size = attrs[.size] as? Int64
-                {
-                    fileSizes[path] = size
-                }
-            }
-        }
+        guard self.syncManager != nil else { return }
 
         // 创建快照
         let snapshot = FolderSnapshot.fromFileMetadata(
             syncID: syncID,
             folderID: folderID,
-            metadata: metadata,
-            fileSizes: fileSizes
+            metadata: metadata
         )
 
         // 原子性地保存快照

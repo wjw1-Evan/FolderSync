@@ -10,13 +10,7 @@ public class SyncManager: ObservableObject {
 
     @Published var folders: [SyncFolder] = [] {
         didSet {
-            let newState = folders.contains { $0.status == .syncing }
-            if newState != isSyncing {
-                isSyncing = newState
-                #if DEBUG
-                    print("[SyncManager] 🔄 Menu Bar Animation State: \(isSyncing ? "ON" : "OFF")")
-                #endif
-            }
+            updateSyncingState()
         }
     }
     @Published var uploadSpeedBytesPerSec: Double = 0
@@ -469,6 +463,20 @@ public class SyncManager: ObservableObject {
             } catch {
                 AppLogger.syncPrint("[SyncManager] ⚠️ 从快照恢复状态失败: \(error)")
             }
+        }
+    }
+
+    /// 更新 isSyncing 状态，基于文件夹状态或待处理传输
+    func updateSyncingState() {
+        let hasSyncingFolder = folders.contains { $0.status == .syncing }
+        let hasPendingTransfers = pendingUploadCount > 0 || pendingDownloadCount > 0
+        let newState = hasSyncingFolder || hasPendingTransfers
+
+        if newState != isSyncing {
+            isSyncing = newState
+            AppLogger.syncPrint(
+                "[SyncManager] 🔄 Menu Bar Animation State: \(isSyncing ? "ON" : "OFF") (folder=\(hasSyncingFolder), pending=\(hasPendingTransfers))"
+            )
         }
     }
 }

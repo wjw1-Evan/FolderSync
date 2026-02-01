@@ -313,6 +313,7 @@ extension SyncManager {
                 // 理论上不会出现，作为兜底
                 break
             }
+            self.updateSyncingState()
         }
     }
 
@@ -323,13 +324,12 @@ extension SyncManager {
             switch direction {
             case .upload:
                 self.pendingUploadCount = max(0, self.pendingUploadCount - count)
-            // AppLogger.syncPrint("[SyncManager] 📤 Upload Completed: -\(count) -> \(self.pendingUploadCount)")
             case .download:
                 self.pendingDownloadCount = max(0, self.pendingDownloadCount - count)
-            // AppLogger.syncPrint("[SyncManager] 📥 Download Completed: -\(count) -> \(self.pendingDownloadCount)")
             case .bidirectional:
                 break
             }
+            self.updateSyncingState()
         }
     }
 
@@ -344,6 +344,7 @@ extension SyncManager {
                 self.pendingUploadCount = 0
                 self.pendingDownloadCount = 0
             }
+            self.updateSyncingState()
         }
     }
 }

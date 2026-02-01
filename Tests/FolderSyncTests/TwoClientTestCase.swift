@@ -29,8 +29,7 @@ enum TestDuration {
 
 // MARK: - 双客户端测试基类
 
-/// 双客户端同步测试基类
-/// 封装两个 SyncManager 实例的公共 setUp/tearDown 逻辑
+@MainActor
 class TwoClientTestCase: XCTestCase {
     var tempDir1: URL!
     var tempDir2: URL!
@@ -41,7 +40,6 @@ class TwoClientTestCase: XCTestCase {
     /// 子类可重写以自定义文件夹发现等待时间
     var folderDiscoveryWait: UInt64 { TestDuration.folderDiscovery }
 
-    @MainActor
     override func setUp() async throws {
         try await super.setUp()
 
@@ -56,8 +54,8 @@ class TwoClientTestCase: XCTestCase {
         try? await Task.sleep(nanoseconds: TestDuration.p2pStartup)
 
         // 手动注册 peer（同一机器上 LAN Discovery 可能无法正常工作）
-        if let p1: PeerID = syncManager1.p2pNode.peerID,
-            let p2: PeerID = syncManager2.p2pNode.peerID,
+        if let p1 = syncManager1.p2pNode.peerID,
+            let p2 = syncManager2.p2pNode.peerID,
             let port1 = syncManager1.p2pNode.signalingPort,
             let port2 = syncManager2.p2pNode.signalingPort
         {
@@ -144,6 +142,115 @@ class TwoClientTestCase: XCTestCase {
         if let folder1 = syncManager1.folders.first(where: { $0.syncID == syncID }) {
             _ = await TestHelpers.triggerSyncAndWait(
                 syncManager: syncManager1, folder: folder1, timeout: 25.0)
+        }
+    }
+
+    // MARK: - 操作辅助方法
+
+    /// 在指定目录创建文件并等待 (默认等待 6秒 以便 FSEvents 触发)
+    func createFile(in dir: URL, name: String, content: String, wait: UInt64 = 6_000_000_000)
+        async throws
+    {
+        let fileURL = dir.appendingPathComponent(name)
+        try TestHelpers.createTestFile(at: fileURL, content: content)
+        if wait > 0 {
+            try await Task.sleep(nanoseconds: wait)
+        }
+    }
+
+    /// 修改文件并等待
+    func modifyFile(in dir: URL, name: String, content: String, wait: UInt64 = 6_000_000_000)
+        async throws
+    {
+        try await createFile(in: dir, name: name, content: content, wait: wait)
+    }
+
+    /// 删除文件并等待
+    func deleteFile(in dir: URL, name: String, wait: UInt64 = 3_000_000_000) async throws {
+        let fileURL = dir.appendingPathComponent(name)
+        if TestHelpers.directoryExists(at: fileURL) {
+            try FileManager.default.removeItem(at: fileURL)
+        } else if TestHelpers.fileExists(at: fileURL) {
+            try FileManager.default.removeItem(at: fileURL)
+        }
+        if wait > 0 {
+            try await Task.sleep(nanoseconds: wait)
+        }
+    }
+
+    /// 重命名文件并等待
+    func renameFile(in dir: URL, from: String, to: String, wait: UInt64 = 6_000_000_000)
+        async throws
+    {
+        let fromURL = dir.appendingPathComponent(from)
+        let toURL = dir.appendingPathComponent(to)
+        try FileManager.default.moveItem(at: fromURL, to: toURL)
+        if wait > 0 {
+            try await Task.sleep(nanoseconds: wait)
+        }
+    }
+
+    // MARK: - 断言辅助方法
+
+    /// 断言文件存在
+    func assertExists(
+        in dir: URL, name: String, timeout: TimeInterval = 28.0, message: String? = nil
+    ) async {
+        let fileURL = dir.appendingPathComponent(name)
+        let exists = await TestHelpers.waitForCondition(timeout: timeout) {
+            TestHelpers.fileExists(at: fileURL)
+        }
+        XCTAssertTrue(exists, message ?? "文件 \(name) 应该在 \(dir.lastPathComponent) 中存在")
+    }
+
+    /// 断言目录存在
+    func assertDirectoryExists(
+        in dir: URL, name: String, timeout: TimeInterval = 28.0, message: String? = nil
+    ) async {
+        let folderURL = dir.appendingPathComponent(name)
+        let exists = await TestHelpers.waitForCondition(timeout: timeout) {
+            TestHelpers.directoryExists(at: folderURL)
+        }
+        XCTAssertTrue(exists, message ?? "目录 \(name) 应该在 \(dir.lastPathComponent) 中存在")
+    }
+
+    /// 断言文件或目录不存在
+    func assertNotExists(
+        in dir: URL, name: String, timeout: TimeInterval = 28.0, message: String? = nil
+    ) async {
+        let fileURL = dir.appendingPathComponent(name)
+        let deleted = await TestHelpers.waitForCondition(timeout: timeout) {
+            !TestHelpers.fileExists(at: fileURL) && !TestHelpers.directoryExists(at: fileURL)
+        }
+        XCTAssertTrue(deleted, message ?? "文件/目录 \(name) 应该已从 \(dir.lastPathComponent) 删除")
+    }
+
+    /// 断言文件内容
+    func assertContent(in dir: URL, name: String, expected: String, timeout: TimeInterval = 28.0)
+        async throws
+    {
+        let fileURL = dir.appendingPathComponent(name)
+        let updated = await TestHelpers.waitForCondition(timeout: timeout) {
+            guard let c = try? TestHelpers.readFileContent(at: fileURL) else { return false }
+            return c == expected
+        }
+        XCTAssertTrue(updated, "文件 \(name) 内容应该同步为: \(expected)")
+        if updated {
+            let content = try TestHelpers.readFileContent(at: fileURL)
+            XCTAssertEqual(content, expected)
+        }
+    }
+
+    /// 获取目录中的冲突文件
+    func getConflictFiles(in dir: URL, baseName: String? = nil) -> [URL] {
+        let files = TestHelpers.getAllFiles(in: dir)
+        return files.filter { url in
+            let name = url.lastPathComponent
+            let isConflict = name.contains(".conflict.")
+            if let base = baseName {
+                return isConflict && name.contains(base)
+            }
+            return isConflict
         }
     }
 }

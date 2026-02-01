@@ -254,13 +254,14 @@ class SyncEngine {
                     let errorString = String(describing: error)
 
                     // 检查由 P2PNode 抛出的严重连接错误 (Code=-3: DataChannel not ready)
-                    let isCriticalError =
+                    let isUnreachable =
                         (error as NSError).code == -3
                         || errorString.contains("DataChannel not ready")
 
-                    if isCriticalError {
+                    if isUnreachable {
                         AppLogger.syncPrint(
-                            "[SyncEngine] ❌ [performSync] 严重连接错误，停止重试并移除对等点等待重新发现: \(errorString)")
+                            "[SyncEngine] ℹ️ [performSync] 对等点暂时无法访问，跳过并等待重新发现: \(peerID.prefix(8))..."
+                        )
                         // 移除 Peer，等待下次广播重新发现
                         syncManager.peerManager.removePeer(peerID)
                         // 从当前文件夹的从 peer 列表中移除

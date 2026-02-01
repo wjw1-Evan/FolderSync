@@ -36,9 +36,9 @@ class ThreeClientTestCase: XCTestCase {
         try? await Task.sleep(nanoseconds: TestDuration.p2pStartup)
 
         // 手动注册 peer（同一机器上 LAN Discovery 可能无法正常工作）
-        if let p1: PeerID = syncManager1.p2pNode.peerID,
-            let p2: PeerID = syncManager2.p2pNode.peerID,
-            let p3: PeerID = syncManager3.p2pNode.peerID
+        if let p1 = syncManager1.p2pNode.peerID,
+            let p2 = syncManager2.p2pNode.peerID,
+            let p3 = syncManager3.p2pNode.peerID
         {
 
             // 模拟地址
@@ -186,5 +186,55 @@ class ThreeClientTestCase: XCTestCase {
             else { return false }
             return c1 == expectedContent && c2 == expectedContent && c3 == expectedContent
         }
+    }
+
+    // MARK: - 操作辅助方法
+
+    /// 在指定目录创建文件并等待 (默认等待 6秒 以便 FSEvents 触发)
+    func createFile(in dir: URL, name: String, content: String, wait: UInt64 = 6_000_000_000)
+        async throws
+    {
+        let fileURL = dir.appendingPathComponent(name)
+        try TestHelpers.createTestFile(at: fileURL, content: content)
+        if wait > 0 {
+            try await Task.sleep(nanoseconds: wait)
+        }
+    }
+
+    /// 修改文件并等待
+    func modifyFile(in dir: URL, name: String, content: String, wait: UInt64 = 6_000_000_000)
+        async throws
+    {
+        try await createFile(in: dir, name: name, content: content, wait: wait)
+    }
+
+    /// 删除文件并等待
+    func deleteFile(in dir: URL, name: String, wait: UInt64 = 3_000_000_000) async throws {
+        let fileURL = dir.appendingPathComponent(name)
+        if TestHelpers.directoryExists(at: fileURL) {
+            try FileManager.default.removeItem(at: fileURL)
+        } else if TestHelpers.fileExists(at: fileURL) {
+            try FileManager.default.removeItem(at: fileURL)
+        }
+        if wait > 0 {
+            try await Task.sleep(nanoseconds: wait)
+        }
+    }
+
+    // MARK: - 断言辅助方法
+
+    /// 断言文件在所有客户端存在
+    func assertExistsInAllClients(filename: String, timeout: TimeInterval = 30.0) async {
+        let success = await waitForFileInAllClients(filename: filename, timeout: timeout)
+        XCTAssertTrue(success, "文件 \(filename) 应该在所有客户端中存在")
+    }
+
+    /// 断言文件内容在所有客户端一致
+    func assertContentInAllClients(filename: String, expected: String, timeout: TimeInterval = 30.0)
+        async
+    {
+        let success = await waitForFileContentInAllClients(
+            filename: filename, expectedContent: expected, timeout: timeout)
+        XCTAssertTrue(success, "文件 \(filename) 内容应该在所有客户端中一致为: \(expected)")
     }
 }

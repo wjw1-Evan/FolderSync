@@ -245,7 +245,7 @@ public class P2PNode: NSObject {
                     initiateConnection(peerID: peerID, targetIP: targetIP, targetPort: targetPort)
                 case .fail:
                     AppLogger.syncPrint(
-                        "[P2PNode] ❌ Connection to \(peerID.prefix(8)) failed after \(PendingConnectionInfo.maxRetries) retries"
+                        "[P2PNode] ⚠️ Connection to \(peerID.prefix(8)) unreachable after \(PendingConnectionInfo.maxRetries) retries"
                     )
                 case .wait:
                     // 正在连接中，等待
@@ -356,7 +356,7 @@ public class P2PNode: NSObject {
         case .fail:
             _ = await connectionTracker.remove(peerID: peerID)
             AppLogger.syncPrint(
-                "[P2PNode] ❌ ensureConnected: Connection to \(peerID.prefix(8)) failed after max retries"
+                "[P2PNode] ℹ️ ensureConnected: Peer \(peerID.prefix(8)) unreachable (max retries reached)"
             )
         case .wait:
             // 正在连接中，等待即可
@@ -439,7 +439,7 @@ public class P2PNode: NSObject {
             let iceState = pc?.iceConnectionState.rawValue ?? -1
             let sigState = pc?.signalingState.rawValue ?? -1
             AppLogger.syncPrint(
-                "[P2PNode] ❌ DataChannel wait timeout for \(peerID.prefix(8)) (ICE=\(iceState), Sig=\(sigState)). Removing connection for retry."
+                "[P2PNode] ℹ️ DataChannel unreachable for \(peerID.prefix(8)) (ICE=\(iceState), Sig=\(sigState)). Cleaning up."
             )
             // 失败时清除连接状态，让下一次重试可以重新发起全新的连接
             webRTC.removeConnection(for: peerID)
@@ -567,7 +567,8 @@ extension P2PNode: WebRTCManagerDelegate {
             }
 
             if state == .failed {
-                AppLogger.syncPrint("[P2PNode] ❌ ICE connection failed for \(peerID.prefix(8))")
+                AppLogger.syncPrint(
+                    "[P2PNode] ℹ️ ICE connection unreachable for \(peerID.prefix(8))")
             }
         default:
             break

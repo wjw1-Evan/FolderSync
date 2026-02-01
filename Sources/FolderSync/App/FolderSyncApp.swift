@@ -5,6 +5,12 @@ import os.log
 
 // AppDelegate 用于处理应用退出
 class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // 关闭主窗口后不退出应用，继续在菜单栏运行
+        // 我们在 WindowDelegate 中处理 policy 切换
+        return false
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // 关闭所有打开的窗口和 sheet
         for window in NSApplication.shared.windows {
@@ -56,8 +62,8 @@ struct FolderSyncApp: App {
         _syncManager = StateObject(wrappedValue: SyncManager())
         _launchManager = StateObject(wrappedValue: LaunchManager())
 
-        // 设置应用为 GUI 模式，不显示终端窗口
-        NSApplication.shared.setActivationPolicy(.regular)
+        // 设置应用为附件模式，不显示 Dock 图标，也不自动弹出主窗口
+        NSApplication.shared.setActivationPolicy(.accessory)
 
         // 重定向标准输出和错误输出到日志文件（可选，用于调试）
         setupLogging()
@@ -86,34 +92,29 @@ struct FolderSyncApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
-            MainDashboard()
-                .environmentObject(syncManager)
-        }
-        .defaultSize(width: 800, height: 600)
-        .windowStyle(.automatic)
-        .commands {
-            // 移除默认的"新建窗口"菜单项，防止用户通过菜单创建多个窗口
-            CommandGroup(replacing: .newItem) {}
-        }
-
         MenuBarExtra("FolderSync", systemImage: "arrow.triangle.2.circlepath") {
             Button(LocalizedString.showMainWindow) {
+                // 将应用设置为常规模式，显示 Dock 图标和菜单栏
+                NSApplication.shared.setActivationPolicy(.regular)
+
                 // 检查是否已经有主窗口打开
                 // 查找所有可见的窗口，优先检查标识符，其次检查标题
                 let existingWindow = NSApplication.shared.windows.first { window in
-                    window.isVisible
-                        && (window.identifier?.rawValue == "main"
-                            || window.title == "FolderSync 仪表盘")
+                    (window.identifier?.rawValue == "main"
+                        || window.title == "FolderSync 仪表盘")
                 }
 
                 if let window = existingWindow {
-                    // 如果窗口已存在，激活它并带到前台
+                    // 如果窗口已存在，且不可见，显示它
+                    if !window.isVisible {
+                        window.makeKeyAndOrderFront(nil)
+                    }
                     window.makeKeyAndOrderFront(nil)
                     NSApp.activate(ignoringOtherApps: true)
                 } else {
                     // 如果窗口不存在，打开新窗口
                     openWindow(id: "main")
+                    // 注意：SwiftUI 打开窗口是异步的，政策切换后会有短暂延迟显示
                     NSApp.activate(ignoringOtherApps: true)
                 }
             }
@@ -135,6 +136,33 @@ struct FolderSyncApp: App {
             Button(LocalizedString.quit) {
                 quitApplication()
             }
+        }
+
+        WindowGroup(id: "main") {
+            MainDashboard()
+                .environmentObject(syncManager)
+                .onReceive(
+                    NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)
+                ) { notification in
+                    // 当窗口关闭时，检查是否还有主窗口。如果没有，切回 accessory 模式（隐藏 Dock）
+                    DispatchQueue.main.async {
+                        let hasVisibleWindows = NSApplication.shared.windows.contains {
+                            $0.isVisible
+                                && ($0.identifier?.rawValue == "main"
+                                    || $0.title == "FolderSync 仪表盘")
+                                && $0 != (notification.object as? NSWindow)
+                        }
+                        if !hasVisibleWindows {
+                            NSApplication.shared.setActivationPolicy(.accessory)
+                        }
+                    }
+                }
+        }
+        .defaultSize(width: 800, height: 600)
+        .windowStyle(.automatic)
+        .commands {
+            // 移除默认的"新建窗口"菜单项，防止用户通过菜单创建多个窗口
+            CommandGroup(replacing: .newItem) {}
         }
     }
 

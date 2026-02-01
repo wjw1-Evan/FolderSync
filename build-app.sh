@@ -45,10 +45,34 @@ fi
 echo -e "${YELLOW}创建应用程序包结构...${NC}"
 mkdir -p "$APP_MACOS"
 mkdir -p "$APP_RESOURCES"
+mkdir -p "$APP_CONTENTS/Frameworks"
 
 # 复制可执行文件
 echo -e "${YELLOW}复制可执行文件...${NC}"
 cp "$EXECUTABLE_PATH" "$APP_MACOS/$APP_NAME"
+
+# 复制 WebRTC.framework (通常在 .build/release 或 XCframework 路径中)
+echo -e "${YELLOW}复制 WebRTC.framework...${NC}"
+# 优先从 build 目录找编译好的 framework
+WEBRTC_FRAMEWORK=".build/release/WebRTC.framework"
+if [ ! -d "$WEBRTC_FRAMEWORK" ]; then
+    # 备选路径：XCframework 中的 macOS 版本
+    WEBRTC_FRAMEWORK=$(find .build/artifacts -name "WebRTC.framework" | grep "macos" | head -n 1)
+fi
+
+if [ -d "$WEBRTC_FRAMEWORK" ]; then
+    cp -R "$WEBRTC_FRAMEWORK" "$APP_CONTENTS/Frameworks/"
+    echo -e "${GREEN}✅ WebRTC.framework 已复制到 Frameworks${NC}"
+else
+    echo -e "${RED}警告: 找不到 WebRTC.framework，应用程序运行可能会崩溃${NC}"
+fi
+
+# 修复 RPATH
+echo -e "${YELLOW}修复可执行文件 RPATH...${NC}"
+# 添加对 Frameworks 目录的搜索路径
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_MACOS/$APP_NAME" 2>/dev/null || true
+# 确保 WebRTC.framework 引用正确 (如果它已经是 @rpath/WebRTC.framework/WebRTC 则无需修改，但加上此步更稳妥)
+install_name_tool -change "@rpath/WebRTC.framework/WebRTC" "@loader_path/../Frameworks/WebRTC.framework/WebRTC" "$APP_MACOS/$APP_NAME" 2>/dev/null || true
 
 # 使可执行文件可执行
 chmod +x "$APP_MACOS/$APP_NAME"

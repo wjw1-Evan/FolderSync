@@ -305,8 +305,13 @@ struct MainDashboard: View {
 
     private func updateConflictCount() {
         Task { @MainActor in
-            let conflicts = (try? StorageManager.shared.getAllConflicts(unresolvedOnly: true)) ?? []
-            conflictCount = conflicts.count
+            do {
+                let conflicts = try StorageManager.shared.getAllConflicts(unresolvedOnly: true)
+                conflictCount = conflicts.count
+            } catch {
+                AppLogger.syncPrint("[MainDashboard] ⚠️ Failed to fetch conflicts: \(error)")
+                conflictCount = 0
+            }
         }
     }
 

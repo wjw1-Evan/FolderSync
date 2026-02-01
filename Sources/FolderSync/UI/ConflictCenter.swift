@@ -150,7 +150,12 @@ struct ConflictCenter: View {
     }
 
     private func refresh() {
-        conflicts = (try? StorageManager.shared.getAllConflicts(unresolvedOnly: true)) ?? []
+        do {
+            conflicts = try StorageManager.shared.getAllConflicts(unresolvedOnly: true)
+        } catch {
+            AppLogger.syncPrint("[ConflictCenter] ⚠️ Failed to fetch conflicts: \(error)")
+            conflicts = []
+        }
         if selectedConflict != nil && !conflicts.contains(where: { $0.id == selectedConflict?.id })
         {
             selectedConflict = conflicts.first
@@ -164,24 +169,32 @@ struct ConflictCenter: View {
 
         guard let base = folderBase(for: c.syncID) else { return }
 
-        if keepLocal {
-            // 保留本机版本：删除冲突文件
-            let conflictURL = base.appendingPathComponent(c.conflictPath)
-            try? FileManager.default.removeItem(at: conflictURL)
-        } else {
-            // 保留远程版本：用冲突文件替换原文件
-            let origURL = base.appendingPathComponent(c.relativePath)
-            let conflictURL = base.appendingPathComponent(c.conflictPath)
-            guard let data = try? Data(contentsOf: conflictURL) else { return }
-            try? FileManager.default.createDirectory(
-                at: origURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: origURL)
-            try? FileManager.default.removeItem(at: conflictURL)
-        }
+        do {
+            if keepLocal {
+                // 保留本机版本：删除冲突文件
+                let conflictURL = base.appendingPathComponent(c.conflictPath)
+                if FileManager.default.fileExists(atPath: conflictURL.path) {
+                    try FileManager.default.removeItem(at: conflictURL)
+                }
+            } else {
+                // 保留远程版本：用冲突文件替换原文件
+                let origURL = base.appendingPathComponent(c.relativePath)
+                let conflictURL = base.appendingPathComponent(c.conflictPath)
 
-        try? StorageManager.shared.resolveConflict(id: c.id)
-        await MainActor.run {
-            refresh()
+                let data = try Data(contentsOf: conflictURL)
+                try FileManager.default.createDirectory(
+                    at: origURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: origURL)
+                try FileManager.default.removeItem(at: conflictURL)
+            }
+
+            try StorageManager.shared.resolveConflict(id: c.id)
+            await MainActor.run {
+                refresh()
+            }
+        } catch {
+            AppLogger.syncPrint(
+                "[ConflictCenter] ❌ Failed to resolve conflict \(c.relativePath): \(error)")
         }
     }
 
@@ -191,12 +204,19 @@ struct ConflictCenter: View {
         defer { isResolving = false }
 
         for c in conflicts {
-            if let base = folderBase(for: c.syncID) {
-                // 清理行为：保留本机版本，删除冲突文件
-                let conflictURL = base.appendingPathComponent(c.conflictPath)
-                try? FileManager.default.removeItem(at: conflictURL)
+            do {
+                if let base = folderBase(for: c.syncID) {
+                    // 清理行为：保留本机版本，删除冲突文件
+                    let conflictURL = base.appendingPathComponent(c.conflictPath)
+                    if FileManager.default.fileExists(atPath: conflictURL.path) {
+                        try FileManager.default.removeItem(at: conflictURL)
+                    }
+                }
+                try StorageManager.shared.resolveConflict(id: c.id)
+            } catch {
+                AppLogger.syncPrint(
+                    "[ConflictCenter] ⚠️ Failed to clear conflict \(c.relativePath): \(error)")
             }
-            try? StorageManager.shared.resolveConflict(id: c.id)
         }
 
         await MainActor.run {

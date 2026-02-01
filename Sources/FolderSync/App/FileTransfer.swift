@@ -206,6 +206,15 @@ class FileTransfer {
 
         guard case .fileChunks(_, _, let remoteChunkHashes) = chunksRes else {
             // 如果块级同步失败，回退到全量下载
+            // CRITICAL FIX: 防止大文件回退导致 OOM
+            if remoteMeta.size > 100 * 1024 * 1024 {
+                let errorMsg = "块级同步失败且文件过大 (\(remoteMeta.size) bytes)，禁止回退到全量下载以防止 OOM"
+                AppLogger.syncPrint("[FileTransfer] ❌ \(errorMsg): \(path)")
+                throw NSError(
+                    domain: "FileTransfer", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: errorMsg])
+            }
+
             if case .error(let errorString) = chunksRes {
                 AppLogger.syncPrint("[FileTransfer] ⚠️ 块级同步失败，回退到全量下载: \(path) - \(errorString)")
             }
@@ -637,6 +646,15 @@ class FileTransfer {
 
         default:
             // 其他错误，回退到全量上传（不保存 VC，因为上传失败）
+            // CRITICAL FIX: 防止大文件回退导致 OOM
+            if localMeta.size > 100 * 1024 * 1024 {
+                let errorMsg = "块级同步失败且文件过大 (\(localMeta.size) bytes)，禁止回退到全量上传以防止 OOM"
+                AppLogger.syncPrint("[FileTransfer] ❌ \(errorMsg): \(path)")
+                throw NSError(
+                    domain: "FileTransfer", code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: errorMsg])
+            }
+
             AppLogger.syncPrint("[FileTransfer] ⚠️ 块级同步失败，回退到全量上传: \(path)")
             return try await uploadFileFull(
                 path: path,

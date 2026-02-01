@@ -321,53 +321,59 @@ public class LANDiscovery {
         guard let data = requestMessage.data(using: .utf8) else { return }
 
         let host = NWEndpoint.Host("255.255.255.255")
-        let port = NWEndpoint.Port(rawValue: servicePort)!
-        let endpoint = NWEndpoint.hostPort(host: host, port: port)
 
-        let connection = NWConnection(to: endpoint, using: .udp)
-        addConnection(connection)
+        // Broadcast to all potential ports (handle fallback scenarios)
+        for i in 0..<LANDiscovery.maxPortAttempts {
+            let portVal = LANDiscovery.servicePortStatic + UInt16(i)
+            guard let port = NWEndpoint.Port(rawValue: portVal) else { continue }
 
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self else {
-                connection.cancel()
-                return
+            let endpoint = NWEndpoint.hostPort(host: host, port: port)
+            let connection = NWConnection(to: endpoint, using: .udp)
+            addConnection(connection)
+
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self = self else {
+                    connection.cancel()
+                    return
+                }
+
+                switch state {
+                case .ready:
+                    connection.send(
+                        content: data,
+                        completion: .contentProcessed { [weak self] error in
+                            connection.cancel()
+                            self?.removeConnection(connection)
+                            if let error = error {
+                                AppLogger.syncPrint(
+                                    "[LANDiscovery] Discovery request send error: \(error)")
+                            }
+                        })
+                case .failed(let error):
+                    AppLogger.syncPrint(
+                        "[LANDiscovery] Discovery request connection failed: \(error)")
+                    connection.cancel()
+                    self.removeConnection(connection)
+                case .cancelled:
+                    self.removeConnection(connection)
+                default:
+                    break
+                }
             }
 
-            switch state {
-            case .ready:
-                connection.send(
-                    content: data,
-                    completion: .contentProcessed { [weak self] error in
-                        connection.cancel()
-                        self?.removeConnection(connection)
-                        if let error = error {
-                            AppLogger.syncPrint(
-                                "[LANDiscovery] Discovery request send error: \(error)")
-                        }
-                    })
-            case .failed(let error):
-                AppLogger.syncPrint("[LANDiscovery] Discovery request connection failed: \(error)")
-                connection.cancel()
-                self.removeConnection(connection)
-            case .cancelled:
-                self.removeConnection(connection)
-            default:
-                break
-            }
-        }
+            connection.start(queue: DispatchQueue.global(qos: .utility))
 
-        connection.start(queue: DispatchQueue.global(qos: .utility))
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10.0) { [weak self] in
+                var shouldCancel = false
+                self?.connectionsQueue.sync {
+                    shouldCancel =
+                        self?.discoveryRequestConnections.contains { $0 === connection } ?? false
+                }
 
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10.0) { [weak self] in
-            var shouldCancel = false
-            self?.connectionsQueue.sync {
-                shouldCancel =
-                    self?.discoveryRequestConnections.contains { $0 === connection } ?? false
-            }
-
-            if shouldCancel {
-                connection.cancel()
-                self?.removeConnection(connection)
+                if shouldCancel {
+                    connection.cancel()
+                    self?.removeConnection(connection)
+                }
             }
         }
     }
@@ -505,25 +511,31 @@ public class LANDiscovery {
         guard let data = message.data(using: .utf8) else { return }
 
         let host = NWEndpoint.Host("255.255.255.255")
-        let port = NWEndpoint.Port(rawValue: servicePort)!
-        let endpoint = NWEndpoint.hostPort(host: host, port: port)
 
-        let connection = NWConnection(to: endpoint, using: .udp)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                connection.send(
-                    content: data,
-                    completion: .contentProcessed { error in
-                        connection.cancel()
-                    })
-            case .failed:
-                connection.cancel()
-            default:
-                break
+        // Broadcast to all potential ports (handle fallback scenarios)
+        for i in 0..<LANDiscovery.maxPortAttempts {
+            let portVal = LANDiscovery.servicePortStatic + UInt16(i)
+            guard let port = NWEndpoint.Port(rawValue: portVal) else { continue }
+
+            let endpoint = NWEndpoint.hostPort(host: host, port: port)
+            let connection = NWConnection(to: endpoint, using: .udp)
+
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    connection.send(
+                        content: data,
+                        completion: .contentProcessed { error in
+                            connection.cancel()
+                        })
+                case .failed:
+                    connection.cancel()
+                default:
+                    break
+                }
             }
+            connection.start(queue: DispatchQueue.global(qos: .utility))
         }
-        connection.start(queue: DispatchQueue.global(qos: .utility))
     }
 
     private func createDiscoveryMessage(

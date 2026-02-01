@@ -411,14 +411,16 @@ public class WebRTCManager: NSObject {
                 guard let self = self else { return }
 
                 for i in 0..<totalChunks {
-                    // 再次检查通道状态
-                    let readyState = await MainActor.run { dc.readyState }
-                    guard readyState == .open else {
-                        throw NSError(
-                            domain: "WebRTCManager", code: -1,
-                            userInfo: [
-                                NSLocalizedDescriptionKey: "DataChannel closed during transfer"
-                            ])
+                    // 每 20 个块检查一次通道状态，减少 MainActor 切换开销
+                    if i % 20 == 0 {
+                        let readyState = await MainActor.run { dc.readyState }
+                        guard readyState == .open else {
+                            throw NSError(
+                                domain: "WebRTCManager", code: -1,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: "DataChannel closed during transfer"
+                                ])
+                        }
                     }
 
                     let start = i * self.maxChunkSize

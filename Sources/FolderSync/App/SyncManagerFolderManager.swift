@@ -4,8 +4,9 @@ import Foundation
 /// 负责文件夹的添加、删除、更新和监控
 extension SyncManager {
     /// 刷新文件夹的文件数量和文件夹数量统计（不触发同步，立即执行）
-    func refreshFileCount(for folder: SyncFolder) {
-        folderStatistics.refreshFileCount(for: folder)
+    /// - Parameter changedPaths: 可选能够增量更新的文件路径集合。如果为 nil，则执行全量扫描。
+    func refreshFileCount(for folder: SyncFolder, changedPaths: Set<String>? = nil) {
+        folderStatistics.refreshFileCount(for: folder, changedPaths: changedPaths)
     }
 
     func addFolder(_ folder: SyncFolder) {

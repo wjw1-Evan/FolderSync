@@ -48,8 +48,8 @@ public class PeerRegistrationService: ObservableObject {
         }
 
         if isRegistering {
-            AppLogger.syncPrint(
-                "[PeerRegistrationService] ⏭️ Peer 正在注册中，跳过: \(peerIDString.prefix(12))...")
+            /*AppLogger.syncPrint(
+                "[PeerRegistrationService] ⏭️ Peer 正在注册中，跳过: \(peerIDString.prefix(12))...")*/
             return false
         }
 

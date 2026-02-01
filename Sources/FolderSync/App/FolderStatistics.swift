@@ -34,16 +34,18 @@ class FolderStatistics {
     }
 
     /// 刷新文件夹的文件数量和文件夹数量统计
-    func refreshFileCount(for folder: SyncFolder) {
+    /// - Parameter changedPaths: 可选能够增量更新的文件路径集合。如果为 nil，则执行全量扫描。
+    func refreshFileCount(for folder: SyncFolder, changedPaths: Set<String>? = nil) {
         guard let syncManager = syncManager else { return }
 
         let folderID = folder.id
 
         // 取消之前的刷新任务，实现防抖
+        // 注意：如果是增量更新，我们也希望防抖，避免频繁的小更新
         refreshTasks[folderID]?.cancel()
 
         refreshTasks[folderID] = Task {
-            // 收到变更后等待 1 秒，如果这段时间内没有新变更再执行统计
+            // 收到变更后等待 1 秒
             do {
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             } catch {
@@ -52,11 +54,27 @@ class FolderStatistics {
 
             if Task.isCancelled { return }
 
-            // 计算统计值（复用 self 的计算任务和缓存）
-            let (_, metadata, folderCount, totalSize) = await self.calculateFullState(
-                for: folder)
+            // 计算统计值
+            var result: (MerkleSearchTree, [String: FileMetadata], Int, Int64)
+
+            if let paths = changedPaths {
+                // 尝试增量更新
+                if let incrementalResult = await self.applyIncrementalUpdates(
+                    for: folder, changedPaths: paths)
+                {
+                    result = incrementalResult
+                } else {
+                    // 增量更新失败（可能缓存不存在），回退到全量计算
+                    result = await self.calculateFullState(for: folder)
+                }
+            } else {
+                // 全量计算
+                result = await self.calculateFullState(for: folder)
+            }
 
             if Task.isCancelled { return }
+
+            let (_, metadata, folderCount, totalSize) = result
 
             // 更新 UI
             guard let index = syncManager.folders.firstIndex(where: { $0.id == folderID })
@@ -115,6 +133,161 @@ class FolderStatistics {
 
         calculationTasks[syncID] = task
         return await task.value
+    }
+
+    /// 应用增量更新
+    /// 如果缓存存在，则只更新变更的文件，并重新计算统计信息
+    /// - Returns: 更新后的状态，如果无法增量更新（无缓存）则返回 nil
+    private func applyIncrementalUpdates(for folder: SyncFolder, changedPaths: Set<String>) async
+        -> (
+            MerkleSearchTree, [String: FileMetadata], folderCount: Int, totalSize: Int64
+        )?
+    {
+        let syncID = folder.syncID
+        guard let syncManager = syncManager else { return nil }
+
+        // 1. 获取初始状态（从缓存或持久化存储）
+        var cache: StateCache
+
+        if let existingCache = stateCache[syncID] {
+            cache = existingCache
+        } else if let persistedMetadata = syncManager.lastKnownMetadata[syncID] {
+            // 从持久化元数据恢复
+            let mst = MerkleSearchTree()
+            var totalSize: Int64 = 0
+            var folderCount = 0
+
+            for (path, meta) in persistedMetadata {
+                mst.insert(key: path, value: meta.hash)
+                if !meta.isDirectory {
+                    totalSize += meta.size
+                } else {
+                    folderCount += 1
+                }
+            }
+
+            cache = StateCache(
+                mst: mst,
+                metadata: persistedMetadata,
+                folderCount: folderCount,
+                totalSize: totalSize,
+                timestamp: Date()
+            )
+        } else {
+            return nil
+        }
+
+        // 复制一份元数据进行修改
+        var updatedMetadata = cache.metadata
+        var updatedFolderCount = cache.folderCount
+        var updatedTotalSize = cache.totalSize
+        let updatedMST = cache.mst  // MST 是类引用类型? 检查 MST定义。通常 MerkleSearchTree 如果是类，这里需要深拷贝或确保它是 Copy-on-Write 的。
+        // 假设 MST 是类，我们需要小心。如果 MST 是类，直接修改会影响缓存。
+        // 查看 MST 定义，如果是 Class，我们需要 Clone。即便 MST 是类，为了安全起见，我们最好新建一个 MST 或支持快照。
+        // 为了简化和安全，增量更新时，我们通常是从 metadata重建 MST (内存操作，很快)，或者 MST 支持增量修改。
+        // 考虑到 MST 实现复杂度，最稳妥的方式是：修改 metadata，然后基于新 metadata 重建 MST。
+        // 对于 10k 文件，内存中构建 MST 非常快 (毫秒级)。
+
+        let fileManager = FileManager.default
+        let url = folder.localPath.resolvingSymlinksInPath().standardizedFileURL
+
+        // 2. 处理每个变更路径
+        for relativePath in changedPaths {
+            if relativePath.isEmpty { continue }
+            if syncManager.isIgnored(relativePath, folder: folder) { continue }
+
+            let fileURL = url.appendingPathComponent(relativePath)
+            let exists = fileManager.fileExists(atPath: fileURL.path)
+
+            // 移除旧的元数据
+            if let oldMeta = updatedMetadata[relativePath] {
+                if !oldMeta.isDirectory {
+                    updatedTotalSize -= oldMeta.size
+                } else {
+                    updatedFolderCount -= 1
+                }
+                updatedMetadata.removeValue(forKey: relativePath)
+            }
+
+            // 如果文件已被删除，循环继续（已在上面移除）
+            if !exists { continue }
+
+            // 如果是新增或修改，计算新元数据
+            do {
+                if !ConflictFileFilter.isConflictFile(relativePath) {
+                    var isDirectory: ObjCBool = false
+                    _ = fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory)
+
+                    let resourceValues = try fileURL.resourceValues(forKeys: [
+                        .contentModificationDateKey, .creationDateKey,
+                    ])
+                    let mtime = resourceValues.contentModificationDate ?? Date()
+                    let creationDate = resourceValues.creationDate
+
+                    let vc =
+                        VectorClockManager.getVectorClock(
+                            folderID: folder.id, syncID: syncID, path: relativePath)
+                        ?? VectorClock()
+
+                    if isDirectory.boolValue {
+                        updatedFolderCount += 1
+                        let dirMeta = FileMetadata(
+                            hash: "DIRECTORY",
+                            mtime: mtime,
+                            size: 0,
+                            creationDate: creationDate,
+                            vectorClock: vc,
+                            isDirectory: true
+                        )
+                        updatedMetadata[relativePath] = dirMeta
+                    } else {
+                        // 文件
+                        let fileSize =
+                            (try? fileManager.attributesOfItem(atPath: fileURL.path)[.size]
+                                as? Int64) ?? 0
+
+                        // 计算哈希 (这里可能会有 I/O，但只针对变更文件)
+                        let hash = try await syncManager.computeFileHash(fileURL: fileURL)
+
+                        updatedTotalSize += fileSize
+
+                        let fileMeta = FileMetadata(
+                            hash: hash,
+                            mtime: mtime,
+                            size: fileSize,
+                            creationDate: creationDate,
+                            vectorClock: vc
+                        )
+                        updatedMetadata[relativePath] = fileMeta
+                    }
+                }
+            } catch {
+                AppLogger.syncPrint("[FolderStatistics] ⚠️ 增量更新文件失败: \(relativePath) - \(error)")
+            }
+        }
+
+        // 3. 重建 MST (基于内存 metadata，无磁盘 I/O)
+        let newMST = MerkleSearchTree()
+        for (path, meta) in updatedMetadata {
+            newMST.insert(key: path, value: meta.hash)
+        }
+
+        // 4. 更新缓存
+        await MainActor.run {
+            self.stateCache[syncID] = StateCache(
+                mst: newMST,
+                metadata: updatedMetadata,
+                folderCount: updatedFolderCount,
+                totalSize: updatedTotalSize,
+                timestamp: Date()
+            )
+        }
+
+        AppLogger.syncPrint(
+            "[FolderStatistics] ✨ 增量更新完成: \(folder.localPath.lastPathComponent), 变更数: \(changedPaths.count)"
+        )
+
+        return (newMST, updatedMetadata, updatedFolderCount, updatedTotalSize)
     }
 
     /// 使缓存失效

@@ -5,8 +5,9 @@ import Foundation
 /// 负责记录和处理本地文件系统的变更事件
 extension SyncManager {
     func recordLocalChange(
-        for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags
-    ) async {
+        for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags,
+        precomputedHash: String? = nil, saveToDisk: Bool = true
+    ) async -> (LocalChange?, VectorClock?) {
         // macOS 上 `/var` 是 `/private/var` 的符号链接，FSEvents 可能返回不同前缀。
         // 这里统一做路径规范化，避免出现类似 "private/xxx" 的错误相对路径，进而导致同步找不到文件。
         let basePath = folder.localPath.resolvingSymlinksInPath().standardizedFileURL.path
@@ -14,7 +15,7 @@ extension SyncManager {
             .resolvingSymlinksInPath()
             .standardizedFileURL
             .path
-        guard canonicalAbsolutePath.hasPrefix(basePath) else { return }
+        guard canonicalAbsolutePath.hasPrefix(basePath) else { return (nil, nil) }
 
         var relativePath = String(canonicalAbsolutePath.dropFirst(basePath.count))
         if relativePath.hasPrefix("/") { relativePath.removeFirst() }
@@ -28,13 +29,13 @@ extension SyncManager {
         if let lastWriteTime = syncWriteCooldown[cooldownKey],
             Date().timeIntervalSince(lastWriteTime) < syncCooldownDuration
         {
-            return
+            return (nil, nil)
         }
 
         // 忽略文件夹本身（根路径）
         if relativePath == "." {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略文件夹本身: \(relativePath)")
-            return
+            return (nil, nil)
         }
 
         let fileManager = FileManager.default
@@ -69,13 +70,13 @@ extension SyncManager {
         // 忽略冲突文件（冲突文件不应该被同步，避免无限循环）
         if ConflictFileFilter.isConflictFile(relativePath) {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略冲突文件: \(relativePath)")
-            return
+            return (nil, nil)
         }
 
         // 忽略排除规则或隐藏文件
         if isIgnored(relativePath, folder: folder) {
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 忽略文件（排除规则）: \(relativePath)")
-            return
+            return (nil, nil)
         }
 
         // 清理过期的待处理重命名操作，并将过期的转换为删除操作
@@ -131,7 +132,7 @@ extension SyncManager {
         }
 
         // 内部缓存哈希计算结果，避免在同一个函数中多次重复计算 IO
-        var cachedHash: String? = nil
+        var cachedHash: String? = precomputedHash
         let getHash = { () async throws -> String in
             if let h = cachedHash { return h }
             // Check if directory
@@ -163,7 +164,7 @@ extension SyncManager {
                     AppLogger.syncPrint(
                         "[recordLocalChange] ⏭️ 跳过重复事件（mtime 未变）: \(relativePath)"
                     )
-                    return
+                    return (nil, nil)
                 }
 
                 let currentHash = (try? await getHash()) ?? knownMeta.hash
@@ -171,14 +172,14 @@ extension SyncManager {
                     AppLogger.syncPrint(
                         "[recordLocalChange] ⏭️ 跳过重复事件（哈希未变）: \(relativePath)"
                     )
-                    return
+                    return (nil, nil)
                 }
                 // 哈希不同：允许继续处理该事件（避免漏记真实变更）
             } else {
                 AppLogger.syncPrint(
                     "[recordLocalChange] ⏭️ 跳过重复事件（近期已处理且无基准元数据）: \(relativePath)"
                 )
-                return
+                return (nil, nil)
             }
         }
         // 记录本次处理时间
@@ -243,7 +244,7 @@ extension SyncManager {
                                 "[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)"
                             )
                             // 暂时不记录，等待新文件出现
-                            return
+                            return (nil, nil)
                         }
                     } else {
                         // 没有待处理的重命名操作，保存哈希值等待新文件出现
@@ -255,7 +256,7 @@ extension SyncManager {
                             "[recordLocalChange] 🔄 检测到可能的重命名操作，保存旧文件哈希值: \(relativePath) (哈希: \(knownMeta.hash.prefix(16))...)"
                         )
                         // 暂时不记录，等待新文件出现
-                        return
+                        return (nil, nil)
                     }
                 }
             }
@@ -272,7 +273,7 @@ extension SyncManager {
                 AppLogger.syncPrint(
                     "[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Renamed 标志，等待新文件出现以检测重命名: \(relativePath)"
                 )
-                return
+                return (nil, nil)
             }
 
             // 如果文件在已知路径列表中，或者设置了 Removed 标志，记录为删除
@@ -313,7 +314,7 @@ extension SyncManager {
                 AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件不存在但不在已知列表中，且无 Removed/Renamed 标志")
             }
             // 如果文件不在已知列表中，且没有 Removed/Renamed 标志，可能是从未存在过的文件，不记录
-            return
+            return (nil, nil)
         }
 
         // 2. 文件存在的情况
@@ -352,7 +353,7 @@ extension SyncManager {
 
                         if !mtimeChanged && !creationChanged {
                             AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件内容及元数据未变化")
-                            return
+                            return (nil, nil)
                         }
                         AppLogger.syncPrint(
                             "[recordLocalChange] ✅ 记录为修改：元数据已变化 (mtime: \(mtimeChanged), creation: \(creationChanged))"
@@ -373,7 +374,7 @@ extension SyncManager {
                             try? StorageManager.shared.addLocalChange(change)
                             AppLogger.syncPrint("[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
                         }
-                        return
+                        return (nil, nil)
                     }
                 } catch {
                     AppLogger.syncPrint("[recordLocalChange] ⚠️ 无法计算哈希值: \(error)")
@@ -396,13 +397,13 @@ extension SyncManager {
                     } else {
                         AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：无法计算哈希且无 Modified 标志")
                     }
-                    return
+                    return (nil, nil)
                 }
             } else {
                 // 文件在已知路径列表中，但没有元数据，可能是新添加的
                 // 这种情况不应该发生，但为了安全，不记录
                 AppLogger.syncPrint("[recordLocalChange] ⚠️ 文件在已知路径中但没有元数据，跳过记录")
-                return
+                return (nil, nil)
             }
         }
 
@@ -413,7 +414,7 @@ extension SyncManager {
             // 有 Removed 标志，即使文件存在，也不应该记录为新建
             // 可能是删除操作的中间状态，不记录
             AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Removed 标志（可能是删除中间状态）")
-            return
+            return (nil, nil)
         }
 
         // 检查是否是重命名（通过 Renamed 标志或哈希值匹配）
@@ -536,7 +537,7 @@ extension SyncManager {
 
         // 如果是重命名操作的旧路径，跳过处理
         if isOldPathOfRename {
-            return
+            return (nil, nil)
         }
 
         if let oldPath = matchedRename {
@@ -572,8 +573,11 @@ extension SyncManager {
                 path: relativePath,
                 peerID: myPeerID
             )
-            VectorClockManager.saveVectorClock(
-                folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
+            // 如果 saveToDisk 为 true，则立即保存；否则返回给调用者处理
+            if saveToDisk {
+                await VectorClockManager.saveVectorClock(
+                    folderID: folder.id, syncID: folder.syncID, path: relativePath, vc: vc)
+            }
             updatedVC = vc
         }
 
@@ -661,12 +665,163 @@ extension SyncManager {
             AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(relativePath)")
         }
 
-        Task.detached {
-            try? StorageManager.shared.addLocalChange(change)
-            AppLogger.syncPrint(
-                "[recordLocalChange] 💾 已保存\(changeType == .created ? "新建" : changeType == .renamed ? "重命名" : changeType == .deleted ? "删除" : "修改")记录: \(relativePath)"
-            )
+        if saveToDisk {
+            Task.detached {
+                try? StorageManager.shared.addLocalChange(change)
+                AppLogger.syncPrint(
+                    "[recordLocalChange] 💾 已保存\(changeType == .created ? "新建" : changeType == .renamed ? "重命名" : changeType == .deleted ? "删除" : "修改")记录: \(relativePath)"
+                )
+            }
         }
+        return (change, saveToDisk ? nil : updatedVC)
+    }
+
+    /// 批量记录本地变更（性能优化版）
+    /// - 并行计算哈希（IO 密集型操作剥离到后台）
+    /// - 批量写入变更日志（减少磁盘 IO）
+    func recordBatchLocalChanges(
+        for folder: SyncFolder, paths: Set<String>, flags: [String: FSEventStreamEventFlags]
+    ) async {
+        if paths.isEmpty { return }
+
+        AppLogger.syncPrint("[recordBatchLocalChanges] 🚀 开始批量处理 \(paths.count) 个文件变更")
+        let start = Date()
+
+        // 1. 预过滤：排除显而易见的忽略文件（避免无效的并发任务）
+        // 这里只是简单的字符串检查，不进行文件系统调用
+        var candidatePaths: [String] = []
+        for absolutePath in paths {
+            let relativePath = getRelativePath(
+                absolutePath: absolutePath, base: folder.localPath.path)
+
+            // 忽略 .DS_Store 及其他忽略规则
+            if relativePath == "." || relativePath.hasSuffix("/.DS_Store")
+                || isIgnored(relativePath, folder: folder)
+                || ConflictFileFilter.isConflictFile(relativePath)
+            {
+                continue
+            }
+            candidatePaths.append(absolutePath)
+        }
+
+        if candidatePaths.isEmpty {
+            AppLogger.syncPrint("[recordBatchLocalChanges] ⏭️ 所有文件均被忽略或无效")
+            return
+        }
+
+        // 2. 并行计算哈希（仅对存在的文件）
+        // 使用 TaskGroup 并发执行哈希计算
+        let fileHashes = await withTaskGroup(of: (String, String?).self) { group in
+            for absolutePath in candidatePaths {
+                group.addTask {
+                    let fileURL = URL(fileURLWithPath: absolutePath)
+
+                    // 检查文件是否存在且非目录
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: absolutePath, isDirectory: &isDir) {
+                        if isDir.boolValue {
+                            return (absolutePath, "DIRECTORY")
+                        }
+                        // 计算哈希（computeFileHash 是 nonisolated，会在后台线程运行）
+                        if let hash = try? await self.computeFileHash(fileURL: fileURL) {
+                            return (absolutePath, hash)
+                        }
+                    }
+                    return (absolutePath, nil)
+                }
+            }
+
+            var results: [String: String] = [:]
+            for await (path, hash) in group {
+                if let h = hash {
+                    results[path] = h
+                }
+            }
+            return results
+        }
+
+        // 3. 串行执行业务逻辑（MainActor）并收集变更
+        // 这里必须串行，因为 recordLocalChange 会修改 context 状态 (lastKnownMetadata 等)
+        var changesToSave: [LocalChange] = []
+        var vcsToSave: [String: VectorClock] = [:]
+
+        for absolutePath in paths {  // 遍历原始 paths，确保不遗漏删除事件（candidatePaths 可能只包含存在的文件）
+            let flag = flags[absolutePath] ?? FSEventStreamEventFlags(kFSEventStreamEventFlagNone)
+
+            // 如果我们在预计算中有名单，使用预计算的哈希
+            // 如果没有（例如文件被删除），precomputedHash 为 nil，recordLocalChange 会正确处理
+            let precomputedHash = fileHashes[absolutePath]
+
+            // 调用核心逻辑，但仅收集结果，不写入磁盘
+            let (change, vc) = await recordLocalChange(
+                for: folder,
+                absolutePath: absolutePath,
+                flags: flag,
+                precomputedHash: precomputedHash,
+                saveToDisk: false
+            )
+
+            if let c = change {
+                changesToSave.append(c)
+            }
+            if let v = vc {
+                vcsToSave[
+                    getRelativePath(absolutePath: absolutePath, base: folder.localPath.path)] = v
+            }
+        }
+
+        let batchVCs = vcsToSave  // Capture for task block
+        let folderID = folder.id
+        let syncID = folder.syncID
+
+        // 4. 批量写入磁盘
+        if !changesToSave.isEmpty || !batchVCs.isEmpty {
+            let count = changesToSave.count
+            let vcCount = batchVCs.count
+            Task.detached {
+                if !changesToSave.isEmpty {
+                    do {
+                        try StorageManager.shared.addLocalChanges(changesToSave)
+                        AppLogger.syncPrint("[recordBatchLocalChanges] 💾 批量保存了 \(count) 条变更记录")
+                    } catch {
+                        AppLogger.syncPrint("[recordBatchLocalChanges] ❌ 批量保存变更记录失败: \(error)")
+                    }
+                }
+
+                if !batchVCs.isEmpty {
+                    await VectorClockManager.saveVectorClocks(
+                        folderID: folderID, syncID: syncID, updates: batchVCs)
+                    AppLogger.syncPrint(
+                        "[recordBatchLocalChanges] 💾 批量保存了 \(vcCount) 个 VectorClock")
+                }
+            }
+        }
+
+        // 5. 触发增量更新（通知 Statistics）
+        // 这里的 changesToSave 包含的是 LocalChange 对象，path 是相对路径
+        let changedRelativePaths = Set(changesToSave.map { $0.path })
+        if !changedRelativePaths.isEmpty {
+            self.refreshFileCount(for: folder, changedPaths: changedRelativePaths)
+        }
+
+        let duration = Date().timeIntervalSince(start)
+        AppLogger.syncPrint(
+            "[recordBatchLocalChanges] ✅ 完成批量处理，耗时: \(String(format: "%.3f", duration))s")
+    }
+
+    // 辅助函数：获取相对路径
+    private func getRelativePath(absolutePath: String, base: String) -> String {
+        // 标准化路径以确保匹配
+        let standardAbs = URL(fileURLWithPath: absolutePath).standardizedFileURL.path
+        let standardBase = URL(fileURLWithPath: base).standardizedFileURL.path
+
+        if standardAbs.hasPrefix(standardBase) {
+            var relative = String(standardAbs.dropFirst(standardBase.count))
+            if relative.hasPrefix("/") { relative.removeFirst() }
+            if relative.isEmpty { return "." }
+            return relative
+        }
+        return absolutePath  // Fallback
     }
 
     /// 在重命名检测窗口到期后兜底处理删除（避免没有后续事件导致删除不被记录）

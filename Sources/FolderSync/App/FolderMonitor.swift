@@ -11,6 +11,9 @@ class FolderMonitor {
     private var debounceTasks: [String: Task<Void, Never>] = [:]
     private let debounceDelay: TimeInterval = 2.0  // 2 秒防抖延迟
 
+    // 事件缓冲：syncID -> (path -> flags)
+    private var eventBuffer: [String: [String: FSEventStreamEventFlags]] = [:]
+
     // 文件写入稳定性检测：记录文件路径和上次检查的大小
     private var fileStabilityCheck: [String: (size: Int64, lastCheck: Date)] = [:]
     private let fileStabilityDelay: TimeInterval = 3.0  // 文件大小稳定3秒后才认为写入完成
@@ -26,43 +29,10 @@ class FolderMonitor {
         // 这样可以提前过滤，只对匹配的 syncID 触发同步
 
         let monitor = FSEventsMonitor(path: folder.localPath.path) { [weak self] path, flags in
-            guard let self = self, let syncManager = self.syncManager else { return }
+            guard let self = self else { return }
 
-            // 文件变化时直接触发统计
             Task { @MainActor in
-                if let updatedFolder = syncManager.folders.first(where: { $0.id == folder.id }) {
-                    await syncManager.recordLocalChange(
-                        for: updatedFolder, absolutePath: path, flags: flags)
-                    syncManager.refreshFileCount(for: updatedFolder)
-                }
-            }
-
-            // 同步仍然使用防抖机制（避免频繁同步）
-            // 检查文件是否正在被写入（文件大小是否稳定）
-            Task { [weak self] in
-                guard let self = self, self.syncManager != nil else { return }
-
-                // 检查文件是否存在且是文件（不是目录）
-                let fileManager = FileManager.default
-                var isDirectory: ObjCBool = false
-                guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory),
-                    !isDirectory.boolValue
-                else {
-                    // 是目录或文件不存在，直接触发同步
-                    self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
-                    return
-                }
-
-                // 检查文件是否正在写入
-                let isStable = await self.checkFileStability(filePath: path)
-                if isStable {
-                    // 文件已稳定，触发同步
-                    self.triggerSyncAfterDebounce(for: folder, syncID: folder.syncID)
-                } else {
-                    // 文件正在写入，等待稳定后再触发同步
-                    await self.waitForFileStability(
-                        filePath: path, folder: folder, syncID: folder.syncID)
-                }
+                self.bufferEvent(path, flags: flags, for: folder)
             }
         }
         monitor.start()
@@ -138,7 +108,7 @@ class FolderMonitor {
 
             let isStable = await checkFileStability(filePath: filePath)
             if isStable {
-                triggerSyncAfterDebounce(for: folder, syncID: syncID)
+                self.triggerSyncAfterDebounce(for: folder, syncID: syncID)
                 return
             }
         }
@@ -155,7 +125,7 @@ class FolderMonitor {
         debounceTasks[syncID]?.cancel()
 
         // 创建新的防抖任务
-        let debounceTask = Task { [weak self] in
+        debounceTasks[syncID] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
 
             guard !Task.isCancelled else { return }
@@ -175,8 +145,6 @@ class FolderMonitor {
 
             if hasSyncInProgress {
                 AppLogger.syncPrint("[FolderMonitor] ⏭️ 同步已进行中，延迟重试: \(syncID)")
-                // 重新调度防抖触发（相当于延迟重试）
-                // 注意：这里不需要手动 delay，因为 triggerSyncAfterDebounce 内部会再次等待 debounceDelay
                 self.triggerSyncAfterDebounce(for: folder, syncID: syncID)
                 return
             }
@@ -184,8 +152,75 @@ class FolderMonitor {
             AppLogger.syncPrint("[FolderMonitor] 🔄 防抖延迟结束，开始同步: \(syncID)")
             syncManager.triggerSync(for: folder)
         }
+    }
 
-        debounceTasks[syncID] = debounceTask
+    /// 缓冲事件并延迟处理
+    private func bufferEvent(_ path: String, flags: FSEventStreamEventFlags, for folder: SyncFolder)
+    {
+        let syncID = folder.syncID
+
+        // 初始化缓冲区
+        if eventBuffer[syncID] == nil {
+            eventBuffer[syncID] = [:]
+        }
+        // 累积标志位 (OR 操作)，以捕获所有类型的变更
+        let currentFlags =
+            eventBuffer[syncID]?[path] ?? FSEventStreamEventFlags(kFSEventStreamEventFlagNone)
+        eventBuffer[syncID]?[path] = currentFlags | flags
+
+        // 取消现有的处理任务，重新计时（防抖）
+        debounceTasks[syncID]?.cancel()
+
+        debounceTasks[syncID] = Task { [weak self] in
+            // 等待防抖延迟，通过这种方式聚合短时间内的多个文件事件
+            try? await Task.sleep(nanoseconds: UInt64(self?.debounceDelay ?? 2.0) * 1_000_000_000)
+
+            guard !Task.isCancelled else { return }
+            guard let self = self, let syncManager = self.syncManager else { return }
+
+            // 提取并清空缓冲区
+            let pathsAndFlags = self.eventBuffer[syncID] ?? [:]
+            self.eventBuffer[syncID]?.removeAll()
+
+            if pathsAndFlags.isEmpty { return }
+            let pathsToProcess = Set(pathsAndFlags.keys)
+
+            AppLogger.syncPrint("[FolderMonitor] 📦 批量处理 \(pathsToProcess.count) 个文件变更事件: \(syncID)")
+
+            // 1. 批量记录所有变更（使用新的批量处理接口）
+            if let updatedFolder = await MainActor.run(body: {
+                syncManager.folders.first(where: { $0.id == folder.id })
+            }) {
+                // 使用 recordBatchLocalChanges 替代循环调用 recordLocalChange
+                await syncManager.recordBatchLocalChanges(
+                    for: updatedFolder, paths: pathsToProcess, flags: pathsAndFlags)
+
+                // 2. 刷新统计频率减低（使用增量更新）- 已集成在 recordBatchLocalChanges 内部，但为了保险起见，保留这里
+                // 注意：recordBatchLocalChanges 内部已经调用了 refreshFileCount，所以这里可以省略，或者保留作为冗余
+                // 为避免重复计算，这里注释掉，依赖 recordBatchLocalChanges 内部调用
+                // syncManager.refreshFileCount(for: updatedFolder, changedPaths: pathsToProcess)
+
+                // 3. 检查同步状态并触发同步
+                let hasSyncInProgress = await MainActor.run {
+                    let allPeers = syncManager.peerManager.allPeers
+                    for peerInfo in allPeers {
+                        let syncKey = "\(syncID):\(peerInfo.peerIDString)"
+                        if syncManager.syncInProgress.contains(syncKey) {
+                            return true
+                        }
+                    }
+                    return false
+                }
+
+                if hasSyncInProgress {
+                    AppLogger.syncPrint("[FolderMonitor] ⏭️ 同步已进行中，忽略本次触发（由后续同步循环处理）: \(syncID)")
+                    return
+                }
+
+                AppLogger.syncPrint("[FolderMonitor] 🔄 批量事件触发同步: \(syncID)")
+                syncManager.triggerSync(for: updatedFolder)
+            }
+        }
     }
 
     /// 检查文件是否稳定（供外部调用，用于 calculateFullState）
@@ -197,5 +232,4 @@ class FolderMonitor {
         }
         return true  // 没有记录，认为稳定
     }
-
 }

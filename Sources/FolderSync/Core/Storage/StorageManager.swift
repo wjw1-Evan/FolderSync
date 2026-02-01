@@ -57,7 +57,7 @@ public class StorageManager {
                 at: blocksDir, withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o755])
         }
-        
+
         // 创建快照存储目录
         if !fileManager.fileExists(atPath: snapshotsDir.path) {
             try fileManager.createDirectory(
@@ -142,11 +142,13 @@ public class StorageManager {
                     "corrupted.\(Int(Date().timeIntervalSince1970)).backup")
                 do {
                     try data.write(to: backupFile, options: [.atomic])
-                    AppLogger.syncPrint("[StorageManager] 💾 已备份损坏的配置文件到: \(backupFile.lastPathComponent)")
+                    AppLogger.syncPrint(
+                        "[StorageManager] 💾 已备份损坏的配置文件到: \(backupFile.lastPathComponent)")
                     AppLogger.syncPrint("[StorageManager] ⚠️ 警告: 文件夹配置解析失败，已备份损坏的文件")
                     AppLogger.syncPrint("[StorageManager]   如果这是重要数据，请尝试手动修复或从备份恢复")
                 } catch {
-                    AppLogger.syncPrint("[StorageManager] ⚠️ 无法备份损坏的配置文件: \(error.localizedDescription)")
+                    AppLogger.syncPrint(
+                        "[StorageManager] ⚠️ 无法备份损坏的配置文件: \(error.localizedDescription)")
                 }
 
                 // 如果解析失败，返回空数组而不是抛出错误，避免应用启动失败
@@ -170,7 +172,8 @@ public class StorageManager {
                     try? oldData.write(to: backupFile, options: [.atomic])
                 } catch {
                     // 备份失败不影响主流程，只记录警告
-                    AppLogger.syncPrint("[StorageManager] ⚠️ 无法备份旧配置文件: \(error.localizedDescription)")
+                    AppLogger.syncPrint(
+                        "[StorageManager] ⚠️ 无法备份旧配置文件: \(error.localizedDescription)")
                 }
             }
 
@@ -220,7 +223,9 @@ public class StorageManager {
         return vc
     }
 
-    public func setVectorClock(folderID: UUID, syncID: String, path: String, _ vc: VectorClock) throws {
+    public func setVectorClock(folderID: UUID, syncID: String, path: String, _ vc: VectorClock)
+        throws
+    {
         let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
         let dir = fileURL.deletingLastPathComponent()
 
@@ -233,6 +238,60 @@ public class StorageManager {
         try data.write(to: fileURL, options: [.atomic])
     }
 
+    /// 批量保存 Vector Clock (并行写入)
+    public func setVectorClocks(folderID: UUID, syncID: String, updates: [String: VectorClock])
+        async throws
+    {
+        if updates.isEmpty { return }
+
+        // 1. 确保目录存在（只检查一次）
+        // 这里假设同一个 syncID 下的所有 VC 都在同一个目录（或者少量几个子目录）
+        // vectorClockFile 实现显示它是基于 folderID/syncID/path 结构的
+        // 目前 vectorClockFile 的实现是将 path 扁平化为文件名，所以都在 syncID 目录下
+        let samplePath = updates.keys.first ?? "sample"
+        let sampleURL = vectorClockFile(folderID: folderID, syncID: syncID, path: samplePath)
+        let dir = sampleURL.deletingLastPathComponent()
+
+        if !fileManager.fileExists(atPath: dir.path) {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+
+        // 2. 并行写入
+        // 使用 actor 来安全收集错误
+        actor ErrorCollector {
+            var errors: [Error] = []
+            func add(_ error: Error) { errors.append(error) }
+            func first() -> Error? { return errors.first }
+        }
+        let collector = ErrorCollector()
+
+        let encoder = JSONEncoder()
+
+        // 使用 withThrowingTaskGroup 因为我们想等待所有完成，但不一定要抛出第一个错误，
+        // 我们想尽可能保存更多，然后报告错误
+        await withTaskGroup(of: Void.self) { group in
+            for (path, vc) in updates {
+                group.addTask {
+                    do {
+                        let fileURL = self.vectorClockFile(
+                            folderID: folderID, syncID: syncID, path: path)
+                        let data = try encoder.encode(vc)
+                        try data.write(to: fileURL, options: [.atomic])
+                    } catch {
+                        await collector.add(error)
+                        AppLogger.syncPrint(
+                            "[StorageManager] ⚠️ 批量保存 Vector Clock 失败: \(path), 错误: \(error)")
+                    }
+                }
+            }
+        }
+
+        // 如果有错误，抛出第一个
+        if let firstError = await collector.first() {
+            throw firstError
+        }
+    }
+
     public func deleteVectorClock(folderID: UUID, syncID: String, path: String) throws {
         let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
         try? fileManager.removeItem(at: fileURL)
@@ -243,7 +302,8 @@ public class StorageManager {
         let safePath = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(
             of: "\\", with: "_")
         // 以 folderID 作为命名空间，避免同一进程/同一用户下多个“设备”实例共享同一份 VC 数据
-        let folderDir = vectorClocksDir.appendingPathComponent(folderID.uuidString, isDirectory: true)
+        let folderDir = vectorClocksDir.appendingPathComponent(
+            folderID.uuidString, isDirectory: true)
         let syncDir = folderDir.appendingPathComponent(syncID, isDirectory: true)
         return syncDir.appendingPathComponent("\(safePath).json")
     }
@@ -447,27 +507,30 @@ public class StorageManager {
 
     // MARK: - 本地变更历史
 
-    public func addLocalChange(_ change: LocalChange) throws {
-        var newChange = change
+    public func addLocalChanges(_ newChanges: [LocalChange]) throws {
+        if newChanges.isEmpty { return }
+
         var caughtError: Error?
 
         cacheQueue.sync {
             do {
                 var changes = try loadLocalChangesLocked()
 
-                // 分配全局递增序列，解决并发写入顺序问题
-                if newChange.sequence == nil {
-                    newChange.sequence = nextLocalChangeSequence
-                    nextLocalChangeSequence += 1
-                } else if let seq = newChange.sequence, seq >= nextLocalChangeSequence {
-                    nextLocalChangeSequence = seq + 1
-                }
+                for var newChange in newChanges {
+                    // 分配全局递增序列
+                    if newChange.sequence == nil {
+                        newChange.sequence = nextLocalChangeSequence
+                        nextLocalChangeSequence += 1
+                    } else if let seq = newChange.sequence, seq >= nextLocalChangeSequence {
+                        nextLocalChangeSequence = seq + 1
+                    }
 
-                // 检查是否已有相同 ID 的记录
-                if let index = changes.firstIndex(where: { $0.id == newChange.id }) {
-                    changes[index] = newChange
-                } else {
-                    changes.append(newChange)
+                    // 检查是否已有相同 ID 的记录
+                    if let index = changes.firstIndex(where: { $0.id == newChange.id }) {
+                        changes[index] = newChange
+                    } else {
+                        changes.append(newChange)
+                    }
                 }
 
                 // 按 sequence 降序排序，限制数量（保留最新的 2000 条）
@@ -485,6 +548,10 @@ public class StorageManager {
         if let err = caughtError { throw err }
 
         NotificationCenter.default.post(name: .localChangeAdded, object: nil)
+    }
+
+    public func addLocalChange(_ change: LocalChange) throws {
+        try addLocalChanges([change])
     }
 
     public func getLocalChanges(folderID: UUID? = nil, limit: Int = 200, forceReload: Bool = false)
@@ -561,55 +628,56 @@ public class StorageManager {
     }
 
     // MARK: - 文件夹快照管理（原子记录）
-    
+
     /// 原子性地保存文件夹快照
     /// 使用临时文件 + 原子移动确保原子性
     public func saveSnapshot(_ snapshot: FolderSnapshot) throws {
         let snapshotFile = snapshotsDir.appendingPathComponent("\(snapshot.syncID).json")
         let tempFile = snapshotFile.appendingPathExtension("tmp")
-        
+
         // 先写入临时文件
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(snapshot)
         try data.write(to: tempFile, options: [.atomic])
-        
+
         // 如果目标文件已存在，先删除（moveItem 不会自动替换）
         if fileManager.fileExists(atPath: snapshotFile.path) {
             try fileManager.removeItem(at: snapshotFile)
         }
-        
+
         // 原子性地移动到目标文件
         try fileManager.moveItem(at: tempFile, to: snapshotFile)
     }
-    
+
     /// 加载指定 syncID 的最新快照
     public func loadSnapshot(syncID: String) throws -> FolderSnapshot? {
         let snapshotFile = snapshotsDir.appendingPathComponent("\(syncID).json")
-        
+
         guard fileManager.fileExists(atPath: snapshotFile.path) else {
             return nil
         }
-        
+
         let data = try Data(contentsOf: snapshotFile)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(FolderSnapshot.self, from: data)
     }
-    
+
     /// 加载所有快照
     public func loadAllSnapshots() throws -> [FolderSnapshot] {
         guard fileManager.fileExists(atPath: snapshotsDir.path) else {
             return []
         }
-        
-        let files = try fileManager.contentsOfDirectory(at: snapshotsDir, includingPropertiesForKeys: nil)
+
+        let files = try fileManager.contentsOfDirectory(
+            at: snapshotsDir, includingPropertiesForKeys: nil)
         let jsonFiles = files.filter { $0.pathExtension == "json" }
-        
+
         var snapshots: [FolderSnapshot] = []
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        
+
         for file in jsonFiles {
             do {
                 let data = try Data(contentsOf: file)
@@ -620,10 +688,10 @@ public class StorageManager {
                 // 继续处理其他文件
             }
         }
-        
+
         return snapshots
     }
-    
+
     /// 删除指定 syncID 的快照
     public func deleteSnapshot(syncID: String) throws {
         let snapshotFile = snapshotsDir.appendingPathComponent("\(syncID).json")
@@ -631,7 +699,7 @@ public class StorageManager {
             try fileManager.removeItem(at: snapshotFile)
         }
     }
-    
+
     /// 比较两个快照，返回变更列表
     public func compareSnapshots(_ old: FolderSnapshot?, _ new: FolderSnapshot) -> (
         created: [String],
@@ -643,15 +711,15 @@ public class StorageManager {
             // 如果没有旧快照，所有文件都是新建的
             return (created: Array(new.files.keys), modified: [], deleted: [], renamed: [])
         }
-        
+
         var created: [String] = []
         var modified: [String] = []
         var deleted: [String] = []
         var renamed: [(old: String, new: String)] = []
-        
+
         let oldPaths = Set(old.files.keys)
         let newPaths = Set(new.files.keys)
-        
+
         // 检测删除和可能的重命名
         for oldPath in oldPaths {
             if !newPaths.contains(oldPath) {
@@ -670,7 +738,7 @@ public class StorageManager {
                 }
             }
         }
-        
+
         // 检测新建和修改
         for newPath in newPaths {
             if !oldPaths.contains(newPath) {
@@ -687,7 +755,7 @@ public class StorageManager {
                 }
             }
         }
-        
+
         return (created: created, modified: modified, deleted: deleted, renamed: renamed)
     }
 

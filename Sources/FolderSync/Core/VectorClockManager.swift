@@ -209,6 +209,21 @@ class VectorClockManager {
         }
     }
 
+    /// 批量保存 Vector Clock
+    /// - Parameters:
+    ///   - syncID: 同步 ID
+    ///   - updates: [文件路径: VectorClock] 映射
+    static func saveVectorClocks(folderID: UUID, syncID: String, updates: [String: VectorClock])
+        async
+    {
+        do {
+            try await StorageManager.shared.setVectorClocks(
+                folderID: folderID, syncID: syncID, updates: updates)
+        } catch {
+            AppLogger.syncPrint("[VectorClockManager] ⚠️ 批量保存 Vector Clock 失败: \(error)")
+        }
+    }
+
     /// 获取 Vector Clock
     /// - Parameters:
     ///   - syncID: 同步 ID

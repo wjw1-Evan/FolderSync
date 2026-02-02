@@ -249,42 +249,17 @@ public class SyncManager: ObservableObject {
                     // 这样可以确保统计数据和"所有设备"列表始终保持一致
                     self.updateDeviceCounts()
 
-                    // 利用广播中的 syncID 信息，只对匹配的 syncID 触发同步
-                    /*
-                    let remoteSyncIDSet = Set(remoteSyncIDs)
-                    let matchingFolders = self.folders.filter { folder in
-                        remoteSyncIDSet.contains(folder.syncID)
-                    }
-                    */
-
-                    /*
-                    if !matchingFolders.isEmpty {
-                        AppLogger.syncPrint(
-                            "[SyncManager] ✅ 发现匹配的 syncID: peer=\(peerIDString.prefix(12))..., 匹配数=\(matchingFolders.count)/\(self.folders.count)"
-                        )
-                    } else if !remoteSyncIDs.isEmpty {
-                        AppLogger.syncPrint(
-                            "[SyncManager] ℹ️ 远程设备没有匹配的 syncID: peer=\(peerIDString.prefix(12))..., 远程syncID数=\(remoteSyncIDs.count), 本地syncID数=\(self.folders.count)"
-                        )
-                    }
-                    */
-
-                    // 对于新对等点，只同步匹配的文件夹
-                    // 对于已存在的对等点，只同步匹配且不在冷却期内的文件夹
-                    // 只有当 DataChannel 已经就绪时才通过广播触发增量同步
-                    // 如果连接尚未建立或正在建立，同步逻辑应由 onPeerConnected 触发
-                    // 优化：移除了基于广播的定时同步逻辑
-                    // 这里的逻辑会导致每收到一次广播就尝试同步一次（尽管有 30s 冷却），造成不必要的资源消耗。
-                    // 现在的同步策略改为事件驱动：
-                    // 1. 设备上线时：由 onPeerConnected 触发一次初始同步
-                    // 2. 文件变化时：由 FolderMonitor 触发增量同步
-                    // 因此，这里不再需要处理广播触发的同步。
-
-                    /*
+                    // 关键修复：当收到广播（包含 SyncID）时，如果连接已就绪，应尝试触发同步。
+                    // 这解决了 "DataChannel 先连接但 SyncID 后到达" 的竞争条件。
                     if !wasNew && self.p2pNode.webRTC.isDataChannelReady(for: peerIDString) {
+                        let remoteSyncIDSet = Set(remoteSyncIDs)
+                        let matchingFolders = self.folders.filter { folder in
+                            remoteSyncIDSet.contains(folder.syncID)
+                        }
+
                         for folder in matchingFolders {
                             let syncKey = "\(folder.syncID):\(peerIDString)"
-                    
+
                             // 广播防抖：1秒内不重复处理同一个 peer-folder 的广播
                             if let lastProcessed = self.lastBroadcastProcessedTime[syncKey],
                                 Date().timeIntervalSince(lastProcessed) < 1.0
@@ -292,8 +267,8 @@ public class SyncManager: ObservableObject {
                                 continue
                             }
                             self.lastBroadcastProcessedTime[syncKey] = Date()
-                    
-                            // 关键修复：同步检查并立即插入，防止 Task 启动延迟导致的任务风暴
+
+                            // 检查是否应该同步（包含 30s 冷却检查）
                             if !self.syncInProgress.contains(syncKey)
                                 && self.shouldSyncFolderWithPeer(
                                     peerID: peerIDString, folder: folder)
@@ -307,7 +282,7 @@ public class SyncManager: ObservableObject {
                             }
                         }
                     }
-                    */
+
                 }
             }
 

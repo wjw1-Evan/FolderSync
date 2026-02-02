@@ -63,7 +63,7 @@ extension SyncManager {
                     updateDeletedPaths(dp, for: folder.syncID)
                 }
 
-                AppLogger.syncPrint("[recordLocalChange] � 检测到目录变更，继续处理以同步属性: \(relativePath)")
+                // Log removed to reduce noise
             }
         }
 

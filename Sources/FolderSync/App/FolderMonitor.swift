@@ -192,8 +192,13 @@ class FolderMonitor {
                 syncManager.folders.first(where: { $0.id == folder.id })
             }) {
                 // 使用 recordBatchLocalChanges 替代循环调用 recordLocalChange
-                await syncManager.recordBatchLocalChanges(
+                let hasChanges = await syncManager.recordBatchLocalChanges(
                     for: updatedFolder, paths: pathsToProcess, flags: pathsAndFlags)
+
+                if !hasChanges {
+                    AppLogger.syncPrint("[FolderMonitor] ⏭️ 无有效变更，跳过同步触发: \(syncID)")
+                    return
+                }
 
                 // 2. 刷新统计频率减低（使用增量更新）- 已集成在 recordBatchLocalChanges 内部，但为了保险起见，保留这里
                 // 注意：recordBatchLocalChanges 内部已经调用了 refreshFileCount，所以这里可以省略，或者保留作为冗余

@@ -206,22 +206,22 @@ extension SyncManager {
         let hasRenamedFlag =
             (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed) != 0)
 
-        AppLogger.syncPrint("[recordLocalChange] 📝 开始处理变更:")
-        AppLogger.syncPrint("  - 文件路径: \(relativePath)")
-        AppLogger.syncPrint("  - 绝对路径: \(absolutePath)")
-        AppLogger.syncPrint("  - 文件存在: \(exists)")
-        AppLogger.syncPrint("  - 文件大小: \(size ?? 0) bytes")
-        AppLogger.syncPrint("  - 在已知路径: \(isKnownPath)")
-        AppLogger.syncPrint(
-            "  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)"
-        )
-
         // User Request: 如果没有关键标志，视为噪声，直接忽略
         // FSEvents 标志: Removed=false, Created=false, Modified=false, Renamed=false 该文件不需要处理
         if !hasRemovedFlag && !hasCreatedFlag && !hasModifiedFlag && !hasRenamedFlag {
-            AppLogger.syncPrint(
-                "[recordLocalChange] ⏭️ 跳过：无相关标志 (Removed/Created/Modified/Renamed 均为 false)")
+            // Log removed to reduce noise as per user request
             return (nil, nil)
+        } else {
+            AppLogger.syncPrint("[recordLocalChange] 📝 开始处理变更:")
+            AppLogger.syncPrint("  - 文件路径: \(relativePath)")
+            AppLogger.syncPrint("  - 绝对路径: \(absolutePath)")
+            AppLogger.syncPrint("  - 文件存在: \(exists)")
+            AppLogger.syncPrint("  - 文件大小: \(size ?? 0) bytes")
+            AppLogger.syncPrint("  - 在已知路径: \(isKnownPath)")
+            AppLogger.syncPrint(
+                "  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)"
+            )
+
         }
 
         // 逻辑判断：基于文件状态和已知路径列表确定变更类型
@@ -675,10 +675,15 @@ extension SyncManager {
     /// 批量记录本地变更（性能优化版）
     /// - 并行计算哈希（IO 密集型操作剥离到后台）
     /// - 批量写入变更日志（减少磁盘 IO）
+    /// 批量记录本地变更（性能优化版）
+    /// - 并行计算哈希（IO 密集型操作剥离到后台）
+    /// - 批量写入变更日志（减少磁盘 IO）
+    /// - Returns: Bool indicating if any changes were recorded
+    @discardableResult
     func recordBatchLocalChanges(
         for folder: SyncFolder, paths: Set<String>, flags: [String: FSEventStreamEventFlags]
-    ) async {
-        if paths.isEmpty { return }
+    ) async -> Bool {
+        if paths.isEmpty { return false }
 
         AppLogger.syncPrint("[recordBatchLocalChanges] 🚀 开始批量处理 \(paths.count) 个文件变更")
         let start = Date()
@@ -702,7 +707,7 @@ extension SyncManager {
 
         if candidatePaths.isEmpty {
             AppLogger.syncPrint("[recordBatchLocalChanges] ⏭️ 所有文件均被忽略或无效")
-            return
+            return false
         }
 
         // 2. 并行计算哈希（仅对存在的文件）
@@ -803,6 +808,8 @@ extension SyncManager {
         let duration = Date().timeIntervalSince(start)
         AppLogger.syncPrint(
             "[recordBatchLocalChanges] ✅ 完成批量处理，耗时: \(String(format: "%.3f", duration))s")
+
+        return !changesToSave.isEmpty
     }
 
     // 辅助函数：获取相对路径

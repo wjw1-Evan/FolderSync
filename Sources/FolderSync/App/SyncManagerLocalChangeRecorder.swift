@@ -216,6 +216,14 @@ extension SyncManager {
             "  - FSEvents 标志: Removed=\(hasRemovedFlag), Created=\(hasCreatedFlag), Modified=\(hasModifiedFlag), Renamed=\(hasRenamedFlag)"
         )
 
+        // User Request: 如果没有关键标志，视为噪声，直接忽略
+        // FSEvents 标志: Removed=false, Created=false, Modified=false, Renamed=false 该文件不需要处理
+        if !hasRemovedFlag && !hasCreatedFlag && !hasModifiedFlag && !hasRenamedFlag {
+            AppLogger.syncPrint(
+                "[recordLocalChange] ⏭️ 跳过：无相关标志 (Removed/Created/Modified/Renamed 均为 false)")
+            return (nil, nil)
+        }
+
         // 逻辑判断：基于文件状态和已知路径列表确定变更类型
         // 1. 优先检查删除：如果文件不存在，且设置了 Removed 或 Renamed 标志
         // 注意：如果设置了 Renamed 标志且文件在已知路径中，可能是重命名操作，需要延迟判断
@@ -225,7 +233,21 @@ extension SyncManager {
             // 如果文件在已知路径中且设置了 Renamed 标志，可能是重命名操作
             // 但是，如果同时设置了 Removed 标志，这是明确的删除操作，不应该等待重命名
             // 只有在只有 Renamed 标志且没有 Removed 标志时，才可能等待重命名
-            if isKnownPath && hasRenamedFlag && !hasRemovedFlag {
+            // 优化：检查文件内容是否已在其他位置存在（例如快速重命名/移动完成）
+            // 如果存在，不需要等待重命名检测，直接视为删除旧文件
+            var hashExistsElsewhere = false
+            if isKnownPath, let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath],
+                let allMetadata = lastKnownMetadata[folder.syncID]
+            {
+                hashExistsElsewhere = allMetadata.contains { (path, meta) in
+                    return path != relativePath && meta.hash == knownMeta.hash
+                }
+            }
+
+            if hashExistsElsewhere {
+                AppLogger.syncPrint(
+                    "[recordLocalChange] 🚀 优化：文件内容已存在于其他路径，跳过重命名等待，直接执行删除: \(relativePath)")
+            } else if isKnownPath && hasRenamedFlag && !hasRemovedFlag {
                 if let knownMeta = lastKnownMetadata[folder.syncID]?[relativePath] {
                     // 检查是否有过期的重命名操作（可能已经超时，应该转换为删除）
                     let pendingKey = "\(folder.syncID):\(relativePath)"
@@ -422,7 +444,6 @@ extension SyncManager {
 
         // 首先检查是否有待处理的重命名操作（通过哈希值匹配）
         var matchedRename: String? = nil
-        var isOldPathOfRename: Bool = false  // 标记是否是重命名操作的旧路径
 
         // 如果文件不在已知路径中，需要检查是否是重命名操作的旧路径
         // 即使没有 Renamed 标志，也要检查（因为从远程同步回来的文件可能没有该标志）
@@ -477,7 +498,8 @@ extension SyncManager {
                 // 重要：如果文件不在已知路径中，且哈希值与某个 pendingRenames 中的旧路径匹配，
                 // 需要区分两种情况：
                 // 1. 如果文件设置了 Renamed 标志，说明这是重命名操作的新路径，应该记录为重命名
-                // 2. 如果文件没有设置 Renamed 标志，说明这是重命名操作的旧路径（可能从远程同步回来），应该跳过
+                // 2. 如果文件没有设置 Renamed 标志，默认记录为新建（可能是复制操作，也可能是重命名但在 FSEvents 中分成两步）
+                //    绝对不能跳过，否则会导致数据丢失（例如复制文件时，或者 Rename 事件丢失标志时）
                 if matchedRename == nil {
                     for (pendingKey, pendingInfo) in pendingRenames {
                         let keyParts = pendingKey.split(separator: ":", maxSplits: 1)
@@ -495,49 +517,19 @@ extension SyncManager {
                                     // 从待处理列表中移除
                                     pendingRenames.removeValue(forKey: pendingKey)
                                     break
-                                } else {
-                                    // 没有 Renamed 标志，说明这是重命名操作的旧路径，不应该被记录为新建
-                                    isOldPathOfRename = true
-                                    AppLogger.syncPrint(
-                                        "[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与 pendingRenames 匹配，但无 Renamed 标志），不应该被记录为新建: \(relativePath) (旧路径: \(oldPath))"
-                                    )
-                                    break
                                 }
+                                // 如果没有 Renamed 标志，不要假设它是 OldPath。它可能是一个新的 Copy。
+                                // 继续执行，将被记录为 Created
                             }
                         }
                     }
                 }
 
-                // 重要：如果文件不在已知路径中，且哈希值与某个已知文件（可能是重命名的新路径）的哈希值匹配，
-                // 说明这是重命名操作的旧路径文件（可能从远程同步回来），应该跳过，不记录为新建
-                // 注意：这个检查应该在 pendingRenames 检查之后，因为如果 pendingRenames 中有匹配，说明重命名操作正在进行中
-                // 但是，如果文件设置了 Renamed 标志，说明这是重命名操作的新路径，不应该跳过
-                if !isOldPathOfRename && !hasRenamedFlag {
-                    // 检查所有已知文件的哈希值（只有在没有 Renamed 标志时才检查，避免误判重命名操作的新路径）
-                    if let knownMetadata = lastKnownMetadata[folder.syncID] {
-                        for (knownPath, knownMeta) in knownMetadata {
-                            if knownMeta.hash == currentHash {
-                                // 哈希值匹配，说明这是重命名操作的旧路径（新路径已经在已知路径中）
-                                // 但需要确认这不是同一个文件（路径不同）
-                                if knownPath != relativePath {
-                                    isOldPathOfRename = true
-                                    AppLogger.syncPrint(
-                                        "[recordLocalChange] ⏭️ 跳过：这是重命名操作的旧路径文件（哈希值与已知文件匹配），不应该被记录为新建: \(relativePath) (新路径: \(knownPath))"
-                                    )
-                                    break
-                                }
-                            }
-                        }
-                    }
-                }
+                // 移除：不要基于已知元数据的哈希匹配来跳过文件。
+                // 即使哈希相同，只要路径不同且是新文件，就应该视为 Copy (Created)。
             } catch {
                 AppLogger.syncPrint("[recordLocalChange] ⚠️ 无法计算哈希值以检测重命名: \(error)")
             }
-        }
-
-        // 如果是重命名操作的旧路径，跳过处理
-        if isOldPathOfRename {
-            return (nil, nil)
         }
 
         if let oldPath = matchedRename {
@@ -549,10 +541,14 @@ extension SyncManager {
             // 明确设置了 Created 标志，记录为新建
             changeType = .created
             AppLogger.syncPrint("[recordLocalChange] ✅ 记录为新建：设置了 Created 标志")
+        } else if hasModifiedFlag {
+            // 明确设置了 Modified 标志，记录为修改
+            changeType = .modified
+            AppLogger.syncPrint("[recordLocalChange] ✅ 记录为修改：设置了 Modified 标志")
         } else {
-            // 没有明确的标志，但文件不在已知列表中，应该是新建（如复制文件）
-            changeType = .created
-            AppLogger.syncPrint("[recordLocalChange] ✅ 记录为新建：文件不在已知列表中且无明确标志（可能是复制文件）")
+            // 严格模式：如果没有 Renamed Match, Created, 或 Modified 标志，则忽略
+            // 之前的逻辑是 "只要不在已知列表就默认是新建"，这回造成误判。
+            return (nil, nil)
         }
 
         // 本地内容发生变化时，必须立即递增并持久化 VectorClock。

@@ -251,7 +251,15 @@ public class SyncManager: ObservableObject {
 
                     // 关键修复：当收到广播（包含 SyncID）时，如果连接已就绪，应尝试触发同步。
                     // 这解决了 "DataChannel 先连接但 SyncID 后到达" 的竞争条件。
-                    if !wasNew && self.p2pNode.webRTC.isDataChannelReady(for: peerIDString) {
+                    // 同时也解决了 "反向连接" (Incoming Connection) 场景：
+                    // 即对方主动连接我们 -> onPeerConnected (此时可能还未发现对方/无SyncID) -> Sync Skipped
+                    // -> 随后收到广播 (wasNew=true) -> 这里必须触发同步，不能因为 isNew 就跳过
+                    // Add debug log to diagnose sync trigger failure
+                    let isReady = self.p2pNode.webRTC.isDataChannelReady(for: peerIDString)
+                    AppLogger.syncPrint(
+                        "[SyncManager] 🔍 收到广播: \(peerIDString.prefix(8)), DataChannelReady: \(isReady), SyncID数: \(remoteSyncIDs.count)"
+                    )
+                    if isReady {
                         let remoteSyncIDSet = Set(remoteSyncIDs)
                         let matchingFolders = self.folders.filter { folder in
                             remoteSyncIDSet.contains(folder.syncID)

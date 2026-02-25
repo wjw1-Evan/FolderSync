@@ -4,7 +4,7 @@ import Network
 import WebRTC
 
 @MainActor
-public class P2PNode: NSObject {
+open class P2PNode: NSObject {
     private var lanDiscovery: LANDiscovery?
     @MainActor public let peerManager: PeerManager
     @MainActor public let registrationService: PeerRegistrationService
@@ -423,7 +423,7 @@ public class P2PNode: NSObject {
 
     // MARK: - Sending Data
 
-    public func sendRequest(
+    open func sendRequest(
         _ request: SyncRequest, to peerID: String, timeout: TimeInterval = 60.0
     ) async throws -> SyncResponse {
         // 确保连接已启动

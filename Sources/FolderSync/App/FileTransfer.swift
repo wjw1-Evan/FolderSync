@@ -17,13 +17,11 @@ class FileTransfer {
 
     /// 全量下载文件
     func downloadFileFull(
+        folder: SyncFolder,
         path: String,
         remoteMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        localMetadata: [String: FileMetadata]
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
+        peerID: String
+    ) async throws -> SyncLog.SyncedFileInfo {
         let syncManager = await MainActor.run { self.syncManager }
         guard let syncManager = syncManager else {
             throw NSError(
@@ -32,6 +30,13 @@ class FileTransfer {
         }
 
         let fileName = (path as NSString).lastPathComponent
+        let peer = syncManager.peerManager.getPeer(peerID)?.peerID
+        guard let peer = peer else {
+            throw NSError(
+                domain: "FileTransfer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Peer not found: \(peerID)"])
+        }
+
         let dataRes: SyncResponse = try await syncManager.sendSyncRequest(
             .getFileData(syncID: folder.syncID, path: path),
             to: peer,
@@ -105,7 +110,8 @@ class FileTransfer {
         try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
 
         // 合并 Vector Clock（使用 VectorClockManager）
-        let localVC = localMetadata[path]?.vectorClock
+        let localVC = VectorClockManager.getVectorClock(
+            folderID: folder.id, syncID: folder.syncID, path: path)
         let remoteVC = remoteMeta.vectorClock
         let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
         VectorClockManager.saveVectorClock(
@@ -116,15 +122,12 @@ class FileTransfer {
 
         syncManager.addDownloadBytes(Int64(data.count))
 
-        return (
-            Int64(data.count),
-            SyncLog.SyncedFileInfo(
-                path: path,
-                fileName: fileName,
-                folderName: folderName,
-                size: Int64(data.count),
-                operation: .download
-            )
+        return SyncLog.SyncedFileInfo(
+            path: path,
+            fileName: fileName,
+            folderName: folderName,
+            size: Int64(data.count),
+            operation: .download
         )
     }
 
@@ -179,18 +182,22 @@ class FileTransfer {
 
     /// 使用块级增量同步下载文件
     func downloadFileWithChunks(
+        folder: SyncFolder,
         path: String,
         remoteMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        localMetadata: [String: FileMetadata]
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let syncManager = await MainActor.run { self.syncManager }
+        peerID: String
+    ) async throws -> SyncLog.SyncedFileInfo {
         guard let syncManager = syncManager else {
             throw NSError(
                 domain: "FileTransfer", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Manager deallocated"])
+        }
+
+        let peer = syncManager.peerManager.getPeer(peerID)?.peerID
+        guard let peer = peer else {
+            throw NSError(
+                domain: "FileTransfer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Peer not found: \(peerID)"])
         }
 
         let fileName = (path as NSString).lastPathComponent
@@ -219,8 +226,11 @@ class FileTransfer {
                 AppLogger.syncPrint("[FileTransfer] ⚠️ 块级同步失败，回退到全量下载: \(path) - \(errorString)")
             }
             return try await downloadFileFull(
-                path: path, remoteMeta: remoteMeta, folder: folder, peer: peer, peerID: peerID,
-                localMetadata: localMetadata)
+                folder: folder,
+                path: path,
+                remoteMeta: remoteMeta,
+                peerID: peerID
+            )
         }
 
         // 2. 检查本地已有的块
@@ -330,7 +340,8 @@ class FileTransfer {
         try fileManager.setAttributes(attributes, ofItemAtPath: localURL.path)
 
         // 合并 Vector Clock（使用 VectorClockManager）
-        let localVC = localMetadata[path]?.vectorClock
+        let localVC = VectorClockManager.getVectorClock(
+            folderID: folder.id, syncID: folder.syncID, path: path)
         let remoteVC = remoteMeta.vectorClock
         let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
         VectorClockManager.saveVectorClock(
@@ -339,35 +350,36 @@ class FileTransfer {
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
-        return (
-            Int64(fileData.count),
-            SyncLog.SyncedFileInfo(
-                path: path,
-                fileName: fileName,
-                folderName: folderName,
-                size: Int64(fileData.count),
-                operation: .download
-            )
+        return SyncLog.SyncedFileInfo(
+            path: path,
+            fileName: fileName,
+            folderName: folderName,
+            size: Int64(fileData.count),
+            operation: .download
         )
     }
 
     /// 全量上传文件
     func uploadFileFull(
+        folder: SyncFolder,
         path: String,
         localMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        myPeerID: String,
-        remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?, String) -> Bool
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let syncManager = await MainActor.run { self.syncManager }
+        peerID: String
+    ) async throws -> SyncLog.SyncedFileInfo {
         guard let syncManager = syncManager else {
             throw NSError(
                 domain: "FileTransfer", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Manager deallocated"])
         }
+
+        let peer = syncManager.peerManager.getPeer(peerID)?.peerID
+        guard let peer = peer else {
+            throw NSError(
+                domain: "FileTransfer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Peer not found: \(peerID)"])
+        }
+
+        let myPeerID = syncManager.p2pNode.peerID?.b58String ?? ""
 
         let fileName = (path as NSString).lastPathComponent
         let fileURL = folder.localPath.appendingPathComponent(path)
@@ -399,13 +411,7 @@ class FileTransfer {
                 userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
         }
 
-        // 再次检查是否需要上传（可能在准备上传时文件已被同步）
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta, path) {
-            // 文件已同步，跳过上传
-            throw NSError(
-                domain: "FileTransfer", code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
-        }
+        // (Removed redundant shouldUpload check as SyncEngine handles planning)
 
         let data = try Data(contentsOf: fileURL)
 
@@ -451,35 +457,36 @@ class FileTransfer {
 
         syncManager.addUploadBytes(Int64(data.count))
 
-        return (
-            Int64(data.count),
-            SyncLog.SyncedFileInfo(
-                path: path,
-                fileName: fileName,
-                folderName: folderName,
-                size: Int64(data.count),
-                operation: .upload
-            )
+        return SyncLog.SyncedFileInfo(
+            path: path,
+            fileName: fileName,
+            folderName: folderName,
+            size: Int64(data.count),
+            operation: .upload
         )
     }
 
     /// 使用块级增量同步上传文件
     func uploadFileWithChunks(
+        folder: SyncFolder,
         path: String,
         localMeta: FileMetadata,
-        folder: SyncFolder,
-        peer: PeerID,
-        peerID: String,
-        myPeerID: String,
-        remoteEntries: [String: FileMetadata],
-        shouldUpload: (FileMetadata, FileMetadata?, String) -> Bool
-    ) async throws -> (Int64, SyncLog.SyncedFileInfo) {
-        let syncManager = await MainActor.run { self.syncManager }
+        peerID: String
+    ) async throws -> SyncLog.SyncedFileInfo {
         guard let syncManager = syncManager else {
             throw NSError(
                 domain: "FileTransfer", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: "Manager deallocated"])
         }
+
+        let peer = syncManager.peerManager.getPeer(peerID)?.peerID
+        guard let peer = peer else {
+            throw NSError(
+                domain: "FileTransfer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Peer not found: \(peerID)"])
+        }
+
+        let myPeerID = syncManager.p2pNode.peerID?.b58String ?? ""
 
         let fileName = (path as NSString).lastPathComponent
         let fileURL = folder.localPath.appendingPathComponent(path)
@@ -511,13 +518,7 @@ class FileTransfer {
                 userInfo: [NSLocalizedDescriptionKey: "文件无读取权限: \(path)"])
         }
 
-        // 再次检查是否需要上传
-        if let remoteMeta = remoteEntries[path], !shouldUpload(localMeta, remoteMeta, path) {
-            // 文件已同步，跳过上传
-            throw NSError(
-                domain: "FileTransfer", code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "文件已同步，跳过上传"])
-        }
+        // (Removed redundant shouldUpload check as SyncEngine handles planning)
 
         let chunks = try Self.sharedCDC.chunk(fileURL: fileURL)
         let chunkHashes = chunks.map { $0.hash }
@@ -632,14 +633,10 @@ class FileTransfer {
                         "[FileTransfer] ⚠️ 块级同步确认失败，回退到全量上传: \(path) - \(errorString)")
                 }
                 return try await uploadFileFull(
+                    folder: folder,
                     path: path,
                     localMeta: localMeta,
-                    folder: folder,
-                    peer: peer,
-                    peerID: peerID,
-                    myPeerID: myPeerID,
-                    remoteEntries: remoteEntries,
-                    shouldUpload: shouldUpload
+                    peerID: peerID
                 )
             }
             uploadSucceeded = true
@@ -657,14 +654,10 @@ class FileTransfer {
 
             AppLogger.syncPrint("[FileTransfer] ⚠️ 块级同步失败，回退到全量上传: \(path)")
             return try await uploadFileFull(
+                folder: folder,
                 path: path,
                 localMeta: localMeta,
-                folder: folder,
-                peer: peer,
-                peerID: peerID,
-                myPeerID: myPeerID,
-                remoteEntries: remoteEntries,
-                shouldUpload: shouldUpload
+                peerID: peerID
             )
         }
 
@@ -677,15 +670,12 @@ class FileTransfer {
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
-        return (
-            uploadedBytes,
-            SyncLog.SyncedFileInfo(
-                path: path,
-                fileName: fileName,
-                folderName: folderName,
-                size: Int64(chunks.reduce(0) { $0 + $1.data.count }),
-                operation: .upload
-            )
+        return SyncLog.SyncedFileInfo(
+            path: path,
+            fileName: fileName,
+            folderName: folderName,
+            size: Int64(chunks.reduce(0) { $0 + $1.data.count }),
+            operation: .upload
         )
     }
 

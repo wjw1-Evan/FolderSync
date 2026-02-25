@@ -22,6 +22,10 @@ public class StorageManager {
     private var vectorClocksDir: URL {
         appDir.appendingPathComponent("vector_clocks", isDirectory: true)
     }
+    // 获取指定 syncID 的统一 VC 存储文件
+    private func vectorClocksFile(syncID: String) -> URL {
+        return vectorClocksDir.appendingPathComponent("vcs_\(syncID).json")
+    }
     private var blocksDir: URL { appDir.appendingPathComponent("blocks", isDirectory: true) }  // 块存储目录
 
     // 内存缓存
@@ -30,6 +34,8 @@ public class StorageManager {
     private var syncLogsCache: [SyncLog]?
     private var localChangesCache: [LocalChange]?
     private var deletedRecordsCache: [String: Set<String>]?
+    // syncID -> [path: VectorClock]
+    private var vectorClocksCache: [String: [String: VectorClock]] = [:]
     private let cacheQueue = DispatchQueue(label: "com.foldersync.storage.cache")
     private var nextLogSequence: Int64 = 1
     private var nextLocalChangeSequence: Int64 = 1
@@ -213,99 +219,98 @@ public class StorageManager {
     // MARK: - 向量时钟管理
 
     public func getVectorClock(folderID: UUID, syncID: String, path: String) -> VectorClock? {
-        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
-        guard fileManager.fileExists(atPath: fileURL.path),
-            let data = try? Data(contentsOf: fileURL),
-            let vc = try? JSONDecoder().decode(VectorClock.self, from: data)
-        else {
+        return cacheQueue.sync {
+            // 首先尝试从缓存或统一文件中加载
+            if let vcs = loadVectorClocksLocked(syncID: syncID) {
+                if let vc = vcs[path] {
+                    return vc
+                }
+            }
+
+            // 兼容性：如果统一文件中没有，尝试加载旧的单个文件
+            let oldURL = oldVectorClockFile(folderID: folderID, syncID: syncID, path: path)
+            if fileManager.fileExists(atPath: oldURL.path),
+                let data = try? Data(contentsOf: oldURL),
+                let vc = try? JSONDecoder().decode(VectorClock.self, from: data)
+            {
+                return vc
+            }
             return nil
         }
-        return vc
     }
 
     public func setVectorClock(folderID: UUID, syncID: String, path: String, _ vc: VectorClock)
         throws
     {
-        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
-        let dir = fileURL.deletingLastPathComponent()
-
-        // 确保目录存在
-        if !fileManager.fileExists(atPath: dir.path) {
-            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        try cacheQueue.sync {
+            var vcs = loadVectorClocksLocked(syncID: syncID) ?? [:]
+            vcs[path] = vc
+            try saveVectorClocksLocked(syncID: syncID, vcs: vcs)
         }
-
-        let data = try JSONEncoder().encode(vc)
-        try data.write(to: fileURL, options: [.atomic])
     }
 
-    /// 批量保存 Vector Clock (并行写入)
+    /// 批量保存 Vector Clock
     public func setVectorClocks(folderID: UUID, syncID: String, updates: [String: VectorClock])
         async throws
     {
         if updates.isEmpty { return }
 
-        // 1. 确保目录存在（只检查一次）
-        // 这里假设同一个 syncID 下的所有 VC 都在同一个目录（或者少量几个子目录）
-        // vectorClockFile 实现显示它是基于 folderID/syncID/path 结构的
-        // 目前 vectorClockFile 的实现是将 path 扁平化为文件名，所以都在 syncID 目录下
-        let samplePath = updates.keys.first ?? "sample"
-        let sampleURL = vectorClockFile(folderID: folderID, syncID: syncID, path: samplePath)
-        let dir = sampleURL.deletingLastPathComponent()
-
-        if !fileManager.fileExists(atPath: dir.path) {
-            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-
-        // 2. 并行写入
-        // 使用 actor 来安全收集错误
-        actor ErrorCollector {
-            var errors: [Error] = []
-            func add(_ error: Error) { errors.append(error) }
-            func first() -> Error? { return errors.first }
-        }
-        let collector = ErrorCollector()
-
-        let encoder = JSONEncoder()
-
-        // 使用 withThrowingTaskGroup 因为我们想等待所有完成，但不一定要抛出第一个错误，
-        // 我们想尽可能保存更多，然后报告错误
-        await withTaskGroup(of: Void.self) { group in
+        try cacheQueue.sync {
+            var vcs = loadVectorClocksLocked(syncID: syncID) ?? [:]
             for (path, vc) in updates {
-                group.addTask {
-                    do {
-                        let fileURL = self.vectorClockFile(
-                            folderID: folderID, syncID: syncID, path: path)
-                        let data = try encoder.encode(vc)
-                        try data.write(to: fileURL, options: [.atomic])
-                    } catch {
-                        await collector.add(error)
-                        AppLogger.syncPrint(
-                            "[StorageManager] ⚠️ 批量保存 Vector Clock 失败: \(path), 错误: \(error)")
-                    }
-                }
+                vcs[path] = vc
             }
-        }
-
-        // 如果有错误，抛出第一个
-        if let firstError = await collector.first() {
-            throw firstError
+            try saveVectorClocksLocked(syncID: syncID, vcs: vcs)
         }
     }
 
-    public func deleteVectorClock(folderID: UUID, syncID: String, path: String) throws {
-        let fileURL = vectorClockFile(folderID: folderID, syncID: syncID, path: path)
-        try? fileManager.removeItem(at: fileURL)
+    private func loadVectorClocksLocked(syncID: String) -> [String: VectorClock]? {
+        if let cached = vectorClocksCache[syncID] {
+            return cached
+        }
+
+        let fileURL = vectorClocksFile(syncID: syncID)
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let vcs = try JSONDecoder().decode([String: VectorClock].self, from: data)
+            vectorClocksCache[syncID] = vcs
+            return vcs
+        } catch {
+            AppLogger.syncPrint("[StorageManager] ❌ 加载统一 Vector Clocks 失败 (\(syncID)): \(error)")
+            return nil
+        }
     }
 
-    private func vectorClockFile(folderID: UUID, syncID: String, path: String) -> URL {
-        // 将路径中的 / 替换为 _ 作为文件名
+    private func saveVectorClocksLocked(syncID: String, vcs: [String: VectorClock]) throws {
+        let fileURL = vectorClocksFile(syncID: syncID)
+        let data = try JSONEncoder().encode(vcs)
+        try data.write(to: fileURL, options: [.atomic])
+        vectorClocksCache[syncID] = vcs
+    }
+
+    private func oldVectorClockFile(folderID: UUID, syncID: String, path: String) -> URL {
         let safePath = path.replacingOccurrences(of: "/", with: "_").replacingOccurrences(
             of: "\\", with: "_")
-        // 以 folderID 作为命名空间，避免同一进程/同一用户下多个“设备”实例共享同一份 VC 数据
         let folderDir = vectorClocksDir.appendingPathComponent(
             folderID.uuidString, isDirectory: true)
         let syncDir = folderDir.appendingPathComponent(syncID, isDirectory: true)
         return syncDir.appendingPathComponent("\(safePath).json")
+    }
+
+    public func deleteVectorClock(folderID: UUID, syncID: String, path: String) throws {
+        try cacheQueue.sync {
+            var vcs = loadVectorClocksLocked(syncID: syncID) ?? [:]
+            vcs.removeValue(forKey: path)
+            try saveVectorClocksLocked(syncID: syncID, vcs: vcs)
+
+            // 同时尝试删除旧的文件（如果存在）
+            let oldURL = oldVectorClockFile(folderID: folderID, syncID: syncID, path: path)
+            try? fileManager.removeItem(at: oldURL)
+        }
     }
 
     // MARK: - 冲突文件管理

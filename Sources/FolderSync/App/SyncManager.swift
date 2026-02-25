@@ -21,7 +21,7 @@ public class SyncManager: ObservableObject {
     @Published var pendingDownloadHistory: [Double] = Array(repeating: 0, count: 60)
     @Published var pendingUploadCount: Int = 0
     @Published var pendingDownloadCount: Int = 0
-    let p2pNode = P2PNode()
+    internal(set) var p2pNode = P2PNode()
 
     // 使用统一的 Peer 管理器
     public var peerManager: PeerManager {

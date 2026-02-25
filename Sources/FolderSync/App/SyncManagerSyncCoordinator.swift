@@ -143,9 +143,25 @@ extension SyncManager {
                         folder.id, status: .synced, message: "等待发现对等点...", progress: 0.0)
                 }
             } else {
-                for peerInfo in registeredPeers {
-                    syncWithPeer(
-                        peer: peerInfo.peerID, folder: folder, precomputedState: precomputed)
+                // 限制并发同步的 peer 数量，避免瞬时 I/O 压力
+                let maxConcurrentPeers = 3
+                let peerBatches = stride(from: 0, to: registeredPeers.count, by: maxConcurrentPeers)
+                    .map {
+                        Array(
+                            registeredPeers[
+                                $0..<min($0 + maxConcurrentPeers, registeredPeers.count)])
+                    }
+
+                for batch in peerBatches {
+                    await withTaskGroup(of: Void.self) { group in
+                        for peerInfo in batch {
+                            group.addTask { @MainActor in
+                                self.syncWithPeer(
+                                    peer: peerInfo.peerID, folder: folder,
+                                    precomputedState: precomputed)
+                            }
+                        }
+                    }
                 }
 
                 // 定期检查同步状态，如果所有同步都完成但状态仍然是 .syncing，重置状态

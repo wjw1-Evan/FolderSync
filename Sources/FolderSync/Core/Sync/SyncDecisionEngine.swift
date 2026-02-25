@@ -57,29 +57,35 @@ class SyncDecisionEngine {
 
             switch comparison {
             case .successor, .equal:
-                // 删除记录的 VC 更新或相等，删除远程文件
+                // 删除记录的 VC 更新或相等，说明删除操作是在这个文件版本之后（或同时）发生的
+                // 除非文件 mtime 明显更新（可能存在 VC 丢失或手动覆盖），否则应该删除
+                let timeDiff = remoteMeta.mtime.timeIntervalSince(localDel.deletedAt)
+                if timeDiff > 0.5 {
+                    AppLogger.syncPrint(
+                        "[SyncDecisionEngine] 🔄 删除记录 VC 领先但远程文件 mtime 更新，视为冲突: 路径=\(path)")
+                    return .conflict
+                }
                 return .deleteRemote
             case .antecedent:
-                // 删除记录的 VC 更旧，但检查时间差
-                // 如果删除时间和文件修改时间很接近（1秒内），可能是并发操作，视为冲突
+                // 删除记录的 VC 更旧，说明文件是在删除知识的基础上更新的（复活）
+                // 只有当时间极度接近（可能是时钟漂移导致的伪因果）时才报冲突
                 let timeDiff = abs(remoteMeta.mtime.timeIntervalSince(localDel.deletedAt))
-                if timeDiff < 1.0 {
+                if timeDiff < 0.2 {
                     AppLogger.syncPrint(
-                        "[SyncDecisionEngine] ⚠️ 删除和修改时间接近（\(String(format: "%.2f", timeDiff))秒），视为并发冲突: 路径=\(path)"
+                        "[SyncDecisionEngine] ⚠️ 删除和修改时间极度接近（\(String(format: "%.3f", timeDiff))秒），视为并发冲突: 路径=\(path)"
                     )
                     return .conflict
                 }
-                // 删除记录的 VC 更旧且时间差较大，下载远程文件（删除被覆盖）
                 return .download
             case .concurrent:
                 // 并发冲突：如果远程文件明显比删除记录新，视为远程复活/新建，应该下载
                 let timeDiff = remoteMeta.mtime.timeIntervalSince(localDel.deletedAt)
-                if timeDiff > 1.0 {
+                if timeDiff > 0.5 {
                     AppLogger.syncPrint(
-                        "[SyncDecisionEngine] 🔄 删除记录并发但远程文件更新（复活）: 路径=\(path), diff=\(timeDiff)s")
+                        "[SyncDecisionEngine] 🔄 删除记录并发且远程文件较新，自动选择下载（复活）: 路径=\(path), diff=\(timeDiff)s"
+                    )
                     return .download
                 }
-                // 否则保守处理：保持删除，但记录冲突
                 return .conflict
             }
         }
@@ -95,51 +101,46 @@ class SyncDecisionEngine {
 
             // 如果有 Vector Clock，使用标准比较逻辑
             if let localVC = localMeta.vectorClock {
-                // 比较删除记录的 Vector Clock 和文件元数据的 Vector Clock
                 let comparison = remoteDel.vectorClock.compare(to: localVC)
 
                 switch comparison {
                 case .successor:
-                    // 删除记录的 VC 更新，删除本地文件
-                    return .deleteLocal
-                case .antecedent:
-                    // 删除记录的 VC 更旧，但检查时间差
-                    // 如果删除时间和文件修改时间很接近（1秒内），可能是并发操作，视为冲突
-                    let timeDiff = abs(localMeta.mtime.timeIntervalSince(remoteDel.deletedAt))
-                    if timeDiff < 1.0 {
+                    // 远程删除记录领先，删除本地文件
+                    // 同样检查 mtime 异常
+                    let timeDiff = localMeta.mtime.timeIntervalSince(remoteDel.deletedAt)
+                    if timeDiff > 0.5 {
                         AppLogger.syncPrint(
-                            "[SyncDecisionEngine] ⚠️ 删除和修改时间接近（\(String(format: "%.2f", timeDiff))秒），视为并发冲突: 路径=\(path)"
-                        )
+                            "[SyncDecisionEngine] 🔄 远端删除领先但本地文件 mtime 更新，视为冲突: 路径=\(path)")
                         return .conflict
                     }
-                    // 删除记录的 VC 更旧且时间差较大，说明本地文件是在远程删除之后重新创建或更新的
-                    // 这种情况下，本地版本应该覆盖远程的删除状态（复活文件）
-                    AppLogger.syncPrint("[SyncDecisionEngine] 🔄 删除记录的 VC 更旧，本地文件获胜（复活）: 路径=\(path)")
+                    return .deleteLocal
+                case .antecedent:
+                    // 远程删除记录落后，说明本地是复活/更新
+                    let timeDiff = abs(localMeta.mtime.timeIntervalSince(remoteDel.deletedAt))
+                    if timeDiff < 0.2 {
+                        AppLogger.syncPrint("[SyncDecisionEngine] ⚠️ 删除和修改时间极度接近，视为冲突: 路径=\(path)")
+                        return .conflict
+                    }
+                    AppLogger.syncPrint("[SyncDecisionEngine] 🔄 远端删除记录过时，本地文件获胜（复活）: 路径=\(path)")
                     return .upload
                 case .equal:
-                    // 如果 VC 相等，通常意味着本地文件的状态与产生删除记录的状态一致（即本地文件就是那个被删除的文件版本）
-                    // 但是，如果存在竞态条件（如本地刚恢复但VC还没更新），或者版本号碰撞，我们需要防止误删
-                    // 使用 mtime 启发式判断：如果本地文件明显比删除记录新，视为复活
+                    // VC 相等：使用更小的 epsilon
                     let timeDiff = localMeta.mtime.timeIntervalSince(remoteDel.deletedAt)
-                    if timeDiff > 1.0 {
+                    if timeDiff > 0.2 {
                         AppLogger.syncPrint(
                             "[SyncDecisionEngine] 🔄 删除记录 VC 相等但本地文件更新（复活）: 路径=\(path), diff=\(timeDiff)s"
                         )
                         return .upload
                     }
-                    // 否则，认为是已被确认的删除
                     return .deleteLocal
                 case .concurrent:
-                    // 并发冲突，通常意味着双方都进行了操作
-                    // 如果本地文件明显比删除记录新，倾向于认为是恢复/新建操作
                     let timeDiff = localMeta.mtime.timeIntervalSince(remoteDel.deletedAt)
-                    if timeDiff > 1.0 {
+                    if timeDiff > 0.5 {
                         AppLogger.syncPrint(
                             "[SyncDecisionEngine] 🔄 存在并发删除记录，但本地文件更新（复活）: 路径=\(path), diff=\(timeDiff)s"
                         )
                         return .upload
                     }
-                    // 否则保守处理：记录冲突（SyncEngine 会处理，如果不处理则保留本地文件）
                     return .conflict
                 }
             } else {

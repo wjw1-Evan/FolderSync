@@ -471,6 +471,11 @@ class FolderStatistics {
                     metadata[path] = meta
                     mst.insert(key: path, value: meta.hash)
                     totalSize += size
+
+                    processedCount += 1
+                    if processedCount % indexingBatchSize == 0 {
+                        await Task.yield()
+                    }
                 }
             }
         }

@@ -1,0 +1,47 @@
+Building for debugging...
+[0/4] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.18s)
+Test Suite 'Selected tests' started at 2026-02-25 19:30:46.728.
+Test Suite 'FolderSyncPackageTests.xctest' started at 2026-02-25 19:30:46.730.
+Test Suite 'SyncDecisionEngineTests' started at 2026-02-25 19:30:46.730.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testConcurrent_MtimeSelective]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testConcurrent_MtimeSelective]' passed (0.004 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testConcurrentModification_Conflict]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testConcurrentModification_Conflict]' passed (0.000 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDelete_ExplicitRemoteRevival]' started.
+/Users/mac/Projects/FolderSync/Tests/FolderSyncTests/SyncDecisionEngineTests.swift:356: error: -[FolderSyncTests.SyncDecisionEngineTests testDelete_ExplicitRemoteRevival] : XCTAssertEqual failed: ("conflict") is not equal to ("download")
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDelete_ExplicitRemoteRevival]' failed (0.035 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDeletedStateStore_Integration]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDeletedStateStore_Integration]' passed (0.104 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDeleteModify_SmallTimeDiff_Conflict]' started.
+/Users/mac/Projects/FolderSync/Tests/FolderSyncTests/SyncDecisionEngineTests.swift:332: error: -[FolderSyncTests.SyncDecisionEngineTests testDeleteModify_SmallTimeDiff_Conflict] : XCTAssertEqual failed: ("deleteRemote") is not equal to ("conflict")
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testDeleteModify_SmallTimeDiff_Conflict]' failed (0.001 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileCreation_NewFileUncertain]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileCreation_NewFileUncertain]' passed (0.106 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileDeletion_DeleteRemote]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileDeletion_DeleteRemote]' passed (0.207 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileModification_HashChange_TriggersSync]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileModification_HashChange_TriggersSync]' passed (0.102 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileRename_NewPathSynced]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileRename_NewPathSynced]' passed (0.105 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileRename_OldPathDeleted]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testFileRename_OldPathDeleted]' passed (0.204 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testRemoteDeletion_DeleteLocal]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testRemoteDeletion_DeleteLocal]' passed (0.105 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testRemoteFileExists_LocalNotExists_Download]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testRemoteFileExists_LocalNotExists_Download]' passed (0.001 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testSameContent_Skip]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testSameContent_Skip]' passed (0.110 seconds).
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testStateStore_Integration]' started.
+Test Case '-[FolderSyncTests.SyncDecisionEngineTests testStateStore_Integration]' passed (0.108 seconds).
+Test Suite 'SyncDecisionEngineTests' failed at 2026-02-25 19:30:47.923.
+	 Executed 14 tests, with 2 failures (0 unexpected) in 1.192 (1.193) seconds
+Test Suite 'FolderSyncPackageTests.xctest' failed at 2026-02-25 19:30:47.923.
+	 Executed 14 tests, with 2 failures (0 unexpected) in 1.192 (1.193) seconds
+Test Suite 'Selected tests' failed at 2026-02-25 19:30:47.923.
+	 Executed 14 tests, with 2 failures (0 unexpected) in 1.192 (1.195) seconds
+[SyncDecisionEngine] 🔄 删除记录 VC 领先但远程文件 mtime 更新，视为冲突: 路径=resurrection.txt
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

@@ -305,4 +305,101 @@ final class SyncDecisionEngineTests: XCTestCase {
 
         XCTAssertEqual(result, .deleteRemote)
     }
+
+    // MARK: - Refined Heuristics Tests
+
+    /// 测试删除和修改在逻辑上有先后顺序，但物理时间较小时（信任 VC）
+    func testDeleteModify_SmallTimeDiff_HonorVC() async throws {
+        let deleteVC = VectorClock.makeTest([testPeerID: 2])
+        let deletionRecord = DeletionRecord.makeTest(
+            deletedAt: Date(), deletedBy: testPeerID, vectorClock: deleteVC)
+
+        // 远程修改时间非常接近删除时间 (比如 0.1s)
+        let remoteVC = VectorClock.makeTest([testPeerID: 1])
+        let remoteMeta = FileMetadata.makeTest(
+            hash: "modified",
+            mtime: deletionRecord.deletedAt.addingTimeInterval(0.1),
+            vectorClock: remoteVC
+        )
+
+        let result = SyncDecisionEngine.decideSyncAction(
+            localState: .deleted(deletionRecord),
+            remoteState: .exists(remoteMeta),
+            path: "near_simultaneous.txt"
+        )
+
+        // 虽然时间接近，但 deleteVC (2) 明确领先于 remoteVC (1)
+        // 表明删除者已经见过了这个修改，因此应该执行删除
+        XCTAssertEqual(result, SyncDecisionEngine.SyncAction.deleteRemote)
+    }
+
+    /// 测试删除被明确的远程更新覆盖（复活）
+    func testDelete_ExplicitRemoteRevival() async throws {
+        let deleteVC = VectorClock.makeTest([testPeerID: 2])
+        let deletionRecord = DeletionRecord.makeTest(
+            deletedAt: Date(), deletedBy: testPeerID, vectorClock: deleteVC)
+
+        // 远程修改 VC 领先于删除 VC (3 > 2)
+        let remoteVC = VectorClock.makeTest([testPeerID: 3])
+        let remoteMeta = FileMetadata.makeTest(
+            hash: "resurrected",
+            mtime: deletionRecord.deletedAt.addingTimeInterval(1.0),
+            vectorClock: remoteVC
+        )
+
+        let result = SyncDecisionEngine.decideSyncAction(
+            localState: .deleted(deletionRecord),
+            remoteState: .exists(remoteMeta),
+            path: "resurrection.txt"
+        )
+
+        // 远程 VC 领先，说明是在已知删除的情况下重新创建的，应该下载
+        XCTAssertEqual(result, SyncDecisionEngine.SyncAction.download)
+    }
+
+    /// 测试当 VC 领先但 mtime 异常（冲突安全网）
+    func testDelete_VCMtimeContradiction_Conflict() async throws {
+        let deleteVC = VectorClock.makeTest([testPeerID: 2])
+        let deletionRecord = DeletionRecord.makeTest(
+            deletedAt: Date(), deletedBy: testPeerID, vectorClock: deleteVC)
+
+        // 远程 VC 落后 (1 < 2)，但 mtime 却晚了 1 秒
+        let remoteVC = VectorClock.makeTest([testPeerID: 1])
+        let remoteMeta = FileMetadata.makeTest(
+            hash: "suspicious",
+            mtime: deletionRecord.deletedAt.addingTimeInterval(1.0),
+            vectorClock: remoteVC
+        )
+
+        let result = SyncDecisionEngine.decideSyncAction(
+            localState: .deleted(deletionRecord),
+            remoteState: .exists(remoteMeta),
+            path: "contradiction.txt"
+        )
+
+        // 因果与时间矛盾，视为冲突
+        XCTAssertEqual(result, SyncDecisionEngine.SyncAction.conflict)
+    }
+
+    /// 测试并发修改
+    func testConcurrent_MtimeSelective() async throws {
+        let localVC = VectorClock.makeTest([testPeerID: 2, "remote": 1])
+        let remoteVC = VectorClock.makeTest([testPeerID: 1, "remote": 2])
+
+        let now = Date()
+        let localMeta = FileMetadata.makeTest(hash: "v1", mtime: now, vectorClock: localVC)
+        let remoteMeta = FileMetadata.makeTest(
+            hash: "v2",
+            mtime: now.addingTimeInterval(2.0),
+            vectorClock: remoteVC
+        )
+
+        let result = SyncDecisionEngine.decideSyncAction(
+            localState: .exists(localMeta),
+            remoteState: .exists(remoteMeta),
+            path: "concurrent_mtime.txt"
+        )
+
+        XCTAssertEqual(result, SyncDecisionEngine.SyncAction.conflict)
+    }
 }

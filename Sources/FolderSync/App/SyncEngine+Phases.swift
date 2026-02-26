@@ -186,6 +186,21 @@ extension SyncEngine {
         let total = paths.count
         var completed = 0
 
+        // 1. 统计并设置初始待处理计数
+        let initialUploads = session.actions.values.filter { $0 == .upload }.count
+        let initialDownloads = session.actions.values.filter { $0 == .download }.count
+
+        if initialUploads > 0 {
+            await MainActor.run {
+                self.syncManager?.addPendingTransfers(initialUploads, direction: .upload)
+            }
+        }
+        if initialDownloads > 0 {
+            await MainActor.run {
+                self.syncManager?.addPendingTransfers(initialDownloads, direction: .download)
+            }
+        }
+
         // 分批处理以控制并发
         let batchSize = 8
         for i in stride(from: 0, to: total, by: batchSize) {
@@ -204,8 +219,18 @@ extension SyncEngine {
                     }
                 }
 
-                for await (_, info) in group {
+                for await (path, info) in group {
                     completed += 1
+
+                    // 2. 根据操作结果更新待处理计数
+                    let action = session.actions[path]!
+                    if action == .upload || action == .download {
+                        let direction: SyncLog.Direction = (action == .upload ? .upload : .download)
+                        await MainActor.run {
+                            self.syncManager?.completePendingTransfers(1, direction: direction)
+                        }
+                    }
+
                     if let syncedInfo = info {
                         session.filesSynced.append(syncedInfo)
                         session.bytesTransferred += syncedInfo.size
@@ -225,6 +250,11 @@ extension SyncEngine {
     /// 完成阶段：保存快照、发送通知并记录日志
     func finalizationPhase(session: SyncSession) async {
         guard let syncManager = syncManager else { return }
+
+        // 0. 重置待处理计数（兜底）
+        await MainActor.run {
+            syncManager.resetPendingTransfers(direction: .bidirectional)
+        }
 
         // 1. 保存当前元数据缓存（用于下次重命名检测）
         if let metadata = session.localMetadata {
@@ -267,6 +297,13 @@ extension SyncEngine {
         AppLogger.syncPrint(
             "[SyncEngine] ✅ 同步完成: \(session.syncID), 传输: \(session.bytesTransferred) bytes, 文件: \(session.filesSynced.count)"
         )
+
+        // 5. 触发统计更新（异步）
+        if let folderStatistics = folderStatistics {
+            Task {
+                folderStatistics.refreshFileCount(for: session.folder)
+            }
+        }
     }
 }
 

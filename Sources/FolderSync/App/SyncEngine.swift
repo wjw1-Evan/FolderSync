@@ -240,6 +240,9 @@ class SyncEngine {
 
         AppLogger.syncPrint("[SyncEngine] ❌ 同步失败: \(session.syncID) - \(errorString)")
 
+        // 0. 重置待处理计数（错误兜底）
+        syncManager.resetPendingTransfers(direction: .bidirectional)
+
         syncManager.updateFolderStatus(
             session.folderID,
             status: .error,

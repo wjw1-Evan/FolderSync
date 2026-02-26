@@ -8,6 +8,7 @@ extension SyncManager {
         for folder: SyncFolder, absolutePath: String, flags: FSEventStreamEventFlags,
         precomputedHash: String? = nil, saveToDisk: Bool = true
     ) async -> (LocalChange?, VectorClock?) {
+        var updatedVC: VectorClock?
         // macOS 上 `/var` 是 `/private/var` 的符号链接，FSEvents 可能返回不同前缀。
         // 这里统一做路径规范化，避免出现类似 "private/xxx" 的错误相对路径，进而导致同步找不到文件。
         let basePath = folder.localPath.resolvingSymlinksInPath().standardizedFileURL.path
@@ -19,6 +20,8 @@ extension SyncManager {
 
         var relativePath = String(canonicalAbsolutePath.dropFirst(basePath.count))
         if relativePath.hasPrefix("/") { relativePath.removeFirst() }
+        // 统一规范化为 NFC 格式，确保中文文件名在各个系统和事件中匹配一致
+        relativePath = relativePath.precomposedStringWithCanonicalMapping
         if relativePath.isEmpty { relativePath = "." }
 
         // 有任何文件变更，立即使该文件夹的状态缓存失效
@@ -124,10 +127,14 @@ extension SyncManager {
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: expiredPath)
                 AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(expiredPath)")
 
-                Task.detached {
-                    try? StorageManager.shared.addLocalChange(change)
-                    AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录（从过期重命名转换）: \(expiredPath)")
+                if saveToDisk {
+                    Task.detached {
+                        try? StorageManager.shared.addLocalChange(change)
+                        AppLogger.syncPrint(
+                            "[recordLocalChange] 💾 已保存删除记录（从过期重命名转换）: \(expiredPath)")
+                    }
                 }
+                return (change, nil)
             }
         }
 
@@ -288,19 +295,17 @@ extension SyncManager {
             // 如果新文件出现且哈希值匹配，则记录为重命名；否则记录为删除
             if !isKnownPath && hasRenamedFlag && !hasRemovedFlag {
                 // 文件不在已知路径中，但设置了 Renamed 标志，可能是重命名操作的旧路径
-                // 这种情况下，不应该立即记录为删除，而应该等待新文件出现
-                // 但是，由于文件不在已知路径中，我们无法获取其哈希值
-                // 所以，这种情况下，应该跳过，不记录任何操作
-                // 如果新文件出现，会在新文件的处理逻辑中检测重命名
+                // 或者是一个刚创建就被移动到废纸篓的文件。
+                // 如果我们在这里跳过，而该文件又没有被 tracking，则会导致删除事件丢失。
                 AppLogger.syncPrint(
-                    "[recordLocalChange] ⏭️ 跳过：文件不在已知路径中但设置了 Renamed 标志，等待新文件出现以检测重命名: \(relativePath)"
+                    "[recordLocalChange] ⚠️ 文件不在已知路径中但有 Renamed 标志，记录为明确删除以确保安全: \(relativePath)"
                 )
-                return (nil, nil)
+                // 不再跳过，而是继续向下执行，让它进入 [isKnownPath || hasRemovedFlag] 的判断（此时 isKnownPath 为 false，但由于后面会判定为删除，所以安全）
             }
 
-            // 如果文件在已知路径列表中，或者设置了 Removed 标志，记录为删除
-            // 注意：如果只设置了 Renamed 标志但文件不在已知路径中，不应该记录为删除（已在上面处理）
-            if isKnownPath || hasRemovedFlag {
+            // 如果文件在已知路径列表中，或者设置了 Removed 或 Renamed 标志，记录为删除
+            // (注意：之前的 Renamed 标志在未知路径下会被跳过，现在已通过上方的逻辑允许进入此处)
+            if isKnownPath || hasRemovedFlag || hasRenamedFlag {  // Added hasRenamedFlag to deletion condition
                 AppLogger.syncPrint(
                     "[recordLocalChange] ✅ 记录为删除: isKnownPath=\(isKnownPath), hasRemovedFlag=\(hasRemovedFlag), hasRenamedFlag=\(hasRenamedFlag)"
                 )
@@ -328,10 +333,13 @@ extension SyncManager {
                 lastKnownMetadata[folder.syncID]?.removeValue(forKey: relativePath)
                 AppLogger.syncPrint("[recordLocalChange] 🔄 已从已知路径和元数据中移除: \(relativePath)")
 
-                Task.detached {
-                    try? StorageManager.shared.addLocalChange(change)
-                    AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录: \(relativePath)")
+                if saveToDisk {
+                    Task.detached {
+                        try? StorageManager.shared.addLocalChange(change)
+                        AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录: \(relativePath)")
+                    }
                 }
+                return (change, saveToDisk ? nil : updatedVC)
             } else {
                 AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：文件不存在但不在已知列表中，且无 Removed/Renamed 标志")
             }
@@ -392,11 +400,14 @@ extension SyncManager {
                             timestamp: Date(),
                             sequence: nil
                         )
-                        Task.detached {
-                            try? StorageManager.shared.addLocalChange(change)
-                            AppLogger.syncPrint("[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                        if saveToDisk {
+                            Task.detached {
+                                try? StorageManager.shared.addLocalChange(change)
+                                AppLogger.syncPrint(
+                                    "[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                            }
                         }
-                        return (nil, nil)
+                        return (change, saveToDisk ? nil : updatedVC)
                     }
                 } catch {
                     AppLogger.syncPrint("[recordLocalChange] ⚠️ 无法计算哈希值: \(error)")
@@ -412,10 +423,14 @@ extension SyncManager {
                             timestamp: Date(),
                             sequence: nil
                         )
-                        Task.detached {
-                            try? StorageManager.shared.addLocalChange(change)
-                            AppLogger.syncPrint("[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                        if saveToDisk {
+                            Task.detached {
+                                try? StorageManager.shared.addLocalChange(change)
+                                AppLogger.syncPrint(
+                                    "[recordLocalChange] 💾 已保存修改记录: \(relativePath)")
+                            }
                         }
+                        return (change, saveToDisk ? nil : updatedVC)
                     } else {
                         AppLogger.syncPrint("[recordLocalChange] ⏭️ 跳过：无法计算哈希且无 Modified 标志")
                     }
@@ -553,7 +568,6 @@ extension SyncManager {
 
         // 本地内容发生变化时，必须立即递增并持久化 VectorClock。
         // 否则在“内容已变但 VC 仍旧值”的窗口期，会出现 VC 相等但哈希不同，从而被误判为冲突。
-        var updatedVC: VectorClock?
         if let myPeerID = p2pNode.peerID?.b58String, !myPeerID.isEmpty {
             if changeType == .renamed, let oldPath = matchedRename {
                 _ = VectorClockManager.migrateVectorClock(
@@ -873,6 +887,7 @@ extension SyncManager {
                 AppLogger.syncPrint("[recordLocalChange] 💾 已保存删除记录（重命名超时兜底）: \(relativePath)")
             }
 
+            self.refreshFileCount(for: folder, changedPaths: [relativePath])
             self.pendingRenames.removeValue(forKey: pendingKey)
         }
     }

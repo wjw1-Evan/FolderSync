@@ -186,8 +186,9 @@ class FolderStatistics {
         let url = folder.localPath.resolvingSymlinksInPath().standardizedFileURL
 
         // 2. 处理每个变更路径
-        for relativePath in changedPaths {
-            if relativePath.isEmpty { continue }
+        for rawPath in changedPaths {
+            if rawPath.isEmpty { continue }
+            let relativePath = rawPath.precomposedStringWithCanonicalMapping
             if syncManager.isIgnored(relativePath, folder: folder) { continue }
 
             let fileURL = url.appendingPathComponent(relativePath)
@@ -329,6 +330,9 @@ class FolderStatistics {
                 guard canonicalFileURL.path.hasPrefix(basePath) else { continue }
                 var relativePath = String(canonicalFileURL.path.dropFirst(basePath.count))
                 if relativePath.hasPrefix("/") { relativePath.removeFirst() }
+
+                // 统一规范化为 NFC 格式
+                relativePath = relativePath.precomposedStringWithCanonicalMapping
 
                 if relativePath.isEmpty { continue }
 

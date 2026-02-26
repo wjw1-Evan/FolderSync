@@ -117,6 +117,17 @@ class FileTransfer {
         VectorClockManager.saveVectorClock(
             folderID: folder.id, syncID: folder.syncID, path: path, vc: mergedVC)
 
+        // 立即更新最后已知状态，确保本地变更记录器能识别该文件
+        syncManager.updateLastKnownState(
+            syncID: folder.syncID, path: path,
+            metadata: FileMetadata(
+                hash: (try? await syncManager.computeFileHash(fileURL: localURL)) ?? "",
+                mtime: remoteMeta.mtime,
+                size: Int64(data.count),
+                creationDate: remoteMeta.creationDate,
+                vectorClock: mergedVC
+            ))
+
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent
 
@@ -346,6 +357,17 @@ class FileTransfer {
         let mergedVC = VectorClockManager.mergeVectorClocks(localVC: localVC, remoteVC: remoteVC)
         VectorClockManager.saveVectorClock(
             folderID: folder.id, syncID: folder.syncID, path: path, vc: mergedVC)
+
+        // 立即更新最后已知状态，确保本地变更记录器能识别该文件
+        syncManager.updateLastKnownState(
+            syncID: folder.syncID, path: path,
+            metadata: FileMetadata(
+                hash: (try? await syncManager.computeFileHash(fileURL: localURL)) ?? "",
+                mtime: remoteMeta.mtime,
+                size: Int64(fileData.count),
+                creationDate: remoteMeta.creationDate,
+                vectorClock: mergedVC
+            ))
 
         let pathDir = (path as NSString).deletingLastPathComponent
         let folderName = pathDir.isEmpty ? nil : (pathDir as NSString).lastPathComponent

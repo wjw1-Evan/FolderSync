@@ -21,7 +21,7 @@ public class SyncManager: ObservableObject {
     @Published var pendingDownloadHistory: [Double] = Array(repeating: 0, count: 60)
     @Published var pendingUploadCount: Int = 0
     @Published var pendingDownloadCount: Int = 0
-    internal(set) var p2pNode = P2PNode()
+    var p2pNode = P2PNode()
 
     // 使用统一的 Peer 管理器
     public var peerManager: PeerManager {
@@ -461,6 +461,22 @@ public class SyncManager: ObservableObject {
                 "[SyncManager] 🔄 Menu Bar Animation State: \(isSyncing ? "ON" : "OFF") (folder=\(hasSyncingFolder), pending=\(hasPendingTransfers))"
             )
         }
+    }
+
+    /// 立即更新某个文件的“最后已知”状态，通常在同步下载落地后调用，
+    /// 确保本地变更记录器能够识别并正确处理后续的本地事件。
+    func updateLastKnownState(syncID: String, path: String, metadata: FileMetadata) {
+        let normalizedPath = path.precomposedStringWithCanonicalMapping
+        if lastKnownLocalPaths[syncID] == nil {
+            lastKnownLocalPaths[syncID] = Set<String>()
+        }
+        lastKnownLocalPaths[syncID]?.insert(normalizedPath)
+
+        if lastKnownMetadata[syncID] == nil {
+            lastKnownMetadata[syncID] = [:]
+        }
+        lastKnownMetadata[syncID]?[normalizedPath] = metadata
+        AppLogger.syncPrint("[SyncManager] 🔄 已立即更新最后已知状态: \(normalizedPath)")
     }
 }
 

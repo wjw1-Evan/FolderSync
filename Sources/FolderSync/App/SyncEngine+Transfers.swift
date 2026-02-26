@@ -130,7 +130,7 @@ extension SyncEngine {
     private func downloadConflictFile(path: String, session: SyncSession) async -> SyncLog
         .SyncedFileInfo?
     {
-        guard let syncManager = syncManager, let remoteMeta = session.remoteStates[path]?.metadata
+        guard let syncManager = syncManager, session.remoteStates[path]?.metadata != nil
         else { return nil }
 
         let fileName = (path as NSString).lastPathComponent

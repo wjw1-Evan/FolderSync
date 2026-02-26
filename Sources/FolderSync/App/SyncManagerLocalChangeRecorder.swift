@@ -201,7 +201,7 @@ extension SyncManager {
                 AppLogger.syncPrint("[recordLocalChange] ⚠️ 哈希计算失败: \(error)")
             }
 
-            if let oldPath = matchedRenameOldPath {
+            if matchedRenameOldPath != nil {
                 changeType = .renamed
             } else if hasCreatedFlag {
                 changeType = .created
